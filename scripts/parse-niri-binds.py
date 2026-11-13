@@ -347,6 +347,7 @@ QS_NAMES = {
     "power toggle": "Power Menu",
     "clipboard toggle": "Clipboard History",
     "emoji toggle": "Emoji Picker",
+    "colorpicker toggle": "Color Picker",
     "keybinds toggle": "Keybind Viewer",
     "settings toggle": "Settings",
     "lock lock": "Lock Screen",

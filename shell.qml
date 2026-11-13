@@ -65,6 +65,10 @@ ShellRoot {
         id: emojiPicker
     }
 
+    Modules.ColorPicker {
+        id: colorPicker
+    }
+
     Modules.PowerMenu {
         id: powerMenu
         onRequestLock: lockscreen.lock()
@@ -261,6 +265,14 @@ ShellRoot {
     }
 
     IpcHandler {
+        target: "colorpicker"
+        function toggle(): void { colorPicker.toggle() }
+        function open(): void { colorPicker.show() }
+        function close(): void { colorPicker.hide() }
+        function pick(): void { colorPicker.pickColor() }
+    }
+
+    IpcHandler {
         target: "power"
         function toggle(): void { powerMenu.toggle() }
         function open(): void { powerMenu.show() }
@@ -437,6 +449,12 @@ Available Targets and Methods:
     toggle()  - Toggle the clipboard manager
     open()    - Open the clipboard manager
     close()   - Close the clipboard manager
+
+  colorpicker
+    toggle()  - Toggle the color picker
+    open()    - Open the color picker
+    close()   - Close the color picker
+    pick()    - Pick current color and copy to clipboard
 
   power
     toggle()  - Toggle the power menu

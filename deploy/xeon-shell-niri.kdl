@@ -31,6 +31,7 @@ binds {
     Mod+Alt+W         hotkey-overlay-title="Wallpaper Picker"    { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "wallpaper" "toggle"; }
     Mod+Alt+V         hotkey-overlay-title="Clipboard History"   { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "clipboard" "toggle"; }
     Mod+Alt+E         hotkey-overlay-title="Emoji Picker"        { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "emoji"     "toggle"; }
+    Mod+Alt+C         hotkey-overlay-title="Color Picker"        { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "colorpicker" "toggle"; }
     Mod+Alt+N         hotkey-overlay-title="Notification Center" { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "notif"     "toggle"; }
     Mod+Alt+Comma     hotkey-overlay-title="Settings"            { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "settings"  "toggle"; }
     Mod+Alt+P         hotkey-overlay-title="Power Menu"          { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "power"     "toggle"; }
