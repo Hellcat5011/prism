@@ -59,6 +59,13 @@ Item {
     property alias blurStrength: settings.blurStrength
     property alias matugenScheme: settings.matugenScheme
     property alias matugenMode: settings.matugenMode
+    property alias searchEnableApps: settings.searchEnableApps
+    property alias searchEnableFolders: settings.searchEnableFolders
+    property alias searchEnableFiles: settings.searchEnableFiles
+    property alias searchMaxFileResults: settings.searchMaxFileResults
+    property alias searchMaxFolderResults: settings.searchMaxFolderResults
+    property alias searchIncludeHidden: settings.searchIncludeHidden
+    property alias searchSectionOrder: settings.searchSectionOrder
 
     // Draft values — the Settings UI edits these. They do not affect the
     // shell's live behavior until save() is called.
@@ -94,6 +101,13 @@ Item {
     property int    draftBlurStrength: 2
     property string draftMatugenScheme: "scheme-smart"
     property string draftMatugenMode: "smart"
+    property bool   draftSearchEnableApps: true
+    property bool   draftSearchEnableFolders: true
+    property bool   draftSearchEnableFiles: true
+    property int    draftSearchMaxFileResults: 20
+    property int    draftSearchMaxFolderResults: 10
+    property bool   draftSearchIncludeHidden: false
+    property string draftSearchSectionOrder: "apps,folders,files"
 
     // True if any draft differs from its corresponding live value.
     readonly property bool isDirty:
@@ -128,7 +142,41 @@ Item {
         draftBlurEnabled !== blurEnabled ||
         draftBlurStrength !== blurStrength ||
         draftMatugenScheme !== matugenScheme ||
-        draftMatugenMode !== matugenMode
+        draftMatugenMode !== matugenMode ||
+        draftSearchEnableApps !== searchEnableApps ||
+        draftSearchEnableFolders !== searchEnableFolders ||
+        draftSearchEnableFiles !== searchEnableFiles ||
+        draftSearchMaxFileResults !== searchMaxFileResults ||
+        draftSearchMaxFolderResults !== searchMaxFolderResults ||
+        draftSearchIncludeHidden !== searchIncludeHidden ||
+        draftSearchSectionOrder !== searchSectionOrder
+
+    function sanitizeSectionOrder(orderStr) {
+        const defaultOrder = ["apps", "folders", "files"]
+        if (!orderStr || typeof orderStr !== "string") return defaultOrder
+        const parts = orderStr.toLowerCase().split(",").map(s => s.trim())
+        const valid = []
+        for (let i = 0; i < parts.length; i++) {
+            const p = parts[i]
+            if (defaultOrder.includes(p) && !valid.includes(p)) {
+                valid.push(p)
+            }
+        }
+        for (let j = 0; j < defaultOrder.length; j++) {
+            if (!valid.includes(defaultOrder[j])) {
+                valid.push(defaultOrder[j])
+            }
+        }
+        return valid
+    }
+
+    function getSectionOrder() {
+        return sanitizeSectionOrder(searchSectionOrder)
+    }
+
+    function getDraftSectionOrder() {
+        return sanitizeSectionOrder(draftSearchSectionOrder)
+    }
 
     function save() {
         let needsRestart = false;
@@ -168,6 +216,13 @@ Item {
         blurStrength = draftBlurStrength
         matugenScheme = draftMatugenScheme
         matugenMode = draftMatugenMode
+        searchEnableApps = draftSearchEnableApps
+        searchEnableFolders = draftSearchEnableFolders
+        searchEnableFiles = draftSearchEnableFiles
+        searchMaxFileResults = draftSearchMaxFileResults
+        searchMaxFolderResults = draftSearchMaxFolderResults
+        searchIncludeHidden = draftSearchIncludeHidden
+        searchSectionOrder = sanitizeSectionOrder(draftSearchSectionOrder).join(",")
 
         applyNiriBlur(blurStrength, true)
 
@@ -209,6 +264,13 @@ Item {
         draftBlurStrength = blurStrength
         draftMatugenScheme = matugenScheme
         draftMatugenMode = matugenMode
+        draftSearchEnableApps = searchEnableApps
+        draftSearchEnableFolders = searchEnableFolders
+        draftSearchEnableFiles = searchEnableFiles
+        draftSearchMaxFileResults = searchMaxFileResults
+        draftSearchMaxFolderResults = searchMaxFolderResults
+        draftSearchIncludeHidden = searchIncludeHidden
+        draftSearchSectionOrder = sanitizeSectionOrder(searchSectionOrder).join(",")
 
         applyNiriBlur(blurStrength, true)
     }
@@ -305,5 +367,12 @@ Item {
         property int blurStrength: 2
         property string matugenScheme: "scheme-smart"
         property string matugenMode: "smart"
+        property bool searchEnableApps: true
+        property bool searchEnableFolders: true
+        property bool searchEnableFiles: true
+        property int searchMaxFileResults: 20
+        property int searchMaxFolderResults: 10
+        property bool searchIncludeHidden: false
+        property string searchSectionOrder: "apps,folders,files"
     }
 }

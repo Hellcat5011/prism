@@ -28,6 +28,7 @@ screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
 binds {
     // ── Shell ────────────────────────────────────────────────────────────
     Mod+Space         hotkey-overlay-title="App Launcher"        { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "launcher"  "toggle"; }
+    Mod+Shift+Space   hotkey-overlay-title="Spotlight Search"    { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "search"    "toggle"; }
     Mod+Alt+W         hotkey-overlay-title="Wallpaper Picker"    { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "wallpaper" "toggle"; }
     Mod+Alt+V         hotkey-overlay-title="Clipboard History"   { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "clipboard" "toggle"; }
     Mod+Alt+E         hotkey-overlay-title="Emoji Picker"        { spawn "qs" "-c" "xeon-shell-niri" "ipc" "call" "emoji"     "toggle"; }

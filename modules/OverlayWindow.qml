@@ -27,6 +27,7 @@ PanelWindow {
     property int  panelHeight: 420
     property int  cardRadius:  Config.windowRadius
     property string anchorPos: "center"
+    property int  spotlightTopMargin: 120
     property color cardColor: Qt.rgba(Theme.inversePrimary.r, Theme.inversePrimary.g, Theme.inversePrimary.b, Config.backgroundOpacity)
     property bool hasBorder: false
     property string enterAnimation: "scale"
@@ -90,12 +91,14 @@ PanelWindow {
     Rectangle {
         id: card
         anchors.centerIn: root.anchorPos === "center" ? parent : undefined
+        anchors.horizontalCenter: (root.anchorPos === "top" || root.anchorPos === "bottom" || root.anchorPos === "spotlight") ? parent.horizontalCenter : undefined
         anchors.left: root.anchorPos === "left" || root.anchorPos === "topleft" ? parent.left : undefined
         anchors.right: root.anchorPos === "right" ? parent.right : undefined
-        anchors.top: root.anchorPos === "topleft" || root.anchorPos === "top" ? parent.top : undefined
+        anchors.top: (root.anchorPos === "topleft" || root.anchorPos === "top" || root.anchorPos === "spotlight") ? parent.top : undefined
         anchors.bottom: root.anchorPos === "bottom" ? parent.bottom : undefined
         anchors.verticalCenter: (root.anchorPos === "left" || root.anchorPos === "right") ? parent.verticalCenter : undefined
         anchors.margins: 20
+        anchors.topMargin: root.anchorPos === "spotlight" ? root.spotlightTopMargin : 20
         width:  root.panelWidth
         height: root.panelHeight
         radius: root.cardRadius
@@ -105,6 +108,8 @@ PanelWindow {
         border.color: Theme.outlineVariant
         clip: true
         layer.enabled: true
+
+        Behavior on height { NumberAnimation { duration: Theme.animFast; easing.type: Theme.easeOut } }
 
         // Fade + gentle scale animation on open/close.
         opacity: (root.enterAnimation === "scale") ? (root.shown ? 1 : 0) : 1

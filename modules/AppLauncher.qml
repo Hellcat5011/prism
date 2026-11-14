@@ -1,13 +1,13 @@
 // ─────────────────────────────────────────────────────────────────────────
-// AppLauncher.qml — vertical list launcher
+// AppLauncher.qml — vertical list launcher (Apps only)
 //
 // Layout: search field → scrollable list of icon + name rows.
 // Selection is highlighted with a rounded rect in Theme.primaryContainer.
 // Keyboard: Up/Down to move, Enter to launch, Escape to close, type to
 // filter. Mouse: hover to select, click to launch.
 //
-// Data source: Quickshell's built-in DesktopEntries singleton — reads
-// every .desktop file on the system, no external binary needed.
+// Data source: shared SearchProviderApps component using Quickshell's
+// DesktopEntries singleton and Fuzzy.scoreLegacy matching.
 // ─────────────────────────────────────────────────────────────────────────
 import QtQuick
 import QtQuick.Layouts
@@ -29,9 +29,36 @@ OverlayWindow {
     property bool mouseActivated: false
 
     // Ignores the initial burst of pointer events that Wayland delivers
-    // when a surface appears under the cursor.  While running, all
+    // when a surface appears under the cursor. While running, all
     // onPositionChanged handlers are suppressed.
     Timer { id: mouseReadyTimer; interval: 150 }
+
+    // Shared Applications search provider
+    SearchProviderApps {
+        id: appsProvider
+        maxApps: 0 // Show all matching applications in app launcher
+        onResultsUpdated: {
+            launcher.results = appsProvider.results
+        }
+    }
+
+    property var results: []
+    property int selectedIndex: 0
+
+    function setQuery(text) {
+        queryField.text = text
+    }
+
+    function getResultsInfo() {
+        return JSON.stringify(results.map(r => ({
+            id: r.id,
+            section: r.section || "Applications",
+            type: "app",
+            title: r.title,
+            subtitle: r.subtitle || "",
+            icon: r.icon || ""
+        })))
+    }
 
     // Re-focus search and refresh the app list every time the panel opens.
     onShownChanged: {
@@ -40,77 +67,26 @@ OverlayWindow {
             // Append timestamp to bypass image cache when wallpaper changes
             launcher.currentWallpaperPath = "file://" + Quickshell.env("HOME") + "/.wa-thumb.jpg?t=" + Date.now()
             refreshApps()
-            // Make sure the launcher always starts at the top of the list when opened
             launcher.selectedIndex = 0
             list.positionViewAtBeginning()
             queryField.forceActiveFocus()
-            // Suppress mouse input until the user actually moves or clicks
             launcher.mouseActivated = false
             mouseReadyTimer.restart()
         }
     }
 
     Component.onCompleted: {
-        // Trigger Quickshell's lazy-loading of .desktop files immediately on startup 
-        // so they are ready by the time the user first opens the launcher.
         refreshApps()
     }
 
-    property var allApps: []
-    property var results:  []
-    property int selectedIndex: 0
-
     function refreshApps() {
-        const apps = []
-        for (const entry of DesktopEntries.applications.values) {
-            if (!entry.noDisplay) apps.push(entry)
-        }
-        apps.sort((a, b) => a.name.localeCompare(b.name))
-        allApps = apps
+        appsProvider.refreshApps()
         applyFilter()
     }
 
-    function fuzzyScore(query, text) {
-        return Fuzzy.scoreLegacy(query, text);
-    }
-
     function applyFilter() {
-        const q = queryField.text.trim();
-        if (q.length === 0) {
-            results = allApps;
-        } else {
-            const scoredApps = [];
-            for (let i = 0; i < allApps.length; i++) {
-                const app = allApps[i];
-                let maxScore = -1;
-                
-                const nameScore = fuzzyScore(q, app.name);
-                if (nameScore > maxScore) maxScore = nameScore;
-                
-                if (app.genericName) {
-                    const gScore = fuzzyScore(q, app.genericName);
-                    if (gScore !== -1 && (gScore * 0.8) > maxScore) {
-                        maxScore = gScore * 0.8;
-                    }
-                }
-                
-                if (app.keywords) {
-                    for (let k = 0; k < app.keywords.length; k++) {
-                        const kScore = fuzzyScore(q, app.keywords[k]);
-                        if (kScore !== -1 && (kScore * 0.5) > maxScore) {
-                            maxScore = kScore * 0.5;
-                        }
-                    }
-                }
-                
-                if (maxScore !== -1) {
-                    scoredApps.push({ app: app, score: maxScore });
-                }
-            }
-            scoredApps.sort((a, b) => b.score - a.score);
-            results = scoredApps.map(e => e.app);
-        }
-        selectedIndex = 0;
+        appsProvider.search(queryField.text.trim())
+        selectedIndex = 0
     }
 
     function moveSelection(delta) {
@@ -119,16 +95,17 @@ OverlayWindow {
         list.positionViewAtIndex(selectedIndex, ListView.Contain)
     }
 
-    function launch(entry) {
-        if (!entry) return
-        entry.execute()
+    function launch(item) {
+        if (!item) return
+        if (typeof item.execute === "function") {
+            item.execute()
+        } else if (item.app && typeof item.app.execute === "function") {
+            item.app.execute()
+        }
         launcher.hide()
     }
 
     // ── Cursor-blanking overlay ─────────────────────────────────────────
-    // Loader recreates a BlankCursor MouseArea each open so Qt re-delivers
-    // pointer-enter (needed when the Wayland surface stayed mapped during
-    // the close animation).  Destroyed once mouseActivated flips.
     Loader {
         anchors.fill: parent
         z: 100
@@ -255,7 +232,7 @@ OverlayWindow {
                                : "transparent"
 
                         RowLayout {
-                            anchors.fill:    parent
+                            anchors.fill:        parent
                             anchors.leftMargin:  12
                             anchors.rightMargin: 12
                             spacing: 12
@@ -269,7 +246,7 @@ OverlayWindow {
 
                             Text {
                                 Layout.fillWidth:    true
-                                text:                modelData.name
+                                text:                modelData.title || modelData.name
                                 color: (index === launcher.selectedIndex || (launcher.mouseActivated && hoverArea.containsMouse)) ? Theme.inversePrimary : Theme.onPrimaryContainerColor
                                 font.pixelSize:      15
                                 elide:               Text.ElideRight
@@ -277,8 +254,8 @@ OverlayWindow {
                             }
 
                             Text {
-                                visible:          modelData.genericName && modelData.genericName.length > 0
-                                text:             modelData.genericName ?? ""
+                                visible:          modelData.subtitle && modelData.subtitle.length > 0
+                                text:             modelData.subtitle ?? ""
                                 color: (index === launcher.selectedIndex || (launcher.mouseActivated && hoverArea.containsMouse)) ? Qt.rgba(Theme.inversePrimary.r, Theme.inversePrimary.g, Theme.inversePrimary.b, 0.7) : Theme.surfaceVariantText
                                 font.pixelSize:   12
                                 elide:            Text.ElideRight
@@ -307,4 +284,3 @@ OverlayWindow {
         }
     }
 }
-

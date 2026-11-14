@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Widgets
 import Quickshell.Io
 import "../services"
 
@@ -63,6 +64,14 @@ OverlayWindow {
         tabList.currentIndex = index;
     }
 
+    function testDrag(fromIdx, toIdx) {
+        if (sectionsContainer) {
+            sectionsContainer.activeDragIndex = fromIdx
+            sectionsContainer.dropTargetIndex = toIdx
+            sectionsContainer.commitDrag()
+        }
+    }
+
     function fuzzyMatch(pattern, str) {
         pattern = pattern.toLowerCase().trim();
         str = str.toLowerCase();
@@ -83,7 +92,8 @@ OverlayWindow {
         "Greeter Remember Last User Save the last logged-in user and session to automatically pre-select them on the next boot.",
         "Display Global font Select a global font for the shell and desktop widgets. Manage idle behavior Automatically lock the screen when the system is idle. Lock timeout Time in minutes before the screen is locked. Blue Light Filter Toggle the blue light filter (night light). Turn on now Manually force the blue light filter on. Mode Fixed Time, Sunset/Sunrise Night Schedule Night starts Night ends The filter is active between these times Coordinates Use realtime location based on IP Transition Duration Time in minutes for the color temperature to transition. Day Temperature Color temperature during the day (K). Night Temperature Color temperature at night (K).",
         "Desktop Desktop Edit Mode Reposition, resize, remove and re-add desktop widgets.",
-        "UI Background blur Blur strength Blur the area behind shell windows Background Opacity Window Rounding Corner radius Manual rounding Set manual pixel number Set the rounding value for the UI Material You Mode Dark Light Smart Material You Scheme Variant Tonal Spot Expressive Fruit Salad Vibrant Rainbow Neutral Fidelity Content Monochrome"
+        "UI Background blur Blur strength Blur the area behind shell windows Background Opacity Window Rounding Corner radius Manual rounding Set manual pixel number Set the rounding value for the UI Material You Mode Dark Light Smart Material You Scheme Variant Tonal Spot Expressive Fruit Salad Vibrant Rainbow Neutral Fidelity Content Monochrome",
+        "Search File Search Plocate Enable file search Maximum results Include hidden files and directories dotfiles Rebuild file index database pkexec Folders Applications Section order Reorder"
     ]
 
     function commitChanges(isFromPopup) {
@@ -230,7 +240,7 @@ OverlayWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    model: ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI"]
+                    model: ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search"]
                     currentIndex: 0
                     
                     delegate: Item {
@@ -301,7 +311,7 @@ OverlayWindow {
                         Layout.fillWidth: true
                         
                         Text {
-                            text: "⚙  " + ["Wallpaper Settings", "Lock Screen Settings", "Greeter Settings", "Display Settings", "Desktop Settings", "UI Settings"][tabList.currentIndex]
+                            text: "⚙  " + ["Wallpaper Settings", "Lock Screen Settings", "Greeter Settings", "Display Settings", "Desktop Settings", "UI Settings", "Search Settings"][tabList.currentIndex]
                             color: Theme.onPrimaryContainerColor
                             font.pixelSize: 20
                             font.weight: Font.DemiBold
@@ -1659,6 +1669,396 @@ OverlayWindow {
                                         currentIndex: Math.max(0, root.matugenSchemeValues.indexOf(Config.draftMatugenScheme))
                                         onActivated: {
                                             Config.draftMatugenScheme = root.matugenSchemeValues[currentIndex]
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── PAGE 6: Search ──
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 24
+                                visible: tabList.currentIndex === 6
+
+                                // Setting: Search Sections & Order
+                                ColumnLayout {
+                                    visible: root.fuzzyMatch(searchField.text, "Search Sections Order Applications Folders Files Reorder")
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        Text { text: "Search Sections & Order"; color: Theme.onPrimaryContainerColor; font.pixelSize: 15; font.weight: Font.Medium }
+                                        Text { text: "Reorder search sections and toggle them individually. The topmost section appears first in search results."; color: Theme.onPrimaryContainerColor; opacity: 0.6; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                    }
+
+                                    ColumnLayout {
+                                        id: sectionsContainer
+                                        Layout.fillWidth: true
+                                        spacing: 6
+
+                                        property int activeDragIndex: -1
+                                        property real dragOffsetY: 0
+                                        property int dropTargetIndex: -1
+                                        property real startContainerY: 0
+
+                                        function commitDrag() {
+                                            if (activeDragIndex >= 0 && dropTargetIndex >= 0 && activeDragIndex !== dropTargetIndex) {
+                                                const cur = Config.getDraftSectionOrder().slice()
+                                                const item = cur.splice(activeDragIndex, 1)[0]
+                                                cur.splice(dropTargetIndex, 0, item)
+                                                Config.draftSearchSectionOrder = cur.join(",")
+                                            }
+                                            cancelDrag()
+                                        }
+
+                                        function cancelDrag() {
+                                            activeDragIndex = -1
+                                            dragOffsetY = 0
+                                            dropTargetIndex = -1
+                                            startContainerY = 0
+                                        }
+
+                                        Repeater {
+                                            model: Config.getDraftSectionOrder()
+
+                                            delegate: Rectangle {
+                                                id: sectionRow
+                                                Layout.fillWidth: true
+                                                height: 46
+                                                radius: Theme.radiusSmall
+                                                z: (sectionsContainer.activeDragIndex === index) ? 100 : 1
+                                                color: (sectionsContainer.activeDragIndex === index)
+                                                       ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.16)
+                                                       : Qt.rgba(Theme.onPrimaryContainerColor.r, Theme.onPrimaryContainerColor.g, Theme.onPrimaryContainerColor.b, 0.06)
+                                                border.width: 1
+                                                border.color: (sectionsContainer.activeDragIndex === index)
+                                                             ? Theme.primary
+                                                             : Qt.rgba(Theme.outlineVariant.r, Theme.outlineVariant.g, Theme.outlineVariant.b, 0.25)
+
+                                                transform: Translate {
+                                                    id: rowTranslate
+                                                    y: {
+                                                        if (sectionsContainer.activeDragIndex === index) {
+                                                            return sectionsContainer.dragOffsetY
+                                                        }
+                                                        if (sectionsContainer.activeDragIndex === -1) {
+                                                            return 0
+                                                        }
+                                                        const fromIdx = sectionsContainer.activeDragIndex
+                                                        const toIdx = sectionsContainer.dropTargetIndex
+                                                        if (fromIdx < toIdx) {
+                                                            if (index > fromIdx && index <= toIdx) return -52
+                                                        } else if (fromIdx > toIdx) {
+                                                            if (index < fromIdx && index >= toIdx) return 52
+                                                        }
+                                                        return 0
+                                                    }
+                                                    Behavior on y {
+                                                        enabled: sectionsContainer.activeDragIndex !== index
+                                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                                    }
+                                                }
+
+                                                readonly property string secKey: modelData
+                                                readonly property string secName: {
+                                                    if (secKey === "apps") return "Applications"
+                                                    if (secKey === "folders") return "Folders"
+                                                    if (secKey === "files") return "Files"
+                                                    return secKey
+                                                }
+                                                readonly property string secIcon: {
+                                                    if (secKey === "apps") return "application-x-executable"
+                                                    if (secKey === "folders") return "folder"
+                                                    return "text-x-generic"
+                                                }
+                                                readonly property bool secEnabled: {
+                                                    if (secKey === "apps") return Config.draftSearchEnableApps
+                                                    if (secKey === "folders") return Config.draftSearchEnableFolders
+                                                    if (secKey === "files") return Config.draftSearchEnableFiles
+                                                    return true
+                                                }
+
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 12
+                                                    anchors.rightMargin: 12
+                                                    spacing: 12
+
+                                                    // Drag Handle Area
+                                                    Item {
+                                                        id: dragHandleBox
+                                                        width: 32
+                                                        height: 46
+                                                        Layout.alignment: Qt.AlignVCenter
+
+                                                        Text {
+                                                            anchors.centerIn: parent
+                                                            text: "≡"
+                                                            font.pixelSize: 20
+                                                            font.weight: Font.Bold
+                                                            color: (sectionsContainer.activeDragIndex === index) ? Theme.primary : Theme.onPrimaryContainerColor
+                                                            opacity: (sectionsContainer.activeDragIndex === index) ? 1.0 : 0.5
+                                                        }
+
+                                                        MouseArea {
+                                                            id: dragMouse
+                                                            anchors.fill: parent
+                                                            preventStealing: true
+                                                            cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+
+                                                            onPressed: (mouse) => {
+                                                                const p = mapToItem(sectionsContainer, mouse.x, mouse.y)
+                                                                sectionsContainer.startContainerY = p.y
+                                                                sectionsContainer.activeDragIndex = index
+                                                                sectionsContainer.dropTargetIndex = index
+                                                                sectionsContainer.dragOffsetY = 0
+                                                            }
+
+                                                            onPositionChanged: (mouse) => {
+                                                                if (sectionsContainer.activeDragIndex !== index) return
+                                                                const p = mapToItem(sectionsContainer, mouse.x, mouse.y)
+                                                                sectionsContainer.dragOffsetY = p.y - sectionsContainer.startContainerY
+                                                                const target = Math.max(0, Math.min(2, Math.round((p.y - 23) / 52)))
+                                                                sectionsContainer.dropTargetIndex = target
+                                                            }
+
+                                                            onReleased: {
+                                                                sectionsContainer.commitDrag()
+                                                            }
+
+                                                            onCanceled: {
+                                                                sectionsContainer.cancelDrag()
+                                                            }
+                                                        }
+                                                    }
+
+                                                    IconImage {
+                                                        width: 22
+                                                        height: 22
+                                                        source: Quickshell.iconPath(sectionRow.secIcon)
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                    }
+
+                                                    Text {
+                                                        text: sectionRow.secName
+                                                        color: Theme.onPrimaryContainerColor
+                                                        font.pixelSize: 14
+                                                        font.weight: Font.Medium
+                                                        Layout.fillWidth: true
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                    }
+
+                                                    // Toggle switch
+                                                    PillSwitch {
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        checked: sectionRow.secEnabled
+                                                        onToggled: (value) => {
+                                                            if (sectionRow.secKey === "apps") Config.draftSearchEnableApps = value
+                                                            else if (sectionRow.secKey === "folders") Config.draftSearchEnableFolders = value
+                                                            else if (sectionRow.secKey === "files") Config.draftSearchEnableFiles = value
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Setting: Maximum Folder Results
+                                RowLayout {
+                                    visible: Config.draftSearchEnableFolders && root.fuzzyMatch(searchField.text, "Maximum folder results")
+                                    Layout.fillWidth: true
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        Text { text: "Max Folder Results"; color: Theme.onPrimaryContainerColor; font.pixelSize: 15; font.weight: Font.Medium }
+                                        Text { text: "Maximum number of folder matches displayed in the search results (5–30)."; color: Theme.onPrimaryContainerColor; opacity: 0.6; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                    }
+
+                                    StyledComboBox {
+                                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                                        model: ["5", "10", "15", "20", "30"]
+                                        currentIndex: {
+                                            let idx = model.indexOf(Config.draftSearchMaxFolderResults.toString());
+                                            return idx >= 0 ? idx : 1;
+                                        }
+                                        onActivated: Config.draftSearchMaxFolderResults = parseInt(model[currentIndex], 10)
+                                    }
+                                }
+
+                                // Setting: Maximum File Results
+                                RowLayout {
+                                    visible: Config.draftSearchEnableFiles && root.fuzzyMatch(searchField.text, "Maximum file results")
+                                    Layout.fillWidth: true
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        Text { text: "Max File Results"; color: Theme.onPrimaryContainerColor; font.pixelSize: 15; font.weight: Font.Medium }
+                                        Text { text: "Maximum number of file matches displayed in the search results (10–50)."; color: Theme.onPrimaryContainerColor; opacity: 0.6; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                    }
+
+                                    StyledComboBox {
+                                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                                        model: ["10", "15", "20", "30", "50"]
+                                        currentIndex: {
+                                            let idx = model.indexOf(Config.draftSearchMaxFileResults.toString());
+                                            return idx >= 0 ? idx : 2;
+                                        }
+                                        onActivated: Config.draftSearchMaxFileResults = parseInt(model[currentIndex], 10)
+                                    }
+                                }
+
+                                // Setting: Include Hidden Files / Dirs
+                                RowLayout {
+                                    visible: root.fuzzyMatch(searchField.text, "Include hidden files and directories dotfiles")
+                                    Layout.fillWidth: true
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        Text { text: "Include Hidden Files & Folders"; color: Theme.onPrimaryContainerColor; font.pixelSize: 15; font.weight: Font.Medium }
+                                        Text { text: "Include hidden files and dot-directories (e.g. .config) in search results."; color: Theme.onPrimaryContainerColor; opacity: 0.6; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                    }
+
+                                    PillSwitch {
+                                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                                        checked: Config.draftSearchIncludeHidden
+                                        onToggled: (value) => Config.draftSearchIncludeHidden = value
+                                    }
+                                }
+
+                                // Action: Rebuild File Index
+                                RowLayout {
+                                    visible: root.fuzzyMatch(searchField.text, "Rebuild file index database plocate")
+                                    Layout.fillWidth: true
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+
+                                        RowLayout {
+                                            spacing: 8
+                                            Text {
+                                                text: "Rebuild File Index"
+                                                color: Theme.onPrimaryContainerColor
+                                                font.pixelSize: 15
+                                                font.weight: Font.Medium
+                                            }
+
+                                            Text {
+                                                visible: IndexService.lastIndexedTime !== ""
+                                                text: "•  Last indexed: " + IndexService.lastIndexedTime
+                                                color: Theme.onPrimaryContainerColor
+                                                opacity: 0.55
+                                                font.pixelSize: 12
+                                                font.weight: Font.Normal
+                                            }
+                                        }
+
+                                        Text {
+                                            text: "Indexes files system-wide for search. Can take a few minutes on large drives. The index also refreshes automatically on the system plocate timer."
+                                            color: Theme.onPrimaryContainerColor
+                                            opacity: 0.6
+                                            font.pixelSize: 12
+                                            wrapMode: Text.WordWrap
+                                            Layout.fillWidth: true
+                                        }
+
+                                        Text {
+                                            visible: IndexService.status === "failed" && IndexService.lastError !== ""
+                                            text: "Error: " + IndexService.lastError
+                                            color: Theme.error
+                                            font.pixelSize: 11
+                                            wrapMode: Text.WordWrap
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        spacing: 10
+                                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+
+                                        Text {
+                                            visible: IndexService.statusMessage !== "" && IndexService.status !== "idle"
+                                            text: IndexService.statusMessage
+                                            color: {
+                                                if (IndexService.status === "success") return Theme.primary
+                                                if (IndexService.status === "failed" || IndexService.status === "no_agent") return Theme.error
+                                                if (IndexService.status === "cancelled") return Theme.surfaceVariantText
+                                                if (IndexService.status === "running" || IndexService.status === "checking") return Theme.primary
+                                                return Theme.surfaceVariantText
+                                            }
+                                            font.pixelSize: 12
+                                            font.weight: Font.Medium
+                                        }
+
+                                        Button {
+                                            id: rebuildBtn
+                                            text: (IndexService.status === "running" || IndexService.status === "checking")
+                                                  ? "Indexing…"
+                                                  : "Rebuild index"
+                                            enabled: IndexService.status !== "running" && IndexService.status !== "checking"
+                                            onClicked: IndexService.rebuildIndex()
+
+                                            contentItem: RowLayout {
+                                                spacing: 6
+                                                anchors.centerIn: parent
+
+                                                Item {
+                                                    width: 14
+                                                    height: 14
+                                                    visible: IndexService.status === "running" || IndexService.status === "checking"
+                                                    Layout.alignment: Qt.AlignVCenter
+
+                                                    Rectangle {
+                                                        anchors.fill: parent
+                                                        radius: 7
+                                                        color: "transparent"
+                                                        border.width: 2
+                                                        border.color: Theme.primary
+                                                        opacity: 0.3
+                                                    }
+                                                    Rectangle {
+                                                        width: 6
+                                                        height: 6
+                                                        radius: 3
+                                                        color: Theme.primary
+                                                        anchors.top: parent.top
+                                                        anchors.horizontalCenter: parent.horizontalCenter
+                                                    }
+                                                    RotationAnimation on rotation {
+                                                        from: 0
+                                                        to: 360
+                                                        duration: 1000
+                                                        loops: Animation.Infinite
+                                                        running: IndexService.status === "running" || IndexService.status === "checking"
+                                                    }
+                                                }
+
+                                                Text {
+                                                    text: rebuildBtn.text
+                                                    color: rebuildBtn.enabled ? Theme.onPrimaryContainerColor : Theme.surfaceVariantText
+                                                    font.pixelSize: 12
+                                                    font.weight: Font.Medium
+                                                    horizontalAlignment: Text.AlignHCenter
+                                                    verticalAlignment: Text.AlignVCenter
+                                                }
+                                            }
+
+                                            background: Rectangle {
+                                                implicitHeight: 32
+                                                implicitWidth: 120
+                                                color: rebuildBtn.down ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.35) :
+                                                       (rebuildBtn.hovered ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.25) :
+                                                        Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.12))
+                                                radius: 16
+                                                border.width: 1
+                                                border.color: rebuildBtn.enabled ? Theme.primary : Theme.outlineVariant
+                                            }
                                         }
                                     }
                                 }

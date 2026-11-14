@@ -40,6 +40,10 @@ ShellRoot {
         id: appLauncher
     }
 
+    Modules.SpotlightSearch {
+        id: spotlightSearch
+    }
+
     Modules.WallpaperSelector {
         id: wallpaperSelector
     }
@@ -209,6 +213,29 @@ ShellRoot {
         function toggle(): void { appLauncher.toggle() }
         function open(): void { appLauncher.show() }
         function close(): void { appLauncher.hide() }
+        function setQuery(text: string): void { appLauncher.setQuery(text) }
+        function getResults(): string { return appLauncher.getResultsInfo() }
+    }
+
+    IpcHandler {
+        target: "search"
+        function toggle(): void { spotlightSearch.toggle() }
+        function open(): void { spotlightSearch.show() }
+        function close(): void { spotlightSearch.hide() }
+        function setQuery(text: string): void { spotlightSearch.setQuery(text) }
+        function getQuery(): string { return spotlightSearch.getQuery() }
+        function getResults(): string { return spotlightSearch.getResultsInfo() }
+        function isFilesSearching(): string { return spotlightSearch.getFilesSearching() ? "true" : "false" }
+        function getFilesError(): string { return spotlightSearch.getFilesError() }
+    }
+
+    IpcHandler {
+        target: "index"
+        function rebuild(): void { IndexService.rebuildIndex() }
+        function status(): string { return IndexService.status }
+        function message(): string { return IndexService.statusMessage }
+        function lastError(): string { return IndexService.lastError }
+        function lastIndexed(): string { return IndexService.lastIndexedTime }
     }
 
     IpcHandler {
@@ -284,6 +311,8 @@ ShellRoot {
         function toggle(): void { settingsWindow.toggle() }
         function open(): void { settingsWindow.show() }
         function close(): void { settingsWindow.hide() }
+        function openTab(idx: int): void { settingsWindow.openTab(idx) }
+        function testDrag(fromIdx: int, toIdx: int): void { settingsWindow.testDrag(fromIdx, toIdx) }
     }
 
     IpcHandler {
@@ -321,6 +350,46 @@ ShellRoot {
         function setManageIdle(val: string): void {
             if (val.toLowerCase() === "true") Config.manageIdle = true;
             else if (val.toLowerCase() === "false") Config.manageIdle = false;
+        }
+        function setSearchIncludeHidden(val: string): void {
+            Config.draftSearchIncludeHidden = (val.toLowerCase() === "true");
+            Config.save();
+        }
+        function setSearchMaxResults(val: string): void {
+            Config.draftSearchMaxFileResults = parseInt(val, 10);
+            Config.save();
+        }
+        function setSearchEnableFiles(val: string): void {
+            Config.draftSearchEnableFiles = (val.toLowerCase() === "true");
+            Config.save();
+        }
+        function setSearchEnableApps(val: string): void {
+            Config.draftSearchEnableApps = (val.toLowerCase() === "true");
+            Config.save();
+        }
+        function setSearchEnableFolders(val: string): void {
+            Config.draftSearchEnableFolders = (val.toLowerCase() === "true");
+            Config.save();
+        }
+        function setSearchMaxFolderResults(val: string): void {
+            Config.draftSearchMaxFolderResults = parseInt(val, 10);
+            Config.save();
+        }
+        function setSectionOrder(val: string): void {
+            Config.draftSearchSectionOrder = val;
+            Config.save();
+        }
+        function getSectionOrder(): string {
+            return Config.searchSectionOrder;
+        }
+        function draftSetSectionOrder(val: string): void {
+            Config.draftSearchSectionOrder = val;
+        }
+        function draftDiscard(): void {
+            Config.discard();
+        }
+        function draftSave(): void {
+            Config.save();
         }
     }
 
