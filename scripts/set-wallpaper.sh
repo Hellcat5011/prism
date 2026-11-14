@@ -55,7 +55,7 @@ if command -v matugen >/dev/null 2>&1; then
   echo "$WALLPAPER" > "$(dirname "$0")/../data/current-wallpaper.txt"
   
   # Tell Quickshell to reload the theme (avoids polling)
-  qs -c prism ipc call theme reload 2>/dev/null || qs -c xeon-shell-niri ipc call theme reload 2>/dev/null || true
+  qs -c prism ipc call theme reload 2>/dev/null || true
 else
   echo "set-wallpaper.sh: 'matugen' not found, theme not regenerated." >&2
   exit 1

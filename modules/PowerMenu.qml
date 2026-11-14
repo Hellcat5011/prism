@@ -32,7 +32,7 @@ OverlayWindow {
     function triggerLock() {
         powerMenu.hide()
         powerMenu.requestLock()
-        powerProcess.command = ["sh", "-c", "qs -p " + Quickshell.shellDir + " ipc call lock lock 2>/dev/null || qs -c prism ipc call lock lock 2>/dev/null || qs -c xeon-shell-niri ipc call lock lock 2>/dev/null; loginctl lock-session 2>/dev/null || true"]
+        powerProcess.command = ["sh", "-c", "qs -p " + Quickshell.shellDir + " ipc call lock lock 2>/dev/null || qs -c prism ipc call lock lock 2>/dev/null; loginctl lock-session 2>/dev/null || true"]
         powerProcess.running = true
     }
 

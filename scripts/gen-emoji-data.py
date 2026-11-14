@@ -83,7 +83,7 @@ def fetch_cached(url, expected_sha256, filename):
         print(f"Cached {filename} hash mismatch, re-downloading...")
 
     print(f"Downloading {url}...")
-    req = urllib.request.Request(url, headers={"User-Agent": "XeonShell/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Prism/1.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         content = resp.read()
 

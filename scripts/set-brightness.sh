@@ -26,7 +26,7 @@ if [ "$NEW_VAL" -lt 5 ]; then NEW_VAL=5; fi
 echo "$NEW_VAL" > "$CACHE_FILE"
 
 # trigger the OSD UI
-(qs -c prism ipc call osd brightness "$NEW_VAL" 2>/dev/null || qs -c xeon-shell-niri ipc call osd brightness "$NEW_VAL" 2>/dev/null || true) &
+(qs -c prism ipc call osd brightness "$NEW_VAL" 2>/dev/null || true) &
 RATIO=$(awk -v v="$NEW_VAL" 'BEGIN { printf "%.2f", v/100 }')
 # swayosd-client # --custom-icon display-brightness \
                # --custom-progress-text "Brightness: ${NEW_VAL}%" \

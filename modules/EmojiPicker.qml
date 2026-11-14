@@ -189,7 +189,7 @@ OverlayWindow {
     }
 
     function debugSelect(glyph, mode) {
-        if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1" && Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return;
+        if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1") return;
         const clean = glyph ? glyph.replace(/\uFE0F/g, "") : "";
         const item = picker.emojiByGlyph[clean] || picker.emojiByGlyph[glyph] || { emoji: glyph, cleanGlyph: clean, name: "Debug" };
         picker.selectEmoji(item, mode || "paste");

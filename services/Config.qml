@@ -12,8 +12,6 @@ Item {
     readonly property var _appInfo: AppInfo
 
     Component.onCompleted: {
-        let migrateScript = "mkdir -p ~/.config/Prism; if [ ! -f ~/.config/Prism/prism.conf ] && [ -f ~/.config/'Xeon Shell Niri'/xeon-shell-niri.conf ]; then cp ~/.config/'Xeon Shell Niri'/xeon-shell-niri.conf ~/.config/Prism/prism.conf; fi"
-        Quickshell.execDetached(["bash", "-c", migrateScript])
         discard()
     }
 
@@ -22,12 +20,12 @@ Item {
         command: [
             "bash",
             "-c",
-            "notify-send 'Prism' 'Applying changes - restarting shell...' -t 2000 -h string:x-canonical-private-synchronous:prism-restart; setsid bash -c 'sleep 1 && killall qs && sleep 0.3 && (qs -c prism 2>/dev/null || qs -c xeon-shell-niri)' >/dev/null 2>&1 & disown"
+            "notify-send 'Prism' 'Applying changes - restarting shell...' -t 2000 -h string:x-canonical-private-synchronous:prism-restart; setsid bash -c 'sleep 1 && killall qs && sleep 0.3 && qs -c prism' >/dev/null 2>&1 & disown"
         ]
     }
 
     // Live values — the shell reads these at runtime, and they persist
-    // to ~/.config/Xeon Shell Niri/xeon-shell-niri.conf via Settings{}.
+    // to ~/.config/Prism/prism.conf via Settings{}.
     property alias wallpaperDir: settings.wallpaperDir
     property alias wallpaperDaemon: settings.wallpaperDaemon
     property alias showLockscreenSessionControls: settings.showLockscreenSessionControls

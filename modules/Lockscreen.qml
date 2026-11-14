@@ -5,7 +5,7 @@
 // proper Wayland session locking, with PAM authentication.
 //
 // Trigger via:
-//   qs -c prism ipc call lock lock (or qs -c xeon-shell-niri)
+//   qs -c prism ipc call lock lock
 //   loginctl lock-session
 // ─────────────────────────────────────────────────────────────────────────
 import QtQuick

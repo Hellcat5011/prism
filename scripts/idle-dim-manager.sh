@@ -5,9 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/brightness.sh"
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/prism/idle-dim"
-if [ ! -d "$STATE_DIR" ] && [ -d "${XDG_STATE_HOME:-$HOME/.local/state}/xeon-shell-niri/idle-dim" ]; then
-    STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/xeon-shell-niri/idle-dim"
-fi
 mkdir -p "$STATE_DIR"
 
 DIM_STATE="$STATE_DIR/dim_state.json"

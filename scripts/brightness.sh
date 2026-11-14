@@ -2,9 +2,7 @@
 # brightness.sh: Reusable functions for brightness control (laptop and external)
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/prism/idle-dim"
-if [ ! -d "$STATE_DIR" ] && [ -d "${XDG_STATE_HOME:-$HOME/.local/state}/xeon-shell-niri/idle-dim" ]; then
-    STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/xeon-shell-niri/idle-dim"
-fi
+mkdir -p "$STATE_DIR"
 BUS_CACHE="$STATE_DIR/buses.txt"
 
 # Laptop panel control

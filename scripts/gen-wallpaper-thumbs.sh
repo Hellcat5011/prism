@@ -9,11 +9,6 @@ set -euo pipefail
 WALLPAPER_DIR="${1:?usage: gen-wallpaper-thumbs.sh <wallpaper_dir>}"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/Prism/thumbs"
-LEGACY_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/Xeon Shell Niri/thumbs"
-if [ -d "$LEGACY_CACHE" ] && [ ! -d "$CACHE_DIR" ]; then
-    mkdir -p "$(dirname "$CACHE_DIR")"
-    cp -rn "$LEGACY_CACHE" "$CACHE_DIR" 2>/dev/null || true
-fi
 mkdir -p "$CACHE_DIR"
 
 # Resolution-adaptive thumbnail width (~35% of the focused monitor)

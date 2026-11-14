@@ -7,9 +7,9 @@
 #   volume.sh mute      — Toggle mute
 #
 # niri keybind examples (in the `binds { }` block of config.kdl):
-#   XF86AudioRaiseVolume allow-when-locked=true { spawn-sh "~/.config/quickshell/xeon-shell-niri/scripts/volume.sh +5"; }
-#   XF86AudioLowerVolume allow-when-locked=true { spawn-sh "~/.config/quickshell/xeon-shell-niri/scripts/volume.sh -5"; }
-#   XF86AudioMute        allow-when-locked=true { spawn-sh "~/.config/quickshell/xeon-shell-niri/scripts/volume.sh mute"; }
+#   XF86AudioRaiseVolume allow-when-locked=true { spawn-sh "~/.config/quickshell/prism/scripts/volume.sh +5"; }
+#   XF86AudioLowerVolume allow-when-locked=true { spawn-sh "~/.config/quickshell/prism/scripts/volume.sh -5"; }
+#   XF86AudioMute        allow-when-locked=true { spawn-sh "~/.config/quickshell/prism/scripts/volume.sh mute"; }
 
 set -euo pipefail
 
@@ -24,7 +24,7 @@ get_muted() {
 }
 
 send_osd() {
-    (qs -c prism ipc call osd volume "$1" 2>/dev/null || qs -c xeon-shell-niri ipc call osd volume "$1" 2>/dev/null || true) &
+    (qs -c prism ipc call osd volume "$1" 2>/dev/null || true) &
 }
 
 action="${1:-}"

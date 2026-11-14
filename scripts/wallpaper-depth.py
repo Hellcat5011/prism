@@ -33,12 +33,7 @@ XDG_DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/
 XDG_CACHE_HOME = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
 
 DATA_DIR = os.path.join(XDG_DATA_HOME, "prism", "wallpaper-depth")
-if not os.path.isdir(DATA_DIR) and os.path.isdir(os.path.join(XDG_DATA_HOME, "xeon-shell-niri", "wallpaper-depth")):
-    DATA_DIR = os.path.join(XDG_DATA_HOME, "xeon-shell-niri", "wallpaper-depth")
-
 CACHE_DIR = os.path.join(XDG_CACHE_HOME, "Prism", "wallpaper-depth")
-if not os.path.isdir(CACHE_DIR) and os.path.isdir(os.path.join(XDG_CACHE_HOME, "Xeon Shell Niri", "wallpaper-depth")):
-    CACHE_DIR = os.path.join(XDG_CACHE_HOME, "Xeon Shell Niri", "wallpaper-depth")
 MODEL_DIR = os.path.join(DATA_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
 VENV_DIR = os.path.join(DATA_DIR, "venv")

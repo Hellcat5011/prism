@@ -211,10 +211,9 @@ mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/Prism/wallpaper-depth"
 mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/prism/idle-dim"
 mkdir -p "$HOME/Pictures/Screenshots"
 
-# Ensure backward-compatibility symlink exists
-mkdir -p "$HOME/.config/quickshell"
-if [ "$TARGET_DIR" != "$HOME/.config/quickshell/xeon-shell-niri" ]; then
-    ln -sfn "$TARGET_DIR" "$HOME/.config/quickshell/xeon-shell-niri" 2>/dev/null || true
+# Clean up any legacy backward-compatibility symlink
+if [ -L "$HOME/.config/quickshell/xeon-shell-niri" ]; then
+    rm -f "$HOME/.config/quickshell/xeon-shell-niri"
 fi
 
 # 6. Matugen configuration
@@ -384,7 +383,7 @@ if [ -f /etc/greetd/config.toml ]; then
 fi
 
 sudo tee /etc/greetd/config.toml >/dev/null << EOF
-# greetd configuration for Xeon Shell's Quickshell greeter.
+# greetd configuration for Prism's Quickshell greeter.
 
 [terminal]
 vt = 1

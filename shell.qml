@@ -278,15 +278,15 @@ ShellRoot {
         function open(): void { emojiPicker.show() }
         function close(): void { emojiPicker.hide() }
         function debugSelect(glyph: string, mode: string): void {
-            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1" && Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return;
+            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1") return;
             emojiPicker.debugSelect(glyph, mode);
         }
         function debugGetRecents(): string {
-            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1" && Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return "[]";
+            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1") return "[]";
             return JSON.stringify(emojiPicker.rawRecentGlyphs);
         }
         function debugGetRecentEmojis(): string {
-            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1" && Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return "[]";
+            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1") return "[]";
             return JSON.stringify(emojiPicker.recentEmojis.map(e => e.emoji));
         }
     }
