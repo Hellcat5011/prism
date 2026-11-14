@@ -21,7 +21,7 @@ Item {
     // Optional multi-piece custom region (for windows with multiple separate pieces)
     property Region customRegion: null
 
-    readonly property bool debugMode: Quickshell.env("XEON_BLUR_DEBUG") === "1"
+    readonly property bool debugMode: Quickshell.env("PRISM_BLUR_DEBUG") === "1" || Quickshell.env("XEON_BLUR_DEBUG") === "1"
 
     // The resolved Region object when blur is enabled and active, or null when disabled
     readonly property Region region: (Config.blurEnabled && root.active)

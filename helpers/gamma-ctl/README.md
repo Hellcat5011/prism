@@ -1,7 +1,7 @@
 # gamma-ctl
 
 A small Wayland client that implements `wlr-gamma-control-unstable-v1` to apply color-temperature changes (blue light filter).
-This is built and managed directly by Xeon Shell; it is not a standalone tool meant to be run manually.
+This is built and managed directly by Prism; it is not a standalone tool meant to be run manually.
 
 ## Build Instructions
 

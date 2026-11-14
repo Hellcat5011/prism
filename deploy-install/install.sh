@@ -3,10 +3,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-TARGET_DIR="$HOME/.config/quickshell/xeon-shell-niri"
+TARGET_DIR="$HOME/.config/quickshell/prism"
 
 echo "================================================="
-echo "          Xeon Shell (niri) Installer            "
+echo "                Prism Installer                  "
 echo "================================================="
 echo ""
 
@@ -65,7 +65,31 @@ else
     echo "  [✓] quickshell (Quickshell runtime)"
 fi
 
-check_dep "niri" "niri compositor (25.11+ recommended)" "niri" false true
+# Compositor check (supports Niri, MangoWM, and Hyprland)
+FOUND_WMS=()
+if command -v niri >/dev/null 2>&1; then
+    echo "  [✓] niri compositor"
+    FOUND_WMS+=("niri")
+else
+    echo "  [ ] niri compositor"
+fi
+if command -v mango >/dev/null 2>&1 || command -v mangowm >/dev/null 2>&1; then
+    echo "  [✓] mangowm compositor"
+    FOUND_WMS+=("mangowm")
+else
+    echo "  [ ] mangowm compositor"
+fi
+if command -v Hyprland >/dev/null 2>&1; then
+    echo "  [✓] hyprland compositor"
+    FOUND_WMS+=("hyprland")
+else
+    echo "  [ ] hyprland compositor"
+fi
+
+if [ ${#FOUND_WMS[@]} -eq 0 ]; then
+    echo "  [✗] No supported Wayland compositor found (niri, mangowm, or hyprland) - REQUIRED"
+    MISSING_PACMAN_PKGS+=("niri")
+fi
 check_dep "greetd" "greetd display manager" "greetd" false true
 check_dep "jq" "JSON processor" "jq" false true
 check_dep "python3" "Python runtime" "python" false true
@@ -182,10 +206,16 @@ fi
 # 5. Initialize cache and runtime state directories
 echo "Initializing cache and state directories..."
 mkdir -p "$HOME/.cache/quickshell-clipboard"
-mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/Xeon Shell Niri/thumbs"
-mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/Xeon Shell Niri/wallpaper-depth"
-mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/xeon-shell-niri/idle-dim"
-mkdir -p "$HOME/Pictures/Screenshots"   # niri's built-in screenshot UI saves here (see screenshot-path)
+mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/Prism/thumbs"
+mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/Prism/wallpaper-depth"
+mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/prism/idle-dim"
+mkdir -p "$HOME/Pictures/Screenshots"
+
+# Ensure backward-compatibility symlink exists
+mkdir -p "$HOME/.config/quickshell"
+if [ "$TARGET_DIR" != "$HOME/.config/quickshell/xeon-shell-niri" ]; then
+    ln -sfn "$TARGET_DIR" "$HOME/.config/quickshell/xeon-shell-niri" 2>/dev/null || true
+fi
 
 # 6. Matugen configuration
 if command -v matugen >/dev/null 2>&1; then
@@ -199,16 +229,14 @@ if command -v matugen >/dev/null 2>&1; then
     fi
 
     if [ -f "$MATUGEN_CONF" ]; then
-        if ! grep -q '\[templates\.xeonshellniri\]' "$MATUGEN_CONF"; then
-            # Append-only, but back the file up first: it is shared with any other
-            # Matugen consumer (including the Hyprland Xeon Shell).
-            cp -n "$MATUGEN_CONF" "$MATUGEN_CONF.bak-before-xeon-shell-niri" 2>/dev/null || true
-            echo "Adding a Matugen template for Xeon Shell (niri) to $MATUGEN_CONF (existing templates are left alone)..."
+        if ! grep -q '\[templates\.prism\]' "$MATUGEN_CONF"; then
+            cp -n "$MATUGEN_CONF" "$MATUGEN_CONF.bak-before-prism" 2>/dev/null || true
+            echo "Adding a Matugen template for Prism to $MATUGEN_CONF..."
             cat >> "$MATUGEN_CONF" << 'EOF'
 
-[templates.xeonshellniri]
+[templates.prism]
 input_path = '~/.config/matugen/templates/qs-colors.json'
-output_path = '~/.config/quickshell/xeon-shell-niri/data/colors.json'
+output_path = '~/.config/quickshell/prism/data/colors.json'
 EOF
         fi
     else
@@ -221,38 +249,31 @@ caching = false
 backend = "quantiles"
 mode = "dark"
 
-[templates.xeonshellniri]
+[templates.prism]
 input_path = '~/.config/matugen/templates/qs-colors.json'
-output_path = '~/.config/quickshell/xeon-shell-niri/data/colors.json'
+output_path = '~/.config/quickshell/prism/data/colors.json'
 EOF
     fi
 fi
 
-# 7. Settings migration
-OLD_CONF="$HOME/.config/Unknown Organization/quickshell.conf"
-NEW_CONF_DIR="$HOME/.config/Xeon Shell Niri"
-NEW_CONF="$NEW_CONF_DIR/xeon-shell-niri.conf"
-# Settings of the original (Hyprland) Xeon Shell, if installed on this machine.
-HYPR_CONF="$HOME/.config/Xeon Shell/xeon-shell.conf"
+# 7. Settings migration (supports legacy Xeon Shell configs)
+PRISM_CONF_DIR="$HOME/.config/Prism"
+PRISM_CONF="$PRISM_CONF_DIR/prism.conf"
+OLD_XEON_NIRI_CONF="$HOME/.config/Xeon Shell Niri/xeon-shell-niri.conf"
+OLD_XEON_HYPR_CONF="$HOME/.config/Xeon Shell/xeon-shell.conf"
 
-if [ -f "$OLD_CONF" ]; then
-    echo "Migrating old settings from '$OLD_CONF'..."
-    mkdir -p "$NEW_CONF_DIR"
-    cp -n "$OLD_CONF" "$NEW_CONF" || true
+mkdir -p "$PRISM_CONF_DIR"
+if [ ! -f "$PRISM_CONF" ]; then
+    if [ -f "$OLD_XEON_NIRI_CONF" ]; then
+        echo "Migrating settings from '$OLD_XEON_NIRI_CONF' to '$PRISM_CONF'..."
+        cp "$OLD_XEON_NIRI_CONF" "$PRISM_CONF"
+    elif [ -f "$OLD_XEON_HYPR_CONF" ]; then
+        echo "Migrating settings from '$OLD_XEON_HYPR_CONF' to '$PRISM_CONF'..."
+        cp "$OLD_XEON_HYPR_CONF" "$PRISM_CONF"
+    fi
 fi
 
-# One-time COPY of the Hyprland version's settings (wallpaper folder, fonts, ...)
-# so this install starts configured. The original file is only read, never
-# modified, and the two installs keep separate settings from then on.
-if [ ! -f "$NEW_CONF" ] && [ -f "$HYPR_CONF" ]; then
-    echo "Copying settings from the existing Xeon Shell (Hyprland) install..."
-    mkdir -p "$NEW_CONF_DIR"
-    cp "$HYPR_CONF" "$NEW_CONF"
-    # hyprpaper can't be driven under niri; fall back to awww.
-    sed -i 's/^wallpaperDaemon=hyprpaper$/wallpaperDaemon=awww/' "$NEW_CONF" || true
-fi
-
-# 8. Privileged section (Xeon Shell Greeter & Hardware Privileges)
+# 8. Privileged section (Prism Greeter & Hardware Privileges)
 echo ""
 echo "-------------------------------------------------"
 echo "System Greeter & Hardware Setup (requires sudo, OPTIONAL):"
@@ -260,29 +281,52 @@ echo "  - Setup custom Quickshell Greeter for greetd"
 echo "  - Configure user/group permissions & PAM authentication"
 echo "  - Configure i2c permissions for external monitor dimming"
 echo ""
-echo "WARNING: the greeter is SYSTEM-WIDE. This replaces /etc/greetd/config.toml"
-echo "(a .bak copy is kept) and /etc/greetd/quickshell-greeter/ so that greetd"
-echo "starts a *niri* greeter. If you also use the Hyprland version of Xeon Shell"
-echo "and want to keep ITS greeter, answer N. Logging in to either session works"
-echo "from either greeter, since sessions are listed from /usr/share/wayland-sessions."
+echo "WARNING: the greeter is SYSTEM-WIDE. This configures /etc/greetd/config.toml"
+echo "(a .bak copy is kept) and /etc/greetd/quickshell-greeter/."
+echo "You can choose which compositor (Niri, MangoWM, or Hyprland) hosts the greeter."
+echo "Logging in to any session works from the greeter regardless of host compositor."
 echo "-------------------------------------------------"
 if ! command -v greetd >/dev/null 2>&1; then
     echo "NOTICE: 'greetd' is not installed yet. You can still set up the files,"
     echo "but you will need to install 'greetd' with your package manager."
     echo ""
 fi
-read -rp "Proceed with the niri greeter and hardware setup? [y/N] " confirm
+read -rp "Proceed with the greeter and hardware setup? [y/N] " confirm
 confirm="${confirm:-n}"
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     echo "Skipping system greeter setup."
     echo ""
     echo "================================================="
-    echo "Xeon Shell user configuration is complete!"
+    echo "Prism user configuration is complete!"
     echo "Run the desktop shell with:"
-    echo "  qs -c xeon-shell-niri"
+    echo "  qs -c prism"
     echo "================================================="
     exit 0
 fi
+
+# Select greeter host compositor
+echo ""
+echo "Select the compositor to host the greetd login screen:"
+echo "  1) Niri (default)"
+echo "  2) MangoWM"
+echo "  3) Hyprland"
+read -rp "Selection [1-3] (default: 1): " wm_choice
+wm_choice="${wm_choice:-1}"
+
+case "$wm_choice" in
+    2)
+        SELECTED_WM="mango"
+        GREETER_SESSION_CMD="mango -c /etc/greetd/mango-greet.conf"
+        ;;
+    3)
+        SELECTED_WM="hyprland"
+        GREETER_SESSION_CMD="Hyprland --config /etc/greetd/hyprland-greet.conf"
+        ;;
+    *)
+        SELECTED_WM="niri"
+        GREETER_SESSION_CMD="niri --config /etc/greetd/niri-greet.kdl"
+        ;;
+esac
 
 # Validate sudo credentials once
 sudo -v
@@ -331,11 +375,24 @@ echo "Deploying greeter files..."
 sudo mkdir -p /etc/greetd/quickshell-greeter
 sudo rsync -a --exclude '__pycache__' "$REPO_DIR/deploy/etc/greetd/quickshell-greeter/" /etc/greetd/quickshell-greeter/
 sudo rsync -a "$REPO_DIR/deploy/etc/greetd/niri-greet.kdl" /etc/greetd/niri-greet.kdl
+sudo rsync -a "$REPO_DIR/deploy/etc/greetd/mango-greet.conf" /etc/greetd/mango-greet.conf
+sudo rsync -a "$REPO_DIR/deploy/etc/greetd/hyprland-greet.conf" /etc/greetd/hyprland-greet.conf
+
 if [ -f /etc/greetd/config.toml ]; then
     sudo cp /etc/greetd/config.toml /etc/greetd/config.toml.bak
     echo "Backed up existing config.toml to config.toml.bak"
 fi
-sudo cp "$REPO_DIR/deploy/etc/greetd/config.toml" /etc/greetd/config.toml
+
+sudo tee /etc/greetd/config.toml >/dev/null << EOF
+# greetd configuration for Xeon Shell's Quickshell greeter.
+
+[terminal]
+vt = 1
+
+[default_session]
+command = "$GREETER_SESSION_CMD"
+user = "greeter"
+EOF
 
 echo ""
 echo "Please review PAM configuration diff (if it exists):"
@@ -351,17 +408,32 @@ if [[ "$confirm_pam" =~ ^[Yy]$ ]]; then
     echo "Installed /etc/pam.d/quickshell"
 fi
 
-# Print recovery keybind
+# Print autostart + keybind guidance
 echo ""
-echo "=== IMPORTANT ==="
-echo "Add the Xeon Shell autostart + keybinds (including a recovery keybind that"
-echo "restarts Quickshell if it crashes while locked) to your niri config."
-echo "Either paste from, or 'include' (niri 25.11+), this file:"
-echo "  $REPO_DIR/deploy/xeon-shell-niri.kdl"
-echo "e.g.  cp \"$REPO_DIR/deploy/xeon-shell-niri.kdl\" ~/.config/niri/xeon-shell-niri.kdl"
-echo "      then add   include \"xeon-shell-niri.kdl\"   to ~/.config/niri/config.kdl"
-echo "Run 'niri validate' afterwards to catch any keybind clashes."
-echo "================="
+echo "=== IMPORTANT: Desktop Autostart & Keybinds ==="
+case "${SELECTED_WM:-niri}" in
+    mango)
+        echo "For MangoWM, add the following to ~/.config/mango/config.conf:"
+        echo "  source = ~/.config/mango/prism-mango.conf"
+        echo "(or copy from $REPO_DIR/deploy/prism-mango.conf)"
+        ;;
+    hyprland)
+        echo "For Hyprland, add the following to ~/.config/hypr/hyprland.conf:"
+        echo "  source = ~/.config/hypr/prism-hyprland.conf"
+        echo "(or copy from $REPO_DIR/deploy/prism-hyprland.conf)"
+        ;;
+    *)
+        echo "For Niri, add the following to ~/.config/niri/config.kdl:"
+        echo "  include \"prism-niri.kdl\""
+        echo "(or copy from $REPO_DIR/deploy/prism-niri.kdl)"
+        ;;
+esac
+echo ""
+echo "All compositor configuration snippets are available in $REPO_DIR/deploy/:"
+echo "  - Niri:     $REPO_DIR/deploy/prism-niri.kdl"
+echo "  - MangoWM:  $REPO_DIR/deploy/prism-mango.conf"
+echo "  - Hyprland: $REPO_DIR/deploy/prism-hyprland.conf"
+echo "==============================================="
 echo ""
 
 echo "Running initial greeter wallpaper sync..."
@@ -374,12 +446,12 @@ echo ""
 echo "================================================="
 echo "Installation complete!"
 echo ""
-echo "To enable the custom Xeon Shell login greeter:"
+echo "To enable the custom Prism login greeter:"
 echo "  sudo systemctl enable greetd"
 echo ""
 echo "Note: If this is your first time setting up greeter-sync or i2c,"
 echo "please log out or reboot your system for new group permissions to take effect."
 echo ""
-echo "Start Xeon Shell using:"
-echo "  qs -c xeon-shell-niri"
+echo "Start Prism using:"
+echo "  qs -c prism"
 echo "================================================="

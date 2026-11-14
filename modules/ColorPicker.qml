@@ -52,7 +52,7 @@ Scope {
         Quickshell.execDetached([
             "sh",
             "-c",
-            "printf '%s' '" + hex + "' | wl-copy && notify-send -a 'Xeon Shell' 'Color Picker' 'Copied " + hex + " to clipboard' -i 'color-picker' -h string:x-canonical-private-synchronous:xeon-colorpicker"
+            "printf '%s' '" + hex + "' | wl-copy && notify-send -a 'Prism' 'Color Picker' 'Copied " + hex + " to clipboard' -i 'color-picker' -h string:x-canonical-private-synchronous:prism-colorpicker"
         ]);
         hide();
     }
@@ -69,7 +69,7 @@ Scope {
             screen: (Quickshell.screens && Quickshell.screens.length > 0) ? Quickshell.screens[0] : null
 
             WlrLayershell.layer: WlrLayer.Overlay
-            WlrLayershell.namespace: "xeon-color-picker"
+            WlrLayershell.namespace: "prism-color-picker"
             WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
             anchors { top: true; bottom: true; left: true; right: true }
             exclusionMode: ExclusionMode.Ignore
@@ -95,7 +95,7 @@ Scope {
 
             Component.onDestruction: {
                 // Ensure no temp screenshot remains in $XDG_RUNTIME_DIR
-                Quickshell.execDetached(["rm", "-f", (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/xeon-colorpicker-" + (Quickshell.env("USER") || "user") + ".png"]);
+                Quickshell.execDetached(["rm", "-f", (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/prism-colorpicker-" + (Quickshell.env("USER") || "user") + ".png"]);
             }
 
             Timer {
@@ -129,7 +129,7 @@ Scope {
                             return;
                         }
                         pickerWindow.grabResult = result;
-                        let tempPath = (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/xeon-colorpicker-" + (Quickshell.env("USER") || "user") + ".png";
+                        let tempPath = (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/prism-colorpicker-" + (Quickshell.env("USER") || "user") + ".png";
                         let fileUrl = "file://" + tempPath;
                         lensCanvas.unloadImage(fileUrl);
                         let ok = result.saveToFile(tempPath);

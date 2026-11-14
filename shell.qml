@@ -3,9 +3,9 @@
 // shell.qml — Quickshell entry point
 //
 // Run this with (from anywhere):
-//   qs -c xeon-shell-niri
+//   qs -c prism
 // assuming this whole folder is placed at
-//   ~/.config/quickshell/xeon-shell-niri
+//   ~/.config/quickshell/prism
 //
 // or point at it directly without installing it anywhere in particular:
 //   qs -p /path/to/this/folder/shell.qml
@@ -148,7 +148,7 @@ ShellRoot {
     // Note: Quickshell's QML hot-reload (on file save) does not automatically 
     // re-register top-level Wayland protocols like ext-idle-notify-v1. If you 
     // change IdleMonitor or IdleInhibitor properties, you MUST perform a full 
-    // shell restart (killall qs && qs -c xeon-shell-niri) for the changes to apply.
+    // shell restart (killall qs && qs -c prism) for the changes to apply.
     IdleMonitor {
         id: idleMonitor
         enabled: Config.manageIdle
@@ -205,9 +205,9 @@ ShellRoot {
 
     // IPC handlers: these let you (or a niri keybind) control the
     // windows above from a terminal, e.g.:
-    //   qs -c xeon-shell-niri ipc call launcher toggle
-    //   qs -c xeon-shell-niri ipc call wallpaper toggle
-    // See deploy/niri-binds.kdl.snippet for ready-made niri keybinds.
+    //   qs -c prism ipc call launcher toggle
+    //   qs -c prism ipc call wallpaper toggle
+    // See deploy/prism-*.conf or prism-*.kdl for ready-made keybinds.
     IpcHandler {
         target: "launcher"
         function toggle(): void { appLauncher.toggle() }
@@ -278,15 +278,15 @@ ShellRoot {
         function open(): void { emojiPicker.show() }
         function close(): void { emojiPicker.hide() }
         function debugSelect(glyph: string, mode: string): void {
-            if (Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return;
+            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1" && Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return;
             emojiPicker.debugSelect(glyph, mode);
         }
         function debugGetRecents(): string {
-            if (Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return "[]";
+            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1" && Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return "[]";
             return JSON.stringify(emojiPicker.rawRecentGlyphs);
         }
         function debugGetRecentEmojis(): string {
-            if (Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return "[]";
+            if (Quickshell.env("PRISM_EMOJI_DEBUG") !== "1" && Quickshell.env("XEON_EMOJI_DEBUG") !== "1") return "[]";
             return JSON.stringify(emojiPicker.recentEmojis.map(e => e.emoji));
         }
     }
@@ -483,9 +483,9 @@ ShellRoot {
         target: "help"
         function display(): string {
             return `
-Xeon Shell IPC Commands:
+Prism IPC Commands:
 
-Usage: qs -c xeon-shell-niri ipc call <target> <method> [args...]
+Usage: qs -c prism ipc call <target> <method> [args...]
 
 Available Targets and Methods:
 

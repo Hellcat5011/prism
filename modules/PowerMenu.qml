@@ -32,7 +32,7 @@ OverlayWindow {
     function triggerLock() {
         powerMenu.hide()
         powerMenu.requestLock()
-        powerProcess.command = ["sh", "-c", "qs -p " + Quickshell.shellDir + " ipc call lock lock 2>/dev/null || qs -c xeon-shell-niri ipc call lock lock 2>/dev/null; loginctl lock-session 2>/dev/null || true"]
+        powerProcess.command = ["sh", "-c", "qs -p " + Quickshell.shellDir + " ipc call lock lock 2>/dev/null || qs -c prism ipc call lock lock 2>/dev/null || qs -c xeon-shell-niri ipc call lock lock 2>/dev/null; loginctl lock-session 2>/dev/null || true"]
         powerProcess.running = true
     }
 
@@ -144,7 +144,7 @@ OverlayWindow {
                 powerMenu.executeCommand("lock");
                 event.accepted = true;
             } else if (event.key === Qt.Key_2 || event.key === Qt.Key_E) {
-                powerMenu.executeCommand("niri msg action quit --skip-confirmation");
+                powerMenu.executeCommand(CompositorService.quitCommand());
                 event.accepted = true;
             } else if (event.key === Qt.Key_3 || event.key === Qt.Key_R) {
                 powerMenu.executeCommand("systemctl reboot");
@@ -172,7 +172,7 @@ OverlayWindow {
                 id: logoutBtn
                 index: 1
                 label: "Logout"
-                command: "niri msg action quit --skip-confirmation"
+                command: CompositorService.quitCommand()
                 iconSvg: "<path d='M10 22H5a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h5'></path><polyline points='16 17 21 12 16 7'></polyline><line x1='21' y1='12' x2='9' y2='12'></line>"
             }
 

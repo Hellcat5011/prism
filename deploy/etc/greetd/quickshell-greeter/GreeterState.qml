@@ -139,7 +139,7 @@ QtObject {
             onRead: data => {
                 if (data.trim() === "OK") {
                     root.sessionStarting = true
-                    exitProcess.running = true
+                    root.quitGreeterCompositor()
                 }
             }
         }
@@ -172,6 +172,17 @@ QtObject {
                 }
             }
         }
+    }
+
+    function quitGreeterCompositor() {
+        if (Quickshell.env("MANGO_INSTANCE_SIGNATURE")) {
+            exitProcess.command = ["mmsg", "quit"];
+        } else if (Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE")) {
+            exitProcess.command = ["hyprctl", "dispatch", "exit"];
+        } else {
+            exitProcess.command = ["niri", "msg", "action", "quit", "--skip-confirmation"];
+        }
+        exitProcess.running = true;
     }
 
     property Process exitProcess: Process {

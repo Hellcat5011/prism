@@ -1,51 +1,53 @@
-# Xeon Shell (niri) 🚀
+# Prism 💎
 
-> **This is the niri port.** It is a separate project from the original,
-> Hyprland-based [Xeon Shell](https://github.com/Hellcat5011/Xeon-Shell), and is
-> designed to be installed **alongside** it without touching it: it uses its own
-> install folder (`~/.config/quickshell/xeon-shell-niri`), launch name
-> (`qs -c xeon-shell-niri`), settings (`~/.config/Xeon Shell Niri/`), state and
-> cache folders, and its own Matugen template. The only existing file the
-> installer modifies is `~/.config/matugen/config.toml` (one template appended,
-> after a `.bak-before-xeon-shell-niri` backup). The system-wide greeter step is
-> opt-in and defaults to **No**.
+> A unified, feature-rich Wayland desktop shell built with [Quickshell](https://quickshell.outfoxxed.me/) for **Niri**, **MangoWM**, and **Hyprland**.
 
-A minimal, feature-rich shell environment built with [Quickshell](https://quickshell.outfoxxed.me/) for [niri](https://github.com/niri-wm/niri).
+Prism is a fast, highly-customizable desktop environment layer providing modular widgets, application launchers, notifications, session locking, and hardware controls across modern Wayland compositors.
 
 > [!WARNING]
 > **Vibe Coded Project:** This is a fully vibe-coded project. If you are uncomfortable with this, please ignore this repository.
 
+---
+
 ## ✨ Features
 
-Xeon Shell provides a comprehensive set of built-in tools and menus to keep your desktop lightweight and functional:
+Prism provides a comprehensive suite of desktop components designed for productivity and aesthetics:
 
-- **Desktop Widgets & Wallpaper Depth**: Clock, calendar, and media controls featuring neural depth masking that seamlessly places widgets behind wallpaper elements.
-- **App Launcher**: Quickly find and launch your applications.
-- **Control Center & Notifications**: Manage system notifications, volume/brightness sliders, and quick toggles.
-- **Settings GUI**: Centralized preferences for wallpaper selection, neural depth estimation (CPU/GPU), lock screen, greeter, and widgets.
-- **Keybindings Cheatsheet**: Quick visual reference overlay for your niri keybinds (read from `config.kdl`, `include`s followed) and shell shortcuts.
-- **Wallpaper Selector**: Easily switch between your favorite backgrounds.
-- **Blue Light Filter**: Night light with auto sunrise/sunset geolocation calculation, custom scheduling, and smooth gamma transitions via Wayland protocol.
-- **Idle Dimming**: Intelligent pre-lock dimming for laptop panels and external monitors (DDC/CI).
-- **Desktop MPRIS & Audio**: Media controls, album artwork, track seekbar, and audio sink switcher.
-- **Power Menu**: Sleek system controls (shutdown, reboot, suspend, etc.).
-- **Clipboard Manager**: A full, lightweight clipboard manager written entirely in QML (no reliance on `cliphist`).
-- **Lockscreen & Greeter**: Custom lockscreen and `greetd` login greeter interface featuring PAM authentication.
-- **OSD**: A simple OSD for brightness or volume changes.
+- **Desktop Widgets & Wallpaper Depth**: Clock, calendar, and media widgets featuring neural depth estimation that seamlessly tucks widgets behind background elements.
+- **Spotlight Search**: Fast, unified macOS/KRunner-style search indexing applications and files via `plocate`.
+- **App Launcher**: Full-featured grid launcher with fuzzy search and categorized views.
+- **Control Center & Notifications**: Manage desktop notifications, volume/brightness sliders, network status, and hardware quick-toggles.
+- **Settings GUI**: Centralized control center for wallpaper selection, neural depth estimation (CPU/GPU), lockscreen customization, and display preferences.
+- **Wallpaper Selector**: Live wallpaper browser with Material You dynamic color generation via `matugen`.
+- **Keybindings Cheatsheet**: Quick visual overlay showing your compositor's configured keybinds and shell actions.
+- **Clipboard Manager**: Fast, keyboard-navigable clipboard history manager with search and image preview support.
+- **Emoji Picker**: Searchable emoji picker with context-aware auto-paste into the active window.
+- **Color Picker**: Screen color picker with magnifying loupe and auto-copy to clipboard.
+- **Blue Light Filter**: Auto sunrise/sunset night light with smooth gamma transitions via the Wayland `wlr-gamma-control` protocol.
+- **Idle Dimming**: Smart pre-lock panel dimming for both laptop displays and external monitors (DDC/CI).
+- **Desktop MPRIS & Audio**: Persistent desktop player widget with cover art, playback scrubbing, and audio sink selection.
+- **Power Menu**: Clean system power controls (Lock, Logout, Reboot, Shutdown).
+- **Lockscreen & Greetd Login**: Secure lockscreen (`ext-session-lock-v1`) and multi-compositor `greetd` login screen featuring PAM authentication.
+- **OSD**: Sleek on-screen display notifications for volume and brightness adjustments.
+
+---
 
 ## 📸 Screenshots
 
 ### Desktop with Widgets & Wallpaper Depth
-![Desktop with Widgets & Wallpaper Depth](assets/screenshots/Desktop-with-widgets.png)
+![Desktop with Widgets & Wallpaper Depth](assets/screenshots/desktop-with-widgets.png)
 
-### Wallpaper Selector
-![Wallpaper Selector](assets/screenshots/Wallpaper-switcher.png)
+### Spotlight Search
+![Spotlight Search](assets/screenshots/spotlight-search.png)
 
 ### App Launcher
 ![App Launcher](assets/screenshots/app-launcher.png)
 
-### Control Center & Notifications
-![Control Center & Notifications](assets/screenshots/control-center.png)
+### Wallpaper Selector
+![Wallpaper Selector](assets/screenshots/wallpaper-selector.png)
+
+### Notification Center
+![Notification Center](assets/screenshots/notification-center.png)
 
 ### Settings Window
 ![Settings Window](assets/screenshots/settings.png)
@@ -59,82 +61,105 @@ Xeon Shell provides a comprehensive set of built-in tools and menus to keep your
 ### Lock Screen & Greeter
 ![Lock Screen & Greeter](assets/screenshots/lockscreen.png)
 
+---
+
 ## 📦 Dependencies
 
-Ensure you have the following installed on your system before proceeding:
-
 ### Core Requirements
-- **[Quickshell](https://quickshell.outfoxxed.me/)**: The core QML shell environment (`qs`).
-- **[niri](https://github.com/niri-wm/niri)**: The Wayland compositor (25.11+ recommended; the shell talks to it through `niri msg`).
-- **greetd**: Display manager daemon (required for the built-in Quickshell login greeter).
-- **qt6-5compat**: Qt6 compatibility module for QML effects and legacy transitions.
-- **jq**: JSON parsing in scripts.
-- **python3**: Required for geolocation and greeter helper bridge.
-- **wl-clipboard**: Required for the QML clipboard manager (`wl-paste`).
-- **wtype** *(optional)*: Lets the emoji picker auto-paste into the previously focused window (`ydotool` works as a fallback). Without either, emoji are only copied to the clipboard.
+- **[Quickshell](https://quickshell.outfoxxed.me/)**: The core QML desktop shell runtime (`qs`).
+- **Supported Wayland Compositor** (any of the following):
+  - **[niri](https://github.com/niri-wm/niri)** (25.11+ recommended)
+  - **[MangoWM](https://github.com/DreamMaoMao/mangowm)**
+  - **[Hyprland](https://hyprland.org/)**
+- **greetd**: Display manager daemon (required for the built-in login greeter).
+- **qt6-5compat**: Qt6 compatibility module for QML transitions and effects.
+- **jq**: JSON processing utility for scripts.
+- **python3**: Required for geolocation, search indexing, and greeter IPC bridge.
+- **wl-clipboard**: Wayland clipboard utilities (`wl-copy`, `wl-paste`).
+- **wtype** *(optional)*: Virtual keyboard utility for emoji auto-paste (`ydotool` supported as fallback).
 
 ### Theming & Multimedia
-- **awww** / **swww**: Wallpaper daemon.
-- **matugen**: Used for Material You dynamic theme generation based on your wallpaper.
-- **magick (ImageMagick)**: Required for generating wallpapers, thumbnails, and preview images.
-- **playerctl**: Controls MPRIS media players and streams track metadata.
-- **pipewire-pulse** / **pulseaudio-utils**: Provides `pactl` for audio sink and volume control.
-- **ffmpeg**: Used for video thumbnail generation.
+- **awww** / **swww**: Animated Wayland wallpaper daemon.
+- **matugen**: Material You dynamic theme generation from wallpaper palette.
+- **magick (ImageMagick)**: Thumbnail scaling and wallpaper processing.
+- **playerctl**: MPRIS media player controls and track metadata.
+- **pipewire-pulse** / **pulseaudio-utils**: Provides `wpctl` and `pactl` for audio control.
+- **ffmpeg**: Video thumbnail generation.
 
-### Hardware & Power
-- **brightnessctl**: Laptop screen brightness adjustments and idle dimming.
-- **ddcutil**: External monitor brightness control and idle dimming via DDC/CI.
-- **bluez-utils**: Provides `bluetoothctl` for Bluetooth status and battery reporting.
-- **systemd / logind**: Required for power menu actions via `loginctl` and `systemctl`.
+### Hardware & System
+- **brightnessctl**: Laptop backlight adjustments.
+- **ddcutil**: External monitor brightness control via DDC/CI.
+- **bluez-utils**: Provides `bluetoothctl` for Bluetooth status and battery levels.
+- **systemd / logind**: Power actions via `loginctl` and `systemctl`.
+- **plocate**: High-speed file search backend for Spotlight Search.
+
+---
 
 ## 🛠️ Installation
 
-1. **Install Quickshell**: Follow the instructions on the [Quickshell website](https://quickshell.outfoxxed.me/) to install it for your distribution.
-2. **Clone the repository**: Download this configuration to your Quickshell config directory.
+1. **Install Quickshell**: Follow the instructions at [quickshell.outfoxxed.me](https://quickshell.outfoxxed.me/).
+2. **Clone the repository**:
    ```sh
-   git clone <repository_url> ~/.config/quickshell/xeon-shell-niri
+   git clone <repository_url> ~/.config/quickshell/prism
    ```
-   *(If you've already cloned it, simply move the `xeon-shell-niri` folder to `~/.config/quickshell/`)*
-3. **Run the install script**:
+3. **Run the installer**:
    ```sh
-   cd ~/.config/quickshell/xeon-shell-niri
+   cd ~/.config/quickshell/prism
    ./deploy-install/install.sh
    ```
-   *(Note: Settings migration only happens via this install script. If you pull updates without running install.sh, old settings won't migrate.)*
-4. **Run the shell**:
+   *The installer detects your compositor, sets up cache/state directories, migrates any legacy configuration files, configures Matugen theming, and optionally sets up the `greetd` login screen.*
+
+4. **Launch Prism**:
    ```sh
-   qs -c xeon-shell-niri
+   qs -c prism
    ```
 
-## 🎮 Usage & IPC Calls
+---
 
-Xeon Shell is controlled via Quickshell's Inter-Process Communication (IPC). You can bind the following commands in your niri configuration (`~/.config/niri/config.kdl`) to toggle various menus. A ready-made set of binds, autostart line and recovery bind is in [`deploy/xeon-shell-niri.kdl`](deploy/xeon-shell-niri.kdl).
+## 🎮 Compositor Autostart & Keybindings
 
-### Available Commands:
+Ready-made configuration snippets are provided in [`deploy/`](deploy/):
 
-- **App Launcher**: `qs -c xeon-shell-niri ipc call launcher toggle`
-- **Wallpaper Selector**: `qs -c xeon-shell-niri ipc call wallpaper toggle`
-- **Clipboard Manager**: `qs -c xeon-shell-niri ipc call clipboard toggle`
-- **Power Menu**: `qs -c xeon-shell-niri ipc call power toggle`
-- **Notification Center**: `qs -c xeon-shell-niri ipc call notif toggle`
-- **Emoji Picker**: `qs -c xeon-shell-niri ipc call emoji toggle`
-- **Settings**: `qs -c xeon-shell-niri ipc call settings toggle`
-- **Keybind Viewer**: `qs -c xeon-shell-niri ipc call keybinds toggle`
-- **Lock Screen**: `qs -c xeon-shell-niri ipc call lock lock`
+### For Niri (`~/.config/niri/config.kdl`):
+```kdl
+include "prism-niri.kdl"
+```
+*(or copy from `deploy/prism-niri.kdl`)*
 
-### Handled by niri itself
+### For MangoWM (`~/.config/mango/config.conf`):
+```ini
+source = ~/.config/mango/prism-mango.conf
+```
+*(or copy from `deploy/prism-mango.conf`)*
 
-Xeon Shell no longer ships these; niri's built-in versions are used instead:
+### For Hyprland (`~/.config/hypr/hyprland.conf`):
+```ini
+source = ~/.config/hypr/prism-hyprland.conf
+```
+*(or copy from `deploy/prism-hyprland.conf`)*
 
-- **Overview**: press and release `Mod` by itself, or use the top-left hot corner / four-finger swipe up (`toggle-overview`; bind it to a key of your choice if you prefer).
-- **Alt-Tab window switcher**: `Alt+Tab` and `Alt+Shift+Tab` (niri 25.11+, tune it in the `recent-windows {}` section).
-- **Screenshots**: `Print` (interactive region UI), `Ctrl+Print` (screen), `Alt+Print` (window). Captures go to the clipboard and to `screenshot-path`.
-- **Screen recording** is not provided by niri. Use `wl-screenrec`, `wf-recorder` or OBS.
+---
 
-### Help
+## ⚡ IPC Control
 
-For more information about available IPC calls and extended options, run:
+Prism is controlled via Quickshell IPC. You can bind these commands to any key combination:
 
+| Action | IPC Command |
+|---|---|
+| **App Launcher** | `qs -c prism ipc call launcher toggle` |
+| **Spotlight Search** | `qs -c prism ipc call search toggle` |
+| **Wallpaper Selector** | `qs -c prism ipc call wallpaper toggle` |
+| **Notification Center** | `qs -c prism ipc call notif toggle` |
+| **Clipboard History** | `qs -c prism ipc call clipboard toggle` |
+| **Emoji Picker** | `qs -c prism ipc call emoji toggle` |
+| **Color Picker** | `qs -c prism ipc call colorpicker toggle` |
+| **Settings** | `qs -c prism ipc call settings toggle` |
+| **Power Menu** | `qs -c prism ipc call power toggle` |
+| **Keybindings Overlay** | `qs -c prism ipc call keybinds toggle` |
+| **Lock Screen** | `qs -c prism ipc call lock lock` |
+| **Theme Reload** | `qs -c prism ipc call theme reload` |
+
+For a complete list of commands and methods:
 ```sh
-qs -c xeon-shell-niri ipc call help display
+qs -c prism ipc call help display
 ```

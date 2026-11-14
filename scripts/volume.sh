@@ -23,6 +23,10 @@ get_muted() {
     wpctl get-volume @DEFAULT_AUDIO_SINK@ | grep -q MUTED && echo 1 || echo 0
 }
 
+send_osd() {
+    (qs -c prism ipc call osd volume "$1" 2>/dev/null || qs -c xeon-shell-niri ipc call osd volume "$1" 2>/dev/null || true) &
+}
+
 action="${1:-}"
 
 case "$action" in
@@ -36,7 +40,7 @@ case "$action" in
         wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(awk "BEGIN{printf \"%.2f\", $target/100}")"
         # Unmute on volume up
         wpctl set-mute @DEFAULT_AUDIO_SINK@ 0
-        qs -c xeon-shell-niri ipc call osd volume "$target" &
+        send_osd "$target"
         ;;
     -[0-9]*)
         step="${action#-}"
@@ -46,15 +50,15 @@ case "$action" in
             target=0
         fi
         wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(awk "BEGIN{printf \"%.2f\", $target/100}")"
-        qs -c xeon-shell-niri ipc call osd volume "$target" &
+        send_osd "$target"
         ;;
     mute)
         wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
         if [ "$(get_muted)" = "1" ]; then
-            qs -c xeon-shell-niri ipc call osd volume 0 &
+            send_osd 0
         else
             vol=$(get_volume)
-            qs -c xeon-shell-niri ipc call osd volume "$vol" &
+            send_osd "$vol"
         fi
         ;;
     *)

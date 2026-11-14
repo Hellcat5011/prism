@@ -119,7 +119,7 @@ Item {
                 root.indexUpdated()
                 Quickshell.execDetached([
                     "notify-send",
-                    "-a", "Xeon Shell",
+                    "-a", "Prism",
                     "Search Index",
                     "File search index updated successfully.",
                     "-i", "system-search"

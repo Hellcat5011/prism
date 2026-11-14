@@ -56,11 +56,33 @@ if [ "$TARGET_ID" = "none" ]; then
     exit 0
 fi
 
-# Helper: read one field of the focused window from niri ("" when nothing is focused).
-#   get_active_field id      → numeric window id
-#   get_active_field app_id  → application id (e.g. "foot", "org.gnome.Nautilus")
+# Helper: read one field of the focused window ("" when nothing is focused).
+# Supports Niri, MangoWM, and Hyprland.
+#   get_active_field id      → window id or address
+#   get_active_field app_id  → application id or class
 get_active_field() {
     local field="$1"
+    # 1. Hyprland
+    if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+        if [ "$field" = "id" ]; then
+            hyprctl activewindow -j 2>/dev/null | jq -r '(.address // empty) | tostring' 2>/dev/null | head -n 1 || true
+        else
+            hyprctl activewindow -j 2>/dev/null | jq -r '((.class // .initialClass) // empty) | tostring' 2>/dev/null | head -n 1 || true
+        fi
+        return
+    fi
+
+    # 2. MangoWM
+    if [ -n "${MANGO_INSTANCE_SIGNATURE:-}" ]; then
+        if [ "$field" = "id" ]; then
+            mmsg get focusing-client 2>/dev/null | jq -r '((.id // .window // .pid) // empty) | tostring' 2>/dev/null | head -n 1 || true
+        else
+            mmsg get focusing-client 2>/dev/null | jq -r '((.app_id // .class) // empty) | tostring' 2>/dev/null | head -n 1 || true
+        fi
+        return
+    fi
+
+    # 3. Niri (default)
     (niri msg --json focused-window 2>/dev/null || echo 'null') \
         | jq -r --arg f "$field" '(.[$f] // empty) | tostring' 2>/dev/null | head -n 1 || true
 }

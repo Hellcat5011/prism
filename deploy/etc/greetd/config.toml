@@ -1,4 +1,4 @@
-# greetd configuration for Xeon Shell's Quickshell greeter.
+# greetd configuration for Prism's Quickshell greeter.
 
 [terminal]
 vt = 1

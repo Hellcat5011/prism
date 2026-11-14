@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/wallpaper-depth.py — Wallpaper Depth estimation and mask generator for xeon-shell-niri.
+scripts/wallpaper-depth.py — Wallpaper Depth estimation and mask generator for Prism.
 
 Uses Depth Anything V2 Small (ONNX) to generate foreground alpha depth masks
 for desktop wallpapers, allowing desktop widgets to appear behind foreground scenery.
@@ -32,8 +32,13 @@ MODEL_EXPECTED_SIZE = 99060839
 XDG_DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
 XDG_CACHE_HOME = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
 
-DATA_DIR = os.path.join(XDG_DATA_HOME, "xeon-shell-niri", "wallpaper-depth")
-CACHE_DIR = os.path.join(XDG_CACHE_HOME, "Xeon Shell Niri", "wallpaper-depth")
+DATA_DIR = os.path.join(XDG_DATA_HOME, "prism", "wallpaper-depth")
+if not os.path.isdir(DATA_DIR) and os.path.isdir(os.path.join(XDG_DATA_HOME, "xeon-shell-niri", "wallpaper-depth")):
+    DATA_DIR = os.path.join(XDG_DATA_HOME, "xeon-shell-niri", "wallpaper-depth")
+
+CACHE_DIR = os.path.join(XDG_CACHE_HOME, "Prism", "wallpaper-depth")
+if not os.path.isdir(CACHE_DIR) and os.path.isdir(os.path.join(XDG_CACHE_HOME, "Xeon Shell Niri", "wallpaper-depth")):
+    CACHE_DIR = os.path.join(XDG_CACHE_HOME, "Xeon Shell Niri", "wallpaper-depth")
 MODEL_DIR = os.path.join(DATA_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
 VENV_DIR = os.path.join(DATA_DIR, "venv")
@@ -751,7 +756,7 @@ def run_watch(wallpaper_dir, threshold=30, feather=8, device="cpu"):
 def main():
     setup_pdeathsig()
 
-    parser = argparse.ArgumentParser(description="Wallpaper Depth processor for xeon-shell-niri")
+    parser = argparse.ArgumentParser(description="Wallpaper Depth processor for Prism")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("status")

@@ -12,7 +12,7 @@
 # Does NOT set a wallpaper, write ~/.wa*.jpg, or touch the greeter.
 #
 # Env:
-#   XEON_NO_RESTART=1   skip step 3 (useful when testing from a terminal)
+#   PRISM_NO_RESTART=1 (or XEON_NO_RESTART=1)  skip step 3 (useful when testing from a terminal)
 set -euo pipefail
 
 SCHEME="${1:?usage: regenerate-theme.sh <scheme> [mode]}"
@@ -68,16 +68,16 @@ sed -i -E "s|^SCHEME=\"\\$\\{3:-[^}]*\\}\"\$|SCHEME=\"\${3:-$SCHEME}\"|" "$SET_W
 # ── 3. Restart Quickshell, detached ────────────────────────────────────
 # This script is normally a child of the very qs process we are about to
 # kill, so the restart runs in its own session after we have exited.
-if [ "${XEON_NO_RESTART:-0}" = "1" ]; then
-    echo "regenerate-theme.sh: XEON_NO_RESTART set, skipping Quickshell restart." >&2
+if [ "${PRISM_NO_RESTART:-${XEON_NO_RESTART:-0}}" = "1" ]; then
+    echo "regenerate-theme.sh: restart skipped via environment variable." >&2
     exit 0
 fi
 
 setsid -f bash -c '
     sleep 0.5
-    qs kill -c xeon-shell-niri 2>/dev/null || killall qs 2>/dev/null || true
+    qs kill -c prism 2>/dev/null || qs kill -c xeon-shell-niri 2>/dev/null || killall qs 2>/dev/null || true
     sleep 1
-    exec qs -c xeon-shell-niri
-' >>/tmp/xeon-shell-restart.log 2>&1 </dev/null
+    exec qs -c prism 2>/dev/null || exec qs -c xeon-shell-niri
+' >>/tmp/prism-restart.log 2>&1 </dev/null
 
 exit 0

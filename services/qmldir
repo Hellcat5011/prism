@@ -10,3 +10,4 @@ BlueLightFilter 1.0 BlueLightFilter.qml
 singleton Fuzzy 1.0 Fuzzy.qml
 singleton NcNetwork 1.0 NcNetwork.qml
 singleton IndexService 1.0 IndexService.qml
+singleton CompositorService 1.0 CompositorService.qml

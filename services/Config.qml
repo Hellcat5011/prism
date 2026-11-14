@@ -11,14 +11,18 @@ Item {
     // belt-and-braces rather than the load-bearing mechanism.
     readonly property var _appInfo: AppInfo
 
-    Component.onCompleted: discard()
+    Component.onCompleted: {
+        let migrateScript = "mkdir -p ~/.config/Prism; if [ ! -f ~/.config/Prism/prism.conf ] && [ -f ~/.config/'Xeon Shell Niri'/xeon-shell-niri.conf ]; then cp ~/.config/'Xeon Shell Niri'/xeon-shell-niri.conf ~/.config/Prism/prism.conf; fi"
+        Quickshell.execDetached(["bash", "-c", migrateScript])
+        discard()
+    }
 
     Process {
         id: restartProcess
         command: [
             "bash",
             "-c",
-            "notify-send 'Xeon Shell' 'Applying changes - restarting shell...' -t 2000 -h string:x-canonical-private-synchronous:xeon-restart; setsid bash -c 'sleep 1 && killall qs && sleep 0.3 && qs -c xeon-shell-niri' >/dev/null 2>&1 & disown"
+            "notify-send 'Prism' 'Applying changes - restarting shell...' -t 2000 -h string:x-canonical-private-synchronous:prism-restart; setsid bash -c 'sleep 1 && killall qs && sleep 0.3 && (qs -c prism 2>/dev/null || qs -c xeon-shell-niri)' >/dev/null 2>&1 & disown"
         ]
     }
 
@@ -314,10 +318,16 @@ Item {
         let preset = blurPresets[idx]
         let passes = preset.passes
         let offset = Number(preset.offset).toFixed(1)
-        let content = "blur {\\n    passes " + passes + "\\n    offset " + offset + "\\n}\\n"
-        let script = "mkdir -p ~/.config/niri/user && printf '" + content + "' > ~/.config/niri/user/shell-blur.kdl"
-        niriBlurWriter.command = ["bash", "-c", script]
-        niriBlurWriter.running = true
+
+        if (CompositorService.isNiri) {
+            let content = "blur {\\n    passes " + passes + "\\n    offset " + offset + "\\n}\\n"
+            let script = "mkdir -p ~/.config/niri/user && printf '" + content + "' > ~/.config/niri/user/shell-blur.kdl"
+            niriBlurWriter.command = ["bash", "-c", script]
+            niriBlurWriter.running = true
+        } else if (CompositorService.isHyprland) {
+            niriBlurWriter.command = ["hyprctl", "--batch", "keyword decoration:blur:passes " + passes + " ; keyword decoration:blur:size " + Math.round(preset.offset)]
+            niriBlurWriter.running = true
+        }
     }
 
     Settings {

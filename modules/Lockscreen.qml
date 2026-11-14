@@ -5,7 +5,7 @@
 // proper Wayland session locking, with PAM authentication.
 //
 // Trigger via:
-//   qs -c xeon-shell-niri ipc call lock lock
+//   qs -c prism ipc call lock lock (or qs -c xeon-shell-niri)
 //   loginctl lock-session
 // ─────────────────────────────────────────────────────────────────────────
 import QtQuick
@@ -26,8 +26,7 @@ Scope {
     readonly property string sessionName: {
         let s = Quickshell.env("XDG_CURRENT_DESKTOP") || Quickshell.env("XDG_SESSION_DESKTOP") || Quickshell.env("DESKTOP_SESSION") || ""
         if (s.trim().length > 0) return s
-        if (Quickshell.env("NIRI_SOCKET")) return "niri"
-        return "Wayland"
+        return CompositorService.displayName
     }
     property string currentText: ""
     property string statusMessage: ""
