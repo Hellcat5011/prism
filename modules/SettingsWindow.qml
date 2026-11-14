@@ -146,8 +146,11 @@ OverlayWindow {
                 return
             }
             Config.discard()
-            keyHandler.forceActiveFocus()
+            Qt.callLater(() => keyHandler.forceActiveFocus())
             if (searchField) searchField.text = ""
+        } else {
+            keyHandler.focus = false
+            if (searchField) searchField.focus = false
         }
     }
 

@@ -69,9 +69,11 @@ OverlayWindow {
             refreshApps()
             launcher.selectedIndex = 0
             list.positionViewAtBeginning()
-            queryField.forceActiveFocus()
+            Qt.callLater(() => queryField.forceActiveFocus())
             launcher.mouseActivated = false
             mouseReadyTimer.restart()
+        } else {
+            queryField.focus = false
         }
     }
 

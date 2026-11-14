@@ -21,7 +21,9 @@ OverlayWindow {
     onShownChanged: {
         if (shown) {
             selectedIndex = -1;
-            keyHandler.forceActiveFocus();
+            Qt.callLater(() => keyHandler.forceActiveFocus());
+        } else {
+            keyHandler.focus = false;
         }
     }
 

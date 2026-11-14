@@ -23,8 +23,9 @@ Item {
 
     readonly property bool debugMode: Quickshell.env("PRISM_BLUR_DEBUG") === "1"
 
-    // The resolved Region object when blur is enabled and active, or null when disabled
-    readonly property Region region: (Config.blurEnabled && root.active)
+    // The resolved Region object when blur is enabled, active, and running on a compositor
+    // supporting client blur regions (ext-background-effect-v1, e.g. Niri), or null otherwise.
+    readonly property Region region: (Config.blurEnabled && root.active && CompositorService.isNiri)
         ? (root.customRegion ? root.customRegion : (root.target ? defaultRegion : null))
         : null
 

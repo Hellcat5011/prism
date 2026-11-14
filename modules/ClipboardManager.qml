@@ -18,7 +18,9 @@ OverlayWindow {
             refreshClipboard()
             clipboard.selectedIndex = 0
             list.positionViewAtBeginning()
-            queryField.forceActiveFocus()
+            Qt.callLater(() => queryField.forceActiveFocus())
+        } else {
+            queryField.focus = false
         }
     }
 

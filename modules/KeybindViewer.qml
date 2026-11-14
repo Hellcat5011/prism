@@ -1,9 +1,12 @@
 // ─────────────────────────────────────────────────────────────────────────
-// KeybindViewer.qml — read-only overlay that displays niri keybinds
+// KeybindViewer.qml — read-only overlay that displays compositor keybinds
 //
-// Runs scripts/parse-niri-binds.py, which reads the `binds { … }` block of
-// ~/.config/niri/config.kdl (following `include`s) and prints JSON. Each
-// bind becomes a  Key → Action  row, grouped into sections (Shell,
+// Dynamically invokes the appropriate parser script based on CompositorService:
+//   - MangoWM:   scripts/parse-mango-binds.py
+//   - Hyprland:  scripts/parse-hyprland-binds.py
+//   - Niri:      scripts/parse-niri-binds.py
+//
+// Each bind becomes a  Key → Action  row, grouped into sections (Shell,
 // Applications, Windows, Columns, Workspaces, …) chosen from the action.
 // ─────────────────────────────────────────────────────────────────────────
 import QtQuick
@@ -20,12 +23,21 @@ OverlayWindow {
     panelWidth:  width > 0 ? Math.min(width * 0.82, 1400) : 1200
     panelHeight: height > 0 ? height * 0.78 : 700
 
+    function getParserScript() {
+        if (CompositorService.isMango) {
+            return Quickshell.shellDir + "/scripts/parse-mango-binds.py"
+        } else if (CompositorService.isHyprland) {
+            return Quickshell.shellDir + "/scripts/parse-hyprland-binds.py"
+        }
+        return Quickshell.shellDir + "/scripts/parse-niri-binds.py"
+    }
+
     // ── File reader ──────────────────────────────────────────────────────
     property string rawContent: ""
 
     Process {
         id: reader
-        command: ["python3", Quickshell.shellDir + "/scripts/parse-niri-binds.py"]
+        command: ["python3", keybindViewer.getParserScript()]
         property string buf: ""
         onRunningChanged: {
             if (running) buf = ""
@@ -39,8 +51,12 @@ OverlayWindow {
 
     onShownChanged: {
         if (shown) {
+            if (reader.running) reader.running = false
+            reader.command = ["python3", keybindViewer.getParserScript()]
             reader.running = true
-            keyHandler.forceActiveFocus()
+            Qt.callLater(() => keyHandler.forceActiveFocus())
+        } else {
+            keyHandler.focus = false
         }
     }
 
@@ -58,13 +74,19 @@ OverlayWindow {
             let parsed = JSON.parse(rawContent.trim() || "[]")
             if (Array.isArray(parsed)) result = parsed
         } catch (e) {
-            console.warn("KeybindViewer: could not parse niri keybinds -", e)
+            console.warn("KeybindViewer: could not parse keybinds -", e)
         }
         binds = result
         _splitColumns()
     }
 
     function _splitColumns() {
+        if (!binds || binds.length === 0) {
+            leftBinds = []
+            rightBinds = []
+            return
+        }
+
         // Split binds into two columns, trying to break at a section boundary
         // near the midpoint so sections don't get split across columns.
         let mid = Math.ceil(binds.length / 2)
@@ -111,12 +133,33 @@ OverlayWindow {
             RowLayout {
                 Layout.fillWidth: true
                 Layout.bottomMargin: 16
+                spacing: 12
 
                 Text {
                     text: "⌨  Keybindings"
                     color: Theme.onPrimaryContainerColor
                     font.pixelSize: 22
                     font.weight: Font.Bold
+                }
+
+                Rectangle {
+                    visible: CompositorService.displayName !== ""
+                    radius: 6
+                    color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.15)
+                    border.width: 1
+                    border.color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.3)
+                    implicitHeight: compNameText.implicitHeight + 6
+                    implicitWidth: compNameText.implicitWidth + 14
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                        id: compNameText
+                        anchors.centerIn: parent
+                        text: CompositorService.displayName
+                        color: Theme.primary
+                        font.pixelSize: 12
+                        font.weight: Font.DemiBold
+                    }
                 }
 
                 Item { Layout.fillWidth: true }
@@ -150,6 +193,33 @@ OverlayWindow {
                     color: Qt.rgba(Theme.surfaceVariant.r,
                                    Theme.surfaceVariant.g,
                                    Theme.surfaceVariant.b, 0.15)
+                }
+
+                // Empty / Loading state
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    visible: keybindViewer.binds.length === 0
+                    spacing: 8
+
+                    Text {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: reader.running ? "Loading keybindings…" : "No keybindings found"
+                        color: Qt.rgba(Theme.onPrimaryContainerColor.r,
+                                       Theme.onPrimaryContainerColor.g,
+                                       Theme.onPrimaryContainerColor.b, 0.5)
+                        font.pixelSize: 16
+                        font.weight: Font.Medium
+                    }
+
+                    Text {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: !reader.running
+                        text: "Configured parser for " + CompositorService.displayName + " returned no bindings."
+                        color: Qt.rgba(Theme.onPrimaryContainerColor.r,
+                                       Theme.onPrimaryContainerColor.g,
+                                       Theme.onPrimaryContainerColor.b, 0.3)
+                        font.pixelSize: 12
+                    }
                 }
 
                 Flickable {
@@ -375,25 +445,27 @@ OverlayWindow {
 
                         function _prettyKey(k) {
                             k = k.trim()
-                            if (k === "return") return "↵"
-                            if (k === "RETURN") return "↵"
-                            if (k === "PRINT")  return "PrtSc"
-                            if (k === "Next")   return "PgDn"
-                            if (k === "Prior")  return "PgUp"
-                            if (k === "left")   return "←"
-                            if (k === "right")  return "→"
-                            if (k === "up")     return "↑"
-                            if (k === "down")   return "↓"
-                            if (k === "mouse:272") return "LMB"
-                            if (k === "mouse:273") return "RMB"
-                            if (k === "mouse_down") return "Scroll ↓"
-                            if (k === "mouse_up")   return "Scroll ↑"
-                            if (k === "bracketright") return "]"
-                            if (k === "bracketleft")  return "["
+                            let low = k.toLowerCase()
+                            if (low === "return" || low === "enter") return "↵"
+                            if (low === "print" || low === "prtsc")  return "PrtSc"
+                            if (low === "next" || low === "page_down" || low === "pgdn") return "PgDn"
+                            if (low === "prior" || low === "page_up" || low === "pgup")  return "PgUp"
+                            if (low === "left")   return "←"
+                            if (low === "right")  return "→"
+                            if (low === "up")     return "↑"
+                            if (low === "down")   return "↓"
+                            if (low === "mouse:272" || low === "btn_left" || low === "lmb") return "LMB"
+                            if (low === "mouse:273" || low === "btn_right" || low === "rmb") return "RMB"
+                            if (low === "mouse:274" || low === "btn_middle" || low === "mmb") return "MMB"
+                            if (low === "mouse_down" || low === "scroll down" || low === "scroll ↓") return "Scroll ↓"
+                            if (low === "mouse_up" || low === "scroll up" || low === "scroll ↑")   return "Scroll ↑"
+                            if (low === "bracketright") return "]"
+                            if (low === "bracketleft")  return "["
                             if (k.startsWith("XF86Audio"))  return k.replace("XF86Audio", "🔊 ")
                             if (k.startsWith("XF86MonBrightness")) return k.replace("XF86MonBrightness", "🔆 ")
-                            if (k === "SPACE" || k === "Space") return "␣"
-                            if (k === "ESCAPE" || k === "escape") return "Esc"
+                            if (low === "space") return "␣"
+                            if (low === "escape" || low === "esc") return "Esc"
+                            if (low === "delete" || low === "del") return "Del"
                             return k
                         }
                     }

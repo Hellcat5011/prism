@@ -96,10 +96,11 @@ OverlayWindow {
             refreshView();
             picker.selectedIndex = 0;
             if (grid.count > 0) grid.positionViewAtBeginning();
-            searchField.forceActiveFocus();
+            Qt.callLater(() => searchField.forceActiveFocus());
             picker.lastMouseX = -1;
             picker.lastMouseY = -1;
         } else {
+            searchField.focus = false;
             captureTimeoutTimer.stop();
             picker.openingPending = false;
         }

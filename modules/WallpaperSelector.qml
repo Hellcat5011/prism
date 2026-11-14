@@ -44,6 +44,8 @@ OverlayWindow {
             shuffleAndDisplay()
             if (!scanProcess.running)
                 scanProcess.running = true
+        } else {
+            carousel.focus = false
         }
     }
 
@@ -68,7 +70,7 @@ OverlayWindow {
         }
         picker.wallpapers = duplicatedArr
         picker.currentIndex = 0
-        if (picker.shown) carousel.forceActiveFocus()
+        if (picker.shown) Qt.callLater(() => carousel.forceActiveFocus())
     }
 
     Process {

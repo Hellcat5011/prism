@@ -79,7 +79,14 @@ PanelWindow {
         id: closingTimer
         interval: Theme.animMed + 100
     }
-    onShownChanged: if (!shown) closingTimer.start()
+    onShownChanged: {
+        if (!shown) {
+            closingTimer.start()
+            if (root.activeFocusItem) {
+                root.activeFocusItem.focus = false
+            }
+        }
+    }
 
     // Click anywhere on the full-screen backdrop to dismiss.
     MouseArea {

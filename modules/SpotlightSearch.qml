@@ -168,10 +168,11 @@ OverlayWindow {
             appsProvider.refreshApps()
             appsProvider.cancel()
             filesProvider.cancel()
-            queryField.forceActiveFocus()
+            Qt.callLater(() => queryField.forceActiveFocus())
             root.mouseActivated = false
             mouseReadyTimer.restart()
         } else {
+            queryField.focus = false
             filesProvider.cancel()
             appsProvider.cancel()
             results = []
