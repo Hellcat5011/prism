@@ -127,14 +127,14 @@ OverlayWindow {
 
     Process {
         id: mkdirProcess
-        command: ["mkdir", "-p", picker.stateDir]
+        command: ["/bin/mkdir", "-p", picker.stateDir]
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Focused Window Capture & Paste (via niri IPC)
     // ─────────────────────────────────────────────────────────────────────────
     function captureActiveWindow() {
-        captureProcess.running = true;
+        if (!captureProcess.running) captureProcess.running = true;
     }
 
     // Maps niri's focused-output object ({ name: "DP-1", ... }) onto a Quickshell
@@ -152,7 +152,7 @@ OverlayWindow {
 
     Process {
         id: captureProcess
-        command: ["bash", Quickshell.shellDir + "/scripts/niri-focus-info.sh"]
+        command: ["/bin/bash", Quickshell.shellDir + "/scripts/niri-focus-info.sh"]
         stdout: StdioCollector {
             id: captureCollector
             onStreamFinished: {

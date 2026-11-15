@@ -44,12 +44,12 @@ Scope {
     }
 
     function refreshWallpaper() {
-        wallpaperProcess.running = true;
+        if (!wallpaperProcess.running) wallpaperProcess.running = true;
     }
 
     Process {
         id: wallpaperProcess
-        command: ["bash", Quickshell.shellDir + "/scripts/get-current-wallpaper.sh", Config.wallpaperDaemon]
+        command: ["/bin/bash", Quickshell.shellDir + "/scripts/get-current-wallpaper.sh", Config.wallpaperDaemon]
         property string outBuf: ""
         onRunningChanged: {
             if (running) {

@@ -44,7 +44,7 @@ Item {
 
     // ── Stat Process for Last Indexed Timestamp ─────────────────────────
     property Process statProcess: Process {
-        command: ["stat", "-c", "%Y", "/var/lib/plocate/plocate.db"]
+        command: ["/bin/stat", "-c", "%Y", "/var/lib/plocate/plocate.db"]
         stdout: SplitParser {
             onRead: data => {
                 const line = data.trim()
@@ -78,12 +78,12 @@ Item {
 
     function refreshTimestamp() {
         _statBuffer = ""
-        statProcess.running = true
+        if (!statProcess.running) statProcess.running = true
     }
 
     // ── Pre-flight Check: updatedb already running ──────────────────────
     property Process checkRunningProcess: Process {
-        command: ["pgrep", "-x", "updatedb|plocate-build"]
+        command: ["/bin/pgrep", "-x", "updatedb|plocate-build"]
         onExited: (code) => {
             if (code === 0) {
                 root.status = "already_running"
@@ -96,13 +96,13 @@ Item {
             root.statusMessage = "Indexing…"
             root._stderrBuffer = ""
             root._pkexecStartTime = Date.now()
-            pkexecProcess.running = true
+            if (!pkexecProcess.running) pkexecProcess.running = true
         }
     }
 
     // ── Main pkexec Process (fixed argv, no shell string) ───────────────
     property Process pkexecProcess: Process {
-        command: ["pkexec", "updatedb", "--prune-bind-mounts", "no"]
+        command: ["/bin/pkexec", "updatedb", "--prune-bind-mounts", "no"]
         stderr: SplitParser {
             onRead: data => {
                 root._stderrBuffer += data + "\n"

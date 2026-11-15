@@ -109,7 +109,7 @@ OverlayWindow {
         }
         if (needsGreeterSync) {
             applyProc.isPopup = isFromPopup;
-            applyProc.command = ["python3", Quickshell.shellDir + "/scripts/write-greeter-snapshot.py", "--alignment", Config.lockscreenAlignment, "--remember", (Config.rememberLastUser ? "true" : "false")];
+            applyProc.command = ["/usr/bin/python3", Quickshell.shellDir + "/scripts/write-greeter-snapshot.py", "--alignment", Config.lockscreenAlignment, "--remember", (Config.rememberLastUser ? "true" : "false")];
             applyProc.running = true;
         }
         if (!needsGreeterSync && !schemeChanged && !modeChanged) {

@@ -75,7 +75,7 @@ OverlayWindow {
 
     Process {
         id: scanProcess
-        command: ["bash", Quickshell.shellDir + "/scripts/gen-wallpaper-thumbs.sh", picker.wallpaperDir]
+        command: ["/bin/bash", Quickshell.shellDir + "/scripts/gen-wallpaper-thumbs.sh", picker.wallpaperDir]
         property var _buffer: []
 
         onRunningChanged: {

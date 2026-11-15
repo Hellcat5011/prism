@@ -18,7 +18,7 @@ Item {
     Process {
         id: restartProcess
         command: [
-            "bash",
+            "/bin/bash",
             "-c",
             "notify-send 'Prism' 'Applying changes - restarting shell...' -t 2000 -h string:x-canonical-private-synchronous:prism-restart; setsid bash -c 'sleep 1 && killall qs && sleep 0.3 && qs -c prism' >/dev/null 2>&1 & disown"
         ]

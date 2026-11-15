@@ -171,9 +171,9 @@ Singleton {
     function scan() {
         if (!wifiEnabled || scanning || !wifiPresent) return;
         scanning = true;
-        rescanProc.running = true;
+        if (!rescanProc.running) rescanProc.running = true;
         scanTimer.restart();
-        listProc.running = true;
+        if (!listProc.running) listProc.running = true;
     }
 
     Timer { id: refreshTimer; interval: 400; onTriggered: root.refresh() }
@@ -181,7 +181,7 @@ Singleton {
     Timer {
         id: scanTimer
         interval: 3000
-        onTriggered: { root.scanning = false; listProc.running = true; }
+        onTriggered: { root.scanning = false; if (!listProc.running) listProc.running = true; }
     }
     Timer {
         interval: 8000; repeat: true
@@ -191,7 +191,7 @@ Singleton {
 
     Process {
         id: monitorProc
-        command: ["nmcli", "monitor"]
+        command: ["setpriv", "--pdeathsig", "TERM", "nmcli", "monitor"]
         running: true
         stdout: SplitParser { onRead: data => root.refreshSoon() }
     }

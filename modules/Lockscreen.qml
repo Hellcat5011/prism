@@ -552,7 +552,7 @@ Scope {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
-                                    powerProcess.command = ["sh", "-c", parent.command]
+                                    powerProcess.command = ["/bin/sh", "-c", parent.command]
                                     powerProcess.running = true
                                 }
                             }

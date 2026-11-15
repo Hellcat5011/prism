@@ -385,7 +385,7 @@ Item {
 
     Process {
         id: locationProc
-        command: ["python3", Quickshell.shellDir + "/scripts/get-location.py"]
+        command: ["/usr/bin/python3", Quickshell.shellDir + "/scripts/get-location.py"]
         stdout: SplitParser {
             onRead: data => {
                 let parts = data.trim().split(",");

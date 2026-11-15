@@ -12,10 +12,19 @@ pkill -f "clipboard-prune.sh" 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-wl-paste -t text/plain --watch "$SCRIPT_DIR/clipboard-add.sh" text &
-wl-paste -t image/png --watch "$SCRIPT_DIR/clipboard-add.sh" image &
+guard=()
+command -v setpriv >/dev/null 2>&1 && guard=(setpriv --pdeathsig TERM)
+
+cleanup() {
+    trap - EXIT INT TERM HUP
+    kill $(jobs -p) 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM HUP
+
+"${guard[@]}" wl-paste -t text/plain --watch "$SCRIPT_DIR/clipboard-add.sh" text &
+"${guard[@]}" wl-paste -t image/png --watch "$SCRIPT_DIR/clipboard-add.sh" image &
 
 # Start the 24-hour auto-expiry pruner in the background
-"$SCRIPT_DIR/clipboard-prune.sh" &
+"${guard[@]}" "$SCRIPT_DIR/clipboard-prune.sh" &
 
 wait

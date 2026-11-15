@@ -44,7 +44,7 @@ Item {
     // 1. Status checker process
     Process {
         id: statusProcess
-        command: ["python3", Quickshell.shellDir + "/scripts/wallpaper-depth.py", "status"]
+        command: ["/usr/bin/python3", Quickshell.shellDir + "/scripts/wallpaper-depth.py", "status"]
         property string outBuf: ""
 
         onRunningChanged: {
@@ -200,7 +200,7 @@ Item {
     // 5. Cache clearing process
     Process {
         id: clearProcess
-        command: ["python3", Quickshell.shellDir + "/scripts/wallpaper-depth.py", "clear-cache"]
+        command: ["/usr/bin/python3", Quickshell.shellDir + "/scripts/wallpaper-depth.py", "clear-cache"]
         onExited: (code) => {
             root.refreshStatus();
             if (root.enabled) {
@@ -369,7 +369,7 @@ Item {
 
     Process {
         id: detectTxtProcess
-        command: ["cat", Quickshell.shellDir + "/data/current-wallpaper.txt"]
+        command: ["/bin/cat", Quickshell.shellDir + "/data/current-wallpaper.txt"]
         property string result: ""
         stdout: SplitParser { onRead: data => { detectTxtProcess.result += data.trim(); } }
         onRunningChanged: {
@@ -382,14 +382,14 @@ Item {
                     root.wallpaperApplying(root.currentWallpaper);
                 }
             } else {
-                detectFallbackProcess.running = true;
+                if (!detectFallbackProcess.running) detectFallbackProcess.running = true;
             }
         }
     }
 
     Process {
         id: detectFallbackProcess
-        command: ["bash", Quickshell.shellDir + "/scripts/get-current-wallpaper.sh", Config.wallpaperDaemon]
+        command: ["/bin/bash", Quickshell.shellDir + "/scripts/get-current-wallpaper.sh", Config.wallpaperDaemon]
         property string result: ""
         stdout: SplitParser { onRead: data => { detectFallbackProcess.result += data.trim(); } }
         onRunningChanged: {

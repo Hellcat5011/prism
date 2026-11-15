@@ -19,7 +19,7 @@ Item {
 
     Process {
         id: batteryProcess
-        command: ["sh", Quickshell.shellDir + "/scripts/get-battery.sh"]
+        command: ["/bin/sh", Quickshell.shellDir + "/scripts/get-battery.sh"]
         stdout: SplitParser {
             onRead: data => {
                 if (!data) return;
@@ -38,7 +38,7 @@ Item {
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: batteryProcess.running = true
+        onTriggered: if (!batteryProcess.running) batteryProcess.running = true
     }
 
     // --- Idle State ---
@@ -46,7 +46,7 @@ Item {
 
     Process {
         id: btProcess
-        command: ["sh", Quickshell.shellDir + "/scripts/get-bluetooth.sh"]
+        command: ["/bin/sh", Quickshell.shellDir + "/scripts/get-bluetooth.sh"]
         stdout: SplitParser {
             onRead: data => {
                 if (!data) return;
@@ -68,7 +68,7 @@ Item {
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: btProcess.running = true
+        onTriggered: if (!btProcess.running) btProcess.running = true
     }
 
     // --- Audio State ---
@@ -78,7 +78,7 @@ Item {
 
     Process {
         id: audioProcess
-        command: ["sh", Quickshell.shellDir + "/scripts/get-audio.sh"]
+        command: ["/bin/sh", Quickshell.shellDir + "/scripts/get-audio.sh"]
         
         property string fullData: ""
         onRunningChanged: {
@@ -118,10 +118,10 @@ Item {
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: audioProcess.running = true
+        onTriggered: if (!audioProcess.running) audioProcess.running = true
     }
     
     function refreshAudio() {
-        audioProcess.running = true;
+        if (!audioProcess.running) audioProcess.running = true;
     }
 }

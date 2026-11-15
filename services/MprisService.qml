@@ -41,7 +41,7 @@ Item {
     // Exactly one get-mpris.sh process lives in this singleton service
     Process {
         id: mprisProcess
-        command: ["bash", Quickshell.shellDir + "/scripts/get-mpris.sh"]
+        command: ["/bin/bash", Quickshell.shellDir + "/scripts/get-mpris.sh"]
         running: true
         stdout: SplitParser {
             onRead: data => {

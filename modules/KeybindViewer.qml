@@ -37,7 +37,7 @@ OverlayWindow {
 
     Process {
         id: reader
-        command: ["python3", keybindViewer.getParserScript()]
+        command: ["/usr/bin/python3", keybindViewer.getParserScript()]
         property string buf: ""
         onRunningChanged: {
             if (running) buf = ""
@@ -52,7 +52,7 @@ OverlayWindow {
     onShownChanged: {
         if (shown) {
             if (reader.running) reader.running = false
-            reader.command = ["python3", keybindViewer.getParserScript()]
+            reader.command = ["/usr/bin/python3", keybindViewer.getParserScript()]
             reader.running = true
             Qt.callLater(() => keyHandler.forceActiveFocus())
         } else {

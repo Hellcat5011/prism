@@ -26,13 +26,13 @@ import "services"
 ShellRoot {
     Component.onCompleted: {
         Quickshell.iconTheme = "Slot-Gray-Dark-Icons"
-        dimProcess.command = ["bash", "-c", Quickshell.shellDir + "/scripts/idle-dim-manager.sh startup-restore && " + Quickshell.shellDir + "/scripts/idle-dim-manager.sh cache-displays"]
+        dimProcess.command = ["/bin/bash", "-c", Quickshell.shellDir + "/scripts/idle-dim-manager.sh startup-restore && " + Quickshell.shellDir + "/scripts/idle-dim-manager.sh cache-displays"]
         dimProcess.running = true
     }
 
     // Launch custom clipboard watchers
     Process {
-        command: ["sh", Quickshell.shellDir + "/scripts/clipboard-daemon.sh"]
+        command: ["/bin/sh", Quickshell.shellDir + "/scripts/clipboard-daemon.sh"]
         running: true
     }
 

@@ -26,7 +26,7 @@ QtObject {
     // the reliable path for post-apply colour refresh).
     property Process colorReader: Process {
         id: colorReader
-        command: ["cat", root.colorsPath]
+        command: ["/bin/cat", root.colorsPath]
         
         property string jsonContent: ""
         
@@ -51,7 +51,7 @@ QtObject {
 
     // Force a re-read of colors.json. Used by the shell IPC handler when matugen finishes.
     function forceReload() {
-        colorReader.running = true
+        if (!colorReader.running) colorReader.running = true
     }
 
     Component.onCompleted: {

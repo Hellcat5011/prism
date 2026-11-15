@@ -50,7 +50,7 @@ QtObject {
 
     // ── Proactive Check: test if database file restored externally ──
     property Process checkDbProcess: Process {
-        command: ["test", "-f", "/var/lib/plocate/plocate.db"]
+        command: ["/bin/test", "-f", "/var/lib/plocate/plocate.db"]
         onExited: (code) => {
             if (code === 0) {
                 root.resetDatabaseMissing()
@@ -60,7 +60,7 @@ QtObject {
 
     // ── Check if plocate binary is available ─────────────────────────
     property Process checkBinaryProcess: Process {
-        command: ["which", "plocate"]
+        command: ["/bin/which", "plocate"]
         onExited: (code) => {
             root.plocateInstalled = (code === 0)
             if (code !== 0) {
@@ -393,7 +393,7 @@ QtObject {
             plocateArg = "*" + escaped + "*"
         }
 
-        plocateProcess.command = ["plocate", "-i", "-l", root.plocateLimit.toString(), "-b", plocateArg]
+        plocateProcess.command = ["/usr/bin/plocate", "-i", "-l", root.plocateLimit.toString(), "-b", plocateArg]
         plocateProcess.running = true
     }
 
@@ -483,7 +483,7 @@ QtObject {
 
         // Batched stat call: fixed argv list, no shell string, tolerates missing files
         // Use -L to dereference symlinks so symlinks to directories count as folders
-        statProcess.command = ["stat", "-L", "--printf=%F\t%n\n", "--"].concat(topCandidates)
+        statProcess.command = ["/bin/stat", "-L", "--printf=%F\t%n\n", "--"].concat(topCandidates)
         statProcess.running = true
     }
 

@@ -35,7 +35,7 @@ Rectangle {
         interval: 40
         onTriggered: {
             if (volumeProcess.running) { volumeTimer.restart(); return; }
-            volumeProcess.command = ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", (root.pendingVolume / 100).toFixed(2)];
+            volumeProcess.command = ["/usr/bin/wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", (root.pendingVolume / 100).toFixed(2)];
             volumeProcess.running = true;
         }
     }
@@ -44,7 +44,7 @@ Rectangle {
         interval: 150
         onTriggered: {
             if (brightnessProcess.running) { brightnessTimer.restart(); return; }
-            brightnessProcess.command = ["ddcutil", "-b", "4", "setvcp", "10", Math.round(root.pendingBrightness).toString()];
+            brightnessProcess.command = ["/usr/bin/ddcutil", "-b", "4", "setvcp", "10", Math.round(root.pendingBrightness).toString()];
             brightnessProcess.running = true;
         }
     }
