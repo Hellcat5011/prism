@@ -1,0 +1,10 @@
+[package]
+name = "prism-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+prism-common = { path = "../prism-common" }
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,14 @@
+// Minimal hardened niri config for the greetd greeter session.
+// greetd starts niri with this config as user `greeter`.
+// When prism-lock finishes authenticating it starts the user session
+// and tells niri to quit, which cleanly ends the greeter session.
+
+binds {}
+
+hotkey-overlay {
+    skip-at-startup
+}
+
+prefer-no-csd
+
+spawn-at-startup "prism-lock" "--greeter"

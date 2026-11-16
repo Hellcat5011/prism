@@ -1,0 +1,16 @@
+[Unit]
+Description=Prism Desktop Shell Daemon
+Documentation=https://github.com/vic/prism
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/prismd
+Restart=always
+RestartSec=1s
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin"
+PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR
+
+[Install]
+WantedBy=graphical-session.target

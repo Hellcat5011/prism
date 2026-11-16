@@ -1,34 +1,65 @@
 # Prism 💎
 
-> A unified, feature-rich Wayland desktop shell built with [Quickshell](https://quickshell.outfoxxed.me/) for **Niri**, **MangoWM**, and **Hyprland**.
+> High-performance, modular native Rust Wayland desktop shell for **MangoWM**, **Niri**, and **Hyprland**.
 
-Prism is a fast, highly-customizable desktop environment layer providing modular widgets, application launchers, notifications, session locking, and hardware controls across modern Wayland compositors.
+Prism is a fast, crash-resilient desktop shell environment written entirely in Rust. By utilizing a multi-process architecture communicating over Unix domain sockets, Prism completely eliminates Qt/QML runtime segfaults, memory bloat, and single-point-of-failure cascades while providing hardware-accelerated layer-shell surfaces, quintic ease-out animations, and deep compositor integration.
 
 > [!WARNING]
-> **Vibe Coded Project:** This is a fully vibe-coded project. If you are uncomfortable with this, please ignore this repository.
+> **Vibe Coded Project:** This is a fully vibe-coded project. If you are uncomfortable with this, please feel free to ignore this repository.
+
+---
+
+## 🏛️ Architecture
+
+Prism decouples its desktop responsibilities into dedicated Rust binaries communicating over a high-speed Unix domain socket (`/tmp/prism-<UID>.sock`):
+
+```
+                            ┌────────────────────────┐
+                            │   Wayland Compositor   │
+                            │ (MangoWM/Niri/Hyprland)│
+                            └───┬────────┬───────┬───┘
+                                │        │       │
+       ext-session-lock-v1      │        │       │  zwlr-layer-shell-v1
+  ┌─────────────────────────────┘        │       └──────────────────────────┐
+  ▼                                      ▼                                  ▼
+┌──────────────────┐           ┌──────────────────┐               ┌────────────────────┐
+│   prism-lock     │           │      prismd      │  Unix Socket  │      prism-ui      │
+│  (Rust Binary)   │           │  (Rust Daemon)   │◄═════════════►│  (Layer Surfaces)  │
+├──────────────────┤           ├──────────────────┤      IPC      ├────────────────────┤
+│ • Zero UI bloat  │           │ • Notification D.│               │ • Launcher & Search│
+│ • PAM Auth       │           │ • Idle Monitor   │               │ • Desktop Widgets  │
+│ • Never crashes  │           │ • BlueLight/Gamma│               │ • Smooth OSD       │
+│ • Wayland shm    │           │ • MPRIS & State  │               │ • Toast Popups     │
+└──────────────────┘           └──────────────────┘               └────────────────────┘
+                                         ▲
+                                         │ IPC
+                               ┌─────────┴────────┐
+                               │     prism-ctl    │
+                               │  (CLI Controller)│
+                               └──────────────────┘
+```
+
+### Binaries & Crates
+- **`crates/prism-common`**: Shared library containing IPC protocol serialization, 19-token Matugen Material You theme palette parsing, FreeDesktop `.desktop` indexing, `plocate` file search scoring, credential-filtered clipboard history, MPRIS media controllers, WirePlumber/brightnessctl hardware bridges, and depth estimation hooks.
+- **`crates/prism-ctl`**: Fast command-line controller for keybindings, scripts, and status inspection.
+- **`crates/prism-lock`**: Standalone Wayland session lockscreen utilizing `ext-session-lock-v1` and Linux PAM authentication.
+- **`crates/prismd`**: Lightweight background daemon maintaining the Unix IPC socket, Wayland `ext-idle-notify-v1` monitor, Tanner Helland gamma blue light filter, and system state stores.
+- **`crates/prism-ui`**: Hardware-accelerated Wayland double-buffered layer-shell surface renderer (`zwlr_layer_shell_v1`) supporting OSD, App Launcher, Desktop Widgets (`Layer::Bottom`), toast notification popups, Power menu, and Keybinds cheatsheet overlay with smooth frame-callback animations ($1 - (1 - t)^5$).
 
 ---
 
 ## ✨ Features
 
-Prism provides a comprehensive suite of desktop components designed for productivity and aesthetics:
-
-- **Desktop Widgets & Wallpaper Depth**: Clock, calendar, and media widgets featuring neural depth estimation that seamlessly tucks widgets behind background elements.
-- **Spotlight Search**: Fast, unified macOS/KRunner-style search indexing applications and files via `plocate`.
-- **App Launcher**: Full-featured grid launcher with fuzzy search and categorized views.
-- **Control Center & Notifications**: Manage desktop notifications, volume/brightness sliders, network status, and hardware quick-toggles.
-- **Settings GUI**: Centralized control center for wallpaper selection, neural depth estimation (CPU/GPU), lockscreen customization, and display preferences.
-- **Wallpaper Selector**: Live wallpaper browser with Material You dynamic color generation via `matugen`.
-- **Keybindings Cheatsheet**: Quick visual overlay showing your compositor's configured keybinds and shell actions.
-- **Clipboard Manager**: Fast, keyboard-navigable clipboard history manager with search and image preview support.
-- **Emoji Picker**: Searchable emoji picker with context-aware auto-paste into the active window.
-- **Color Picker**: Screen color picker with magnifying loupe and auto-copy to clipboard.
-- **Blue Light Filter**: Auto sunrise/sunset night light with smooth gamma transitions via the Wayland `wlr-gamma-control` protocol.
-- **Idle Dimming**: Smart pre-lock panel dimming for both laptop displays and external monitors (DDC/CI).
-- **Desktop MPRIS & Audio**: Persistent desktop player widget with cover art, playback scrubbing, and audio sink selection.
-- **Power Menu**: Clean system power controls (Lock, Logout, Reboot, Shutdown).
-- **Lockscreen & Greetd Login**: Secure lockscreen (`ext-session-lock-v1`) and multi-compositor `greetd` login screen featuring PAM authentication.
-- **OSD**: Sleek on-screen display notifications for volume and brightness adjustments.
+- **Hardware-Smooth Animations**: Frame-callback vsync-synchronized animations with Quintic Ease-Out curves for fluid notifications and OSD overlays.
+- **Spotlight & App Launcher**: High-speed unified application and file search indexed via `.desktop` cache and `plocate`.
+- **Desktop Widgets & Wallpaper Depth**: Clock, date, system load, and media widgets positioned on the background layer with parallax neural depth mask integration.
+- **Rock-Solid Lockscreen**: Zero-dependency session locking via `ext-session-lock-v1` with PAM authentication (`/etc/pam.d/prism` / `system-local-login`).
+- **Dynamic Theming**: Instant Material Design 3 / Matugen palette synchronization across 19 color tokens.
+- **Smart Blue Light Filter**: Smooth Kelvin color temperature adjustments via Tanner Helland algorithm and Wayland gamma protocols.
+- **Clipboard History**: Keyboard-navigable clipboard manager with automatic 24-hour expiration and regex-based credential filtering (API keys, SSH keys, passwords).
+- **Unicode Emoji Picker**: 1,900+ Unicode glyph dataset with category browsing and fuzzy search.
+- **Hardware Volume & Brightness OSD**: Smooth sliders integrated with `wpctl` and `brightnessctl`.
+- **Multi-WM Power Menu & Keybinds**: Instant overlay showing compositor keybinds parsed from MangoWM, Niri, or Hyprland.
 
 ---
 
@@ -49,117 +80,92 @@ Prism provides a comprehensive suite of desktop components designed for producti
 ### Notification Center
 ![Notification Center](assets/screenshots/notification-center.png)
 
-### Settings Window
-![Settings Window](assets/screenshots/settings.png)
-
 ### Clipboard Manager
 ![Clipboard Manager](assets/screenshots/clipboard.png)
 
 ### Keybindings Cheatsheet
 ![Keybindings Cheatsheet](assets/screenshots/keybinds.png)
 
-### Lock Screen & Greeter
-![Lock Screen & Greeter](assets/screenshots/lockscreen.png)
+### Lock Screen
+![Lock Screen](assets/screenshots/lockscreen.png)
 
 ---
 
-## 📦 Dependencies
+## 📦 Building & Installation
 
-### Core Requirements
-- **[Quickshell](https://quickshell.outfoxxed.me/)**: The core QML desktop shell runtime (`qs`).
-- **Supported Wayland Compositor** (any of the following):
-  - **[niri](https://github.com/niri-wm/niri)** (25.11+ recommended)
-  - **[MangoWM](https://github.com/DreamMaoMao/mangowm)**
-  - **[Hyprland](https://hyprland.org/)**
-- **greetd**: Display manager daemon (required for the built-in login greeter).
-- **qt6-5compat**: Qt6 compatibility module for QML transitions and effects.
-- **jq**: JSON processing utility for scripts.
-- **python3**: Required for geolocation, search indexing, and greeter IPC bridge.
-- **wl-clipboard**: Wayland clipboard utilities (`wl-copy`, `wl-paste`).
-- **wtype** *(optional)*: Virtual keyboard utility for emoji auto-paste (`ydotool` supported as fallback).
+### Requirements
+- **Rust Toolchain**: 1.75+ (`cargo`, `rustc`)
+- **System Libraries**:
+  - `libwayland-client`
+  - `libpam0g-dev` (or `pam-devel`)
+  - `libxkbcommon-dev`
+- **Optional Tools**:
+  - `plocate` (for high-speed file search)
+  - `wpctl` (WirePlumber, for audio controls)
+  - `brightnessctl` (for backlight controls)
+  - `matugen` (for dynamic wallpaper palette generation)
 
-### Theming & Multimedia
-- **awww** / **swww**: Animated Wayland wallpaper daemon.
-- **matugen**: Material You dynamic theme generation from wallpaper palette.
-- **magick (ImageMagick)**: Thumbnail scaling and wallpaper processing.
-- **playerctl**: MPRIS media player controls and track metadata.
-- **pipewire-pulse** / **pulseaudio-utils**: Provides `wpctl` and `pactl` for audio control.
-- **ffmpeg**: Video thumbnail generation.
+### Build from Source
+```bash
+# Build release binaries (produces ~4.8MB across all 4 binaries in ~3s)
+cargo build --release
+```
 
-### Hardware & System
-- **brightnessctl**: Laptop backlight adjustments.
-- **ddcutil**: External monitor brightness control via DDC/CI.
-- **bluez-utils**: Provides `bluetoothctl` for Bluetooth status and battery levels.
-- **systemd / logind**: Power actions via `loginctl` and `systemctl`.
-- **plocate**: High-speed file search backend for Spotlight Search.
-
----
-
-## 🛠️ Installation
-
-1. **Install Quickshell**: Follow the instructions at [quickshell.outfoxxed.me](https://quickshell.outfoxxed.me/).
-2. **Clone the repository**:
-   ```sh
-   git clone <repository_url> ~/.config/quickshell/prism
-   ```
-3. **Run the installer**:
-   ```sh
-   cd ~/.config/quickshell/prism
-   ./deploy-install/install.sh
-   ```
-   *The installer detects your compositor, sets up cache/state directories, migrates any legacy configuration files, configures Matugen theming, and optionally sets up the `greetd` login screen.*
-
-4. **Launch Prism**:
-   ```sh
-   qs -c prism
-   ```
+### Install Binaries & Configs
+Run the included deployment installer:
+```bash
+./deploy/install.sh
+```
+This installs:
+- Binaries (`prism-ctl`, `prism-lock`, `prismd`, `prism-ui`) to `~/.local/bin/`
+- Systemd user service `prismd.service` to `~/.config/systemd/user/`
 
 ---
 
-## 🎮 Compositor Autostart & Keybindings
+## 🚀 Compositor Integration
 
-Ready-made configuration snippets are provided in [`deploy/`](deploy/):
+Include the appropriate configuration file in your compositor configuration:
 
-### For Niri (`~/.config/niri/config.kdl`):
+### MangoWM (`~/.config/mango/config.conf`)
+```ini
+source = /path/to/prism/deploy/prism-mango.conf
+```
+
+### Niri (`~/.config/niri/config.kdl`)
 ```kdl
-include "prism-niri.kdl"
+include "/path/to/prism/deploy/prism-niri.kdl"
 ```
-*(or copy from `deploy/prism-niri.kdl`)*
 
-### For MangoWM (`~/.config/mango/config.conf`):
+### Hyprland (`~/.config/hypr/hyprland.conf`)
 ```ini
-source = ~/.config/mango/prism-mango.conf
+source = /path/to/prism/deploy/prism-hyprland.conf
 ```
-*(or copy from `deploy/prism-mango.conf`)*
-
-### For Hyprland (`~/.config/hypr/hyprland.conf`):
-```ini
-source = ~/.config/hypr/prism-hyprland.conf
-```
-*(or copy from `deploy/prism-hyprland.conf`)*
 
 ---
 
-## ⚡ IPC Control
+## 💻 CLI Reference (`prism-ctl`)
 
-Prism is controlled via Quickshell IPC. You can bind these commands to any key combination:
+| Target | Command | Description |
+|---|---|---|
+| **launcher** | `prism-ctl launcher [toggle\|open\|close]` | Toggle or show application launcher |
+| **search** | `prism-ctl search [toggle\|query <text>]` | Query desktop apps and indexed files |
+| **wallpaper**| `prism-ctl wallpaper set <path>` | Change wallpaper & regenerate Matugen theme |
+| **media** | `prism-ctl media [play-pause\|next\|prev]` | Control MPRIS active audio player |
+| **theme** | `prism-ctl theme palette` | Dump current 19-token color palette JSON |
+| **notif** | `prism-ctl notif [list\|clear\|send <title>]` | Query or post desktop notifications |
+| **osd** | `prism-ctl osd volume [+5%\|-5%\|mute]` | Step audio volume and show smooth OSD |
+| **osd** | `prism-ctl osd brightness [+5%\|-5%]` | Step backlight and show smooth OSD |
+| **clipboard**| `prism-ctl clipboard [toggle\|list]` | Manage secure clipboard history |
+| **emoji** | `prism-ctl emoji search <query>` | Search Unicode emojis |
+| **colorpicker**| `prism-ctl colorpicker pick` | Sample screen color with loupe |
+| **power** | `prism-ctl power [lock\|logout\|reboot]` | Execute system power action |
+| **keybinds** | `prism-ctl keybinds [list\|toggle]` | View compositor keybindings |
+| **bluelight**| `prism-ctl bluelight [toggle\|manual_toggle]`| Toggle warm gamma night light |
+| **depth** | `prism-ctl depth [status\|generate]` | Generate or query wallpaper depth mask |
+| **ping** | `prism-ctl ping` | Check `prismd` daemon responsiveness |
 
-| Action | IPC Command |
-|---|---|
-| **App Launcher** | `qs -c prism ipc call launcher toggle` |
-| **Spotlight Search** | `qs -c prism ipc call search toggle` |
-| **Wallpaper Selector** | `qs -c prism ipc call wallpaper toggle` |
-| **Notification Center** | `qs -c prism ipc call notif toggle` |
-| **Clipboard History** | `qs -c prism ipc call clipboard toggle` |
-| **Emoji Picker** | `qs -c prism ipc call emoji toggle` |
-| **Color Picker** | `qs -c prism ipc call colorpicker toggle` |
-| **Settings** | `qs -c prism ipc call settings toggle` |
-| **Power Menu** | `qs -c prism ipc call power toggle` |
-| **Keybindings Overlay** | `qs -c prism ipc call keybinds toggle` |
-| **Lock Screen** | `qs -c prism ipc call lock lock` |
-| **Theme Reload** | `qs -c prism ipc call theme reload` |
+---
 
-For a complete list of commands and methods:
-```sh
-qs -c prism ipc call help display
-```
+## 📄 License
+
+GPL-3.0 License.

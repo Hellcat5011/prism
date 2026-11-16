@@ -1,0 +1,17 @@
+[package]
+name = "prism-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+prism-common = { path = "../prism-common" }
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
+xkbcommon = { version = "0.8", features = ["wayland"] }
+zbus = "5"
+md5 = "0.7"

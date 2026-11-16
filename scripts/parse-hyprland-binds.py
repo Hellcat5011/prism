@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import subprocess
 
 MAX_SOURCE_DEPTH = 10
 
@@ -259,6 +260,51 @@ def parse_hypr_file(filepath, visited=None, depth=0):
     return rows
 
 
+def collect_rows_from_hyprctl():
+    try:
+        proc = subprocess.run(["hyprctl", "binds", "-j"], capture_output=True, text=True, timeout=2)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        data = json.loads(proc.stdout)
+        if not isinstance(data, list) or not data:
+            return None
+
+        rows = []
+        for item in data:
+            mask = item.get("modmask", 0)
+            key = item.get("key", "")
+            dispatcher = item.get("dispatcher", "")
+            arg = item.get("arg", "")
+            if not key or not dispatcher:
+                continue
+
+            mods = []
+            if mask & 64:
+                mods.append("SUPER")
+            if mask & 4:
+                mods.append("CTRL")
+            if mask & 8:
+                mods.append("ALT")
+            if mask & 1:
+                mods.append("SHIFT")
+
+            clean_key = KEY_NAMES.get(key.lower(), key.upper() if len(key) == 1 else key.capitalize())
+            combo = " + ".join(mods + [clean_key]) if mods else clean_key
+            label, section = humanise_action(dispatcher, arg)
+
+            rows.append({
+                "section": section,
+                "key": combo,
+                "action": label
+            })
+
+        order = {s: i for i, s in enumerate(SECTION_ORDER)}
+        rows.sort(key=lambda r: order.get(r["section"], len(order)))
+        return rows
+    except Exception:
+        return None
+
+
 def collect_rows(config_path):
     rows = parse_hypr_file(config_path)
     order = {s: i for i, s in enumerate(SECTION_ORDER)}
@@ -267,6 +313,14 @@ def collect_rows(config_path):
 
 
 def main(argv):
+    # If running live under Hyprland, query live binds via hyprctl binds -j
+    # This guarantees full support for hyprland.lua, hyprland.conf, and runtime plugins!
+    if "HYPRLAND_INSTANCE_SIGNATURE" in os.environ:
+        rows = collect_rows_from_hyprctl()
+        if rows is not None and len(rows) > 0:
+            print(json.dumps(rows, ensure_ascii=False))
+            return 0
+
     path = argv[1] if len(argv) > 1 else find_config()
     if not os.path.isfile(path):
         print("[]")

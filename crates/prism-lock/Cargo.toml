@@ -1,0 +1,14 @@
+[package]
+name = "prism-lock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+prism-common = { path = "../prism-common" }
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
