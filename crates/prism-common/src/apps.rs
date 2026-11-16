@@ -3,6 +3,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
+/// A command for launching a user application in its own systemd scope (app.slice), so it is
+/// not part of Prism's service: restarting or stopping prismd must never kill the user's apps.
+/// Falls back to running the program directly without systemd.
+pub fn app_command(program: &str, args: &[String]) -> Command {
+    if Path::new("/usr/bin/systemd-run").exists() || Path::new("/bin/systemd-run").exists() {
+        let mut cmd = Command::new("systemd-run");
+        let name: String = Path::new(program)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("app")
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
+        cmd.args(["--user", "--scope", "--quiet", "--collect", "--slice=app.slice"]);
+        cmd.arg(format!("--unit=app-prism-{name}-{stamp}"));
+        cmd.arg("--").arg(program).args(args);
+        cmd
+    } else {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        cmd
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DesktopApp {
     pub id: String,
@@ -12,6 +37,8 @@ pub struct DesktopApp {
     pub exec: String,
     pub icon: Option<String>,
     pub categories: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
     pub terminal: bool,
     pub no_display: bool,
 }
@@ -32,6 +59,7 @@ impl DesktopApp {
         let mut exec: Option<String> = None;
         let mut icon: Option<String> = None;
         let mut categories: Vec<String> = Vec::new();
+        let mut keywords: Vec<String> = Vec::new();
         let mut terminal = false;
         let mut no_display = false;
         let mut is_application = false;
@@ -69,6 +97,9 @@ impl DesktopApp {
                     "Terminal" => terminal = val.eq_ignore_ascii_case("true"),
                     "NoDisplay" => no_display = val.eq_ignore_ascii_case("true"),
                     "Type" => is_application = val.eq_ignore_ascii_case("Application"),
+                    "Keywords" => {
+                        keywords = val.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    }
                     "Categories" => {
                         categories = val
                             .split(';')
@@ -93,6 +124,7 @@ impl DesktopApp {
             exec: exec.unwrap(),
             icon,
             categories,
+            keywords,
             terminal,
             no_display,
         })
@@ -120,8 +152,7 @@ impl DesktopApp {
     pub fn launch(&self) -> std::io::Result<Child> {
         // Try gtk-launch first for desktop applications
         if !self.terminal && Path::new("/usr/bin/gtk-launch").exists() && !self.id.is_empty() {
-            let mut cmd = Command::new("/usr/bin/gtk-launch");
-            cmd.arg(&self.id);
+            let mut cmd = app_command("/usr/bin/gtk-launch", &[self.id.clone()]);
             cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
@@ -151,8 +182,9 @@ impl DesktopApp {
         if self.terminal {
             // Try common terminals
             let term = std::env::var("TERMINAL").unwrap_or_else(|_| "foot".to_string());
-            let mut cmd = Command::new(&term);
-            cmd.arg("-e").args(&args);
+            let mut term_args = vec!["-e".to_string()];
+            term_args.extend(args.iter().cloned());
+            let mut cmd = app_command(&term, &term_args);
             cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
@@ -168,10 +200,7 @@ impl DesktopApp {
             }
             cmd.spawn()
         } else {
-            let mut cmd = Command::new(&args[0]);
-            if args.len() > 1 {
-                cmd.args(&args[1..]);
-            }
+            let mut cmd = app_command(&args[0], &args[1..]);
             cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
@@ -277,26 +306,68 @@ pub fn load_all_desktop_apps() -> Vec<DesktopApp> {
     apps
 }
 
-/// Searches applications matching query, sorted by relevance score
+/// QML Fuzzy.scoreLegacy: subsequence match with bonuses for contiguous runs, word starts and a
+/// prefix match; longer texts score slightly lower. None when `query` is not a subsequence.
+pub fn fuzzy_score(query: &str, text: &str) -> Option<f64> {
+    let q: Vec<char> = query.to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    if q.is_empty() {
+        return Some(0.0);
+    }
+    let (mut qi, mut score, mut last) = (0usize, 0.0f64, -2isize);
+    for (ti, &c) in t.iter().enumerate() {
+        if qi == q.len() {
+            break;
+        }
+        if c == q[qi] {
+            score += if last == ti as isize - 1 { 5.0 } else { 1.0 };
+            if ti == 0 || t[ti - 1] == ' ' || t[ti - 1] == '-' {
+                score += 10.0;
+            }
+            last = ti as isize;
+            qi += 1;
+        }
+    }
+    if qi < q.len() {
+        return None;
+    }
+    score -= t.len() as f64 * 0.1;
+    if t.starts_with(&q[..]) {
+        score += 20.0;
+    }
+    Some(score)
+}
+
+/// Applications matching `query`, best first (QML SearchProviderApps: name, generic name x0.8,
+/// keywords x0.5). An empty query returns every app in name order.
 pub fn search_apps(apps: &[DesktopApp], query: &str) -> Vec<DesktopApp> {
     let q = query.trim();
     if q.is_empty() {
         return apps.to_vec();
     }
-
-    let mut scored: Vec<(i32, &DesktopApp)> = apps
+    let mut scored: Vec<(f64, &DesktopApp)> = apps
         .iter()
         .filter_map(|app| {
-            let score = app.match_score(q);
-            if score > 0 {
-                Some((score, app))
-            } else {
-                None
+            let mut best = fuzzy_score(q, &app.name);
+            let mut consider = |s: Option<f64>, w: f64| {
+                if let Some(s) = s {
+                    let s = s * w;
+                    if best.map(|b| s > b).unwrap_or(true) {
+                        best = Some(s);
+                    }
+                }
+            };
+            if let Some(g) = &app.generic_name {
+                consider(fuzzy_score(q, g), 0.8);
             }
+            for k in &app.keywords {
+                consider(fuzzy_score(q, k), 0.5);
+            }
+            best.map(|s| (s, app))
         })
         .collect();
-
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    // Stable sort keeps name order for equal scores.
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.into_iter().map(|(_, app)| app.clone()).collect()
 }
 

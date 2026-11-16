@@ -12,3 +12,4 @@ wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+xkbcommon = { version = "0.8", features = ["wayland"] }

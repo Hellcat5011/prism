@@ -90,6 +90,11 @@ extern "C" {
     pub fn cairo_set_source(cr: *mut Cairo, pattern: *mut c_void);
     pub fn cairo_pattern_destroy(pattern: *mut c_void);
     pub fn cairo_set_line_cap(cr: *mut Cairo, cap: i32);
+    pub fn cairo_set_line_join(cr: *mut Cairo, join: i32);
+    pub fn cairo_push_group(cr: *mut Cairo);
+    pub fn cairo_pop_group_to_source(cr: *mut Cairo);
+    pub fn cairo_curve_to(cr: *mut Cairo, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64);
+    pub fn cairo_arc_negative(cr: *mut Cairo, xc: f64, yc: f64, radius: f64, angle1: f64, angle2: f64);
     pub fn cairo_image_surface_get_data(surface: *mut CairoSurface) -> *mut u8;
     pub fn cairo_image_surface_get_stride(surface: *mut CairoSurface) -> i32;
     pub fn cairo_surface_flush(surface: *mut CairoSurface);

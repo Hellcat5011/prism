@@ -12,6 +12,7 @@
 // Theme.animMed / OverlayWindow.qml.
 // ─────────────────────────────────────────────────────────────────────────
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use prism_common::{Config, Theme};
@@ -19,6 +20,32 @@ use prism_common::{Config, Theme};
 use crate::cairo_backend::hex_to_rgba;
 
 pub type Rgba = (f64, f64, f64, f64);
+
+// ── Resolution scale ───────────────────────────────────────────────────────
+
+/// Every size in the UI code is in "design pixels" for a 1440 px tall screen (the QML layout);
+/// drawing multiplies them by the interface scale so cards keep their share of the screen.
+pub const DESIGN_HEIGHT: f64 = 1440.0;
+
+static SCREEN_HEIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Record the logical screen height (from the first output / a full-screen configure).
+pub fn set_screen_height(h: f64) {
+    if h > 0.0 {
+        SCREEN_HEIGHT.store(h.to_bits(), Ordering::Relaxed);
+    }
+}
+
+pub fn screen_height() -> f64 {
+    let v = f64::from_bits(SCREEN_HEIGHT.load(Ordering::Relaxed));
+    if v > 0.0 { v } else { DESIGN_HEIGHT }
+}
+
+/// Interface scale for a configured value (0 = automatic) and screen height.
+pub fn scale_for(configured: f32, screen_h: f64) -> f64 {
+    let s = if configured > 0.0 { configured as f64 } else { screen_h / DESIGN_HEIGHT };
+    s.clamp(0.5, 3.0)
+}
 
 /// QML Theme.animMed (ms): base duration for fades and scale transitions.
 pub const ANIM_MED_MS: f64 = 98.0;
@@ -44,6 +71,8 @@ pub struct Style {
     pub blur: bool,
     pub dim_enabled: bool,
     pub dim_opacity: f64,
+    /// Interface scale (design pixels to screen pixels), see `scale_for`.
+    pub scale: f64,
 }
 
 impl Style {
@@ -66,6 +95,7 @@ impl Style {
             blur: cfg.blur_enabled,
             dim_enabled: cfg.dim_enabled,
             dim_opacity: (cfg.dim_opacity as f64).clamp(0.0, 0.9),
+            scale: scale_for(cfg.ui_scale, screen_height()),
         }
     }
 
@@ -97,6 +127,8 @@ pub enum Motion {
     Scale,
     /// Slide in from the left screen edge with OutBack overshoot (OverlayWindow "slideLeft").
     SlideLeft { distance: f64 },
+    /// Mirror of SlideLeft, from the right screen edge.
+    SlideRight { distance: f64 },
 }
 
 /// Where the card is in its enter/exit transition, ready to apply when compositing.
@@ -129,7 +161,7 @@ impl Transition {
     pub fn enter(motion: Motion, style: &Style) -> Self {
         let base = match motion {
             Motion::Scale => ANIM_MED_MS,
-            Motion::SlideLeft { .. } => ANIM_SLIDE_MS,
+            Motion::SlideLeft { .. } | Motion::SlideRight { .. } => ANIM_SLIDE_MS,
         };
         Self { motion, entering: true, duration_ms: style.duration_ms(base), start: None }
     }
@@ -170,8 +202,12 @@ impl Transition {
                 shown,
                 done,
             },
-            Motion::SlideLeft { distance } => Pose {
-                tx: -distance * (1.0 - slide_p),
+            Motion::SlideLeft { .. } | Motion::SlideRight { .. } => Pose {
+                tx: match self.motion {
+                    Motion::SlideRight { distance } => distance * (1.0 - slide_p),
+                    Motion::SlideLeft { distance } => -distance * (1.0 - slide_p),
+                    Motion::Scale => 0.0,
+                },
                 ty: 0.0,
                 scale: 1.0,
                 alpha: 1.0,
@@ -206,6 +242,14 @@ mod tests {
         assert!((out_back(1.0, 2.0) - 1.0).abs() < 1e-9);
         assert!(out_back(0.0, 2.0).abs() < 1e-9);
         assert!(in_cubic(0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scale_follows_screen_unless_configured() {
+        assert!((scale_for(0.0, 1440.0) - 1.0).abs() < 1e-9);
+        assert!((scale_for(0.0, 1080.0) - 0.75).abs() < 1e-9);
+        assert!((scale_for(0.0, 2160.0) - 1.5).abs() < 1e-9);
+        assert!((scale_for(1.25, 1080.0) - 1.25).abs() < 1e-9);
     }
 
     #[test]

@@ -235,3 +235,75 @@ pub fn authenticate_and_start(
 
     Ok(())
 }
+
+/// A login session from /usr/share/wayland-sessions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Session {
+    pub name: String,
+    pub cmd: Vec<String>,
+}
+
+/// Wayland sessions installed on the system (Name and Exec of each .desktop file), sorted.
+pub fn sessions() -> Vec<Session> {
+    let mut out = Vec::new();
+    for dir in ["/usr/share/wayland-sessions", "/usr/local/share/wayland-sessions"] {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("desktop") {
+                continue;
+            }
+            if let Some(s) = fs::read_to_string(&p).ok().and_then(|t| parse_session(&t)) {
+                if !out.iter().any(|o: &Session| o.name == s.name) {
+                    out.push(s);
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+fn parse_session(text: &str) -> Option<Session> {
+    let mut name = None;
+    let mut exec = None;
+    let mut in_entry = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("Name=") {
+            name.get_or_insert_with(|| v.to_string());
+        } else if let Some(v) = line.strip_prefix("Exec=") {
+            exec.get_or_insert_with(|| v.to_string());
+        } else if line == "Hidden=true" || line == "NoDisplay=true" {
+            return None;
+        }
+    }
+    let cmd: Vec<String> = exec?.split_whitespace().filter(|a| !a.starts_with('%')).map(String::from).collect();
+    (!cmd.is_empty()).then(|| Session { name: name.unwrap_or_else(|| cmd[0].clone()), cmd })
+}
+
+/// The session the last user picked, if it is still installed.
+pub fn last_session() -> Option<Vec<String>> {
+    let content = fs::read_to_string(get_state_dir().join("last-user")).ok()?;
+    let v: Value = serde_json::from_str(&content).ok()?;
+    let cmd: Vec<String> = v.get("session")?.as_array()?.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+    (!cmd.is_empty()).then_some(cmd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_session_desktop_files() {
+        let s = parse_session("[Desktop Entry]\nName=Mango\nExec=mango %U\nType=Application\n").unwrap();
+        assert_eq!(s, Session { name: "Mango".into(), cmd: vec!["mango".into()] });
+        assert!(parse_session("[Desktop Entry]\nName=X\nExec=x\nHidden=true\n").is_none());
+    }
+}

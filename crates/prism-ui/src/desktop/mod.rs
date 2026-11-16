@@ -349,6 +349,7 @@ impl Desk {
         if w > 0 && h > 0 {
             let s = self.output_scale.max(1) as f64;
             self.screen = (w as f64 / s, h as f64 / s);
+            crate::ui::set_screen_height(self.screen.1);
         }
     }
 

@@ -79,49 +79,62 @@ struct State {
     target: Option<u32>,
 }
 
-/// Starts the gamma thread; None without Wayland.
+/// Starts the gamma thread; None without Wayland. The thread survives compositor restarts:
+/// when the connection is lost (the session ended, Mango restarted) it reconnects and
+/// re-applies the current temperature.
 pub fn start() -> Option<GammaHandle> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("WAYLAND_SOCKET").is_none() {
         return None;
     }
     let (tx, rx) = wake::channel::<Option<u32>>();
     thread::spawn(move || {
-        let conn = match Connection::connect_to_env() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[prismd/gamma] cannot connect to Wayland: {e}");
-                return;
-            }
-        };
-        let mut queue: EventQueue<State> = conn.new_event_queue();
-        let qh = queue.handle();
-        let _registry = conn.display().get_registry(&qh, ());
-        let mut st = State { manager: None, outputs: HashMap::new(), target: None };
-        if queue.roundtrip(&mut st).is_err() {
-            return;
-        }
-        if st.manager.is_none() {
-            eprintln!("[prismd/gamma] compositor lacks zwlr_gamma_control_manager_v1; blue light unavailable");
-            // Keep draining requests so senders never block on anything.
-            loop {
-                let _ = wake::dispatch(&mut queue, &mut st, rx.fd(), -1);
-                rx.drain();
-            }
-        }
+        let mut target: Option<u32> = None;
+        let mut last_error = String::new();
         loop {
-            if let Some(last) = rx.drain().into_iter().last() {
-                st.target = last;
+            if let Err(e) = session(&rx, &mut target) {
+                if e != last_error {
+                    eprintln!("[prismd/gamma] {e}; retrying until the compositor is back");
+                    last_error = e;
+                }
             }
-            st.sync(&qh);
-            let retry_pending = st.outputs.values().any(|o| o.failed_at.is_some());
-            let timeout = if retry_pending && st.target.is_some() { RETRY.as_millis() as i32 } else { -1 };
-            if let Err(e) = wake::dispatch(&mut queue, &mut st, rx.fd(), timeout) {
-                eprintln!("[prismd/gamma] Wayland connection lost: {e}");
-                return;
-            }
+            thread::sleep(RECONNECT);
         }
     });
     Some(GammaHandle { tx })
+}
+
+/// How often to retry connecting after the compositor went away.
+const RECONNECT: Duration = Duration::from_secs(2);
+
+/// One connection's lifetime. Err when the connection is lost or cannot be made.
+fn session(rx: &wake::Receiver<Option<u32>>, target: &mut Option<u32>) -> Result<(), String> {
+    let conn = Connection::connect_to_env().map_err(|e| format!("cannot connect to Wayland: {e}"))?;
+    let mut queue: EventQueue<State> = conn.new_event_queue();
+    let qh = queue.handle();
+    let _registry = conn.display().get_registry(&qh, ());
+    let mut st = State { manager: None, outputs: HashMap::new(), target: *target };
+    queue.roundtrip(&mut st).map_err(|e| format!("registry roundtrip failed: {e}"))?;
+    if st.manager.is_none() {
+        eprintln!("[prismd/gamma] compositor lacks zwlr_gamma_control_manager_v1; blue light unavailable");
+        // Keep draining requests so senders never block on anything.
+        loop {
+            if let Some(last) = rx.drain().into_iter().last() {
+                *target = last;
+            }
+            wake::dispatch(&mut queue, &mut st, rx.fd(), -1).map_err(|e| format!("Wayland connection lost: {e}"))?;
+        }
+    }
+    eprintln!("[prismd/gamma] connected");
+    loop {
+        if let Some(last) = rx.drain().into_iter().last() {
+            st.target = last;
+        }
+        *target = st.target;
+        st.sync(&qh);
+        let retry_pending = st.outputs.values().any(|o| o.failed_at.is_some());
+        let timeout = if retry_pending && st.target.is_some() { RETRY.as_millis() as i32 } else { -1 };
+        wake::dispatch(&mut queue, &mut st, rx.fd(), timeout).map_err(|e| format!("Wayland connection lost: {e}"))?;
+    }
 }
 
 impl State {

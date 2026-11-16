@@ -141,7 +141,12 @@ impl ClipboardItem {
             }
         }
 
-        // 6. Credit card numbers (13 to 19 digits with optional spaces or dashes, validated with Luhn algorithm)
+        // 6. Generated-password-shaped tokens.
+        if looks_like_password(t) {
+            return true;
+        }
+
+        // 7. Credit card numbers (13 to 19 digits with optional spaces or dashes, validated with Luhn algorithm)
         if contains_valid_card_number(t) {
             return true;
         }
@@ -255,21 +260,30 @@ pub struct ClipboardStore {
 
 impl ClipboardStore {
     pub fn default_path() -> PathBuf {
-        if let Ok(home) = std::env::var("HOME") {
-            let primary = PathBuf::from(&home).join(".cache/prism/clipboard/history.json");
-            let legacy = PathBuf::from(&home).join(".cache/quickshell-clipboard/history.json");
-            if !primary.exists() && legacy.exists() {
-                legacy
-            } else {
-                primary
-            }
-        } else {
-            PathBuf::from("/tmp/prism-clipboard.json")
+        match std::env::var("HOME") {
+            Ok(home) => PathBuf::from(home).join(".cache/prism/clipboard/history.json"),
+            Err(_) => std::env::temp_dir().join("prism-clipboard.json"),
+        }
+    }
+
+    /// Move the QML shell's history (~/.cache/quickshell-clipboard) to the Prism path once.
+    fn migrate_legacy(path: &std::path::Path) {
+        let Ok(home) = std::env::var("HOME") else { return };
+        let legacy = PathBuf::from(home).join(".cache/quickshell-clipboard/history.json");
+        if path.exists() || !legacy.exists() {
+            return;
+        }
+        if let Some(dir) = path.parent() {
+            let _ = private_dir(dir);
+        }
+        if fs::rename(&legacy, path).is_ok() {
+            let _ = set_mode(path, 0o600);
         }
     }
 
     pub fn load() -> Self {
         let path = Self::default_path();
+        Self::migrate_legacy(&path);
         let mut items = Vec::new();
 
         if path.exists() {
@@ -316,7 +330,7 @@ impl ClipboardStore {
         }
 
         let img_dir = get_image_cache_dir();
-        if let Err(e) = fs::create_dir_all(&img_dir) {
+        if let Err(e) = private_dir(&img_dir) {
             eprintln!("[clipboard] Failed to create image cache directory: {}", e);
             return false;
         }
@@ -328,7 +342,7 @@ impl ClipboardStore {
         let filename = format!("{}.png", timestamp);
         let file_path = img_dir.join(filename);
 
-        if let Err(e) = fs::write(&file_path, image_bytes) {
+        if let Err(e) = write_private(&file_path, image_bytes) {
             eprintln!("[clipboard] Failed to write image thumbnail: {}", e);
             return false;
         }
@@ -388,13 +402,75 @@ impl ClipboardStore {
         let _ = self.save();
     }
 
+    /// Write the history readable by the owner only (atomically, via a temp file).
     pub fn save(&self) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+            private_dir(parent)?;
         }
         let data = serde_json::to_string_pretty(&self.items)?;
-        fs::write(&self.path, data)
+        let tmp = self.path.with_extension("json.tmp");
+        write_private(&tmp, data.as_bytes())?;
+        fs::rename(&tmp, &self.path)
     }
+
+    /// Drop entries that the sensitivity filter would reject today (filters improve over time).
+    /// Returns how many were removed.
+    pub fn purge_sensitive(&mut self) -> usize {
+        let before = self.items.len();
+        self.items.retain(|i| i.is_image || !ClipboardItem::is_sensitive(&i.content));
+        let removed = before - self.items.len();
+        if removed > 0 {
+            let _ = self.save();
+        }
+        removed
+    }
+}
+
+fn set_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+/// Create `dir` (and parents) and make it owner-only.
+pub fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    set_mode(dir, 0o700)
+}
+
+/// Write a file created with mode 0600.
+pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    f.write_all(data)?;
+    set_mode(path, 0o600)
+}
+
+/// True when the current Wayland selection is marked secret by a password manager
+/// (KeePassXC, Bitwarden, ... offer the `x-kde-passwordManagerHint` MIME type).
+pub fn selection_is_secret() -> bool {
+    std::process::Command::new("wl-paste")
+        .arg("--list-types")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|t| t.trim() == "x-kde-passwordManagerHint"))
+        .unwrap_or(false)
+}
+
+/// A lone token that looks like a generated password: 8-64 characters, no whitespace, upper and
+/// lower case letters, digits and symbols, and not a URL or path.
+fn looks_like_password(t: &str) -> bool {
+    let n = t.chars().count();
+    if !(8..=64).contains(&n) || t.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if t.contains("://") || t.starts_with('/') || t.starts_with("~/") || t.starts_with("./") {
+        return false;
+    }
+    let upper = t.chars().any(|c| c.is_uppercase());
+    let lower = t.chars().any(|c| c.is_lowercase());
+    let digit = t.chars().any(|c| c.is_ascii_digit());
+    let symbol = t.chars().any(|c| !c.is_alphanumeric());
+    upper && lower && digit && symbol
 }
 
 #[cfg(test)]
@@ -410,6 +486,11 @@ mod tests {
         assert!(ClipboardItem::is_sensitive("postgres://user:secret@localhost:5432/db"));
         assert!(!ClipboardItem::is_sensitive("hello world this is regular text"));
         assert!(!ClipboardItem::is_sensitive("https://github.com/vic/prism"));
+        assert!(ClipboardItem::is_sensitive("Xq7#mP2v!Lr9"));
+        assert!(!ClipboardItem::is_sensitive("hello-world"));
+        assert!(!ClipboardItem::is_sensitive("README.md"));
+        assert!(!ClipboardItem::is_sensitive("/home/u/Some-Dir/File2.txt"));
+        assert!(!ClipboardItem::is_sensitive("cargo build --release"));
     }
 
     #[test]

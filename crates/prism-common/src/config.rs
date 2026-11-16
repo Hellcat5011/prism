@@ -140,6 +140,24 @@ pub struct Config {
     pub search_section_order: String,
     #[serde(default = "default_max_folder_results")]
     pub search_max_folder_results: u32,
+    /// Where notification popups appear: top-left, top-center, top-right, bottom-left,
+    /// bottom-center or bottom-right.
+    #[serde(default = "default_popup_position")]
+    pub notification_popup_position: String,
+    /// Where the notification center opens: left, center or right.
+    #[serde(default = "default_nc_position")]
+    pub notification_center_position: String,
+    /// Interface scale: 0 = automatic (screen height / 1440), otherwise a fixed factor.
+    #[serde(default)]
+    pub ui_scale: f32,
+}
+
+fn default_popup_position() -> String {
+    "top-left".to_string()
+}
+
+fn default_nc_position() -> String {
+    "left".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,6 +444,9 @@ impl Default for Config {
             blue_light_transition_minutes: default_transition_minutes(),
             search_section_order: default_section_order(),
             search_max_folder_results: default_max_folder_results(),
+            notification_popup_position: default_popup_position(),
+            notification_center_position: default_nc_position(),
+            ui_scale: 0.0,
         }
     }
 }
@@ -470,6 +491,18 @@ impl Config {
         for dir_str in &state_dirs {
             let dir = Path::new(dir_str);
             if dir.is_dir() {
+                // The greeter runs as another user: give it the matugen palette too.
+                let colors = crate::theme::Theme::source_path();
+                if colors.exists() {
+                    let dst = dir.join("colors.json");
+                    if fs::copy(&colors, &dst).is_ok() {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(0o644));
+                        }
+                    }
+                }
                 let target = dir.join("config-snapshot.json");
                 if let Ok(content) = serde_json::to_string_pretty(&snapshot) {
                     let _ = fs::write(&target, content);

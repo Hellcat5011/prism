@@ -35,7 +35,7 @@ struct IdleState {
     notification: Option<ExtIdleNotificationV1>,
     settings: IdleSettings,
     is_idle: Arc<AtomicBool>,
-    on_idle: Box<dyn Fn() + Send>,
+    on_idle: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl IdleState {
@@ -130,46 +130,66 @@ impl Dispatch<ExtIdleNotificationV1, ()> for IdleState {
 
 /// Spawns the Wayland idle monitor thread if a Wayland display is available. `on_idle`
 /// runs on the monitor thread when the timeout passes while auto-lock is on.
-pub fn start_idle_monitor(settings: IdleSettings, is_idle_flag: Arc<AtomicBool>, on_idle: Box<dyn Fn() + Send>) -> Option<IdleHandle> {
+pub fn start_idle_monitor(settings: IdleSettings, is_idle_flag: Arc<AtomicBool>, on_idle: Box<dyn Fn() + Send + Sync>) -> Option<IdleHandle> {
     if env::var("WAYLAND_DISPLAY").is_err() && env::var("WAYLAND_SOCKET").is_err() {
         eprintln!("[prismd/idle] No active WAYLAND_DISPLAY found; idle monitoring disabled.");
         return None;
     }
     let (tx, rx) = wake::channel::<IdleSettings>();
+    let on_idle: Arc<dyn Fn() + Send + Sync> = Arc::from(on_idle);
 
+    // Reconnects when the compositor goes away (session restart), keeping the settings.
     thread::spawn(move || {
-        let conn = match Connection::connect_to_env() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[prismd/idle] Failed to connect to Wayland for idle monitoring: {}", e);
-                return;
-            }
-        };
-
-        let mut event_queue: EventQueue<IdleState> = conn.new_event_queue();
-        let qh = event_queue.handle();
-        let mut state = IdleState { notifier: None, seat: None, notification: None, settings, is_idle: is_idle_flag, on_idle };
-        let _registry = conn.display().get_registry(&qh, ());
-        if event_queue.roundtrip(&mut state).is_err() || event_queue.roundtrip(&mut state).is_err() {
-            eprintln!("[prismd/idle] Failed to sync registry.");
-            return;
-        }
-        if state.notifier.is_none() || state.seat.is_none() {
-            eprintln!("[prismd/idle] Compositor does not support ext_idle_notifier_v1 or no wl_seat found.");
-        }
-        state.rearm(&qh);
+        let mut settings = settings;
+        let mut last_error = String::new();
         loop {
-            if let Some(new) = rx.drain().into_iter().last() {
-                if new != state.settings {
-                    state.settings = new;
-                    state.rearm(&qh);
+            if let Err(e) = session(&rx, &mut settings, &is_idle_flag, &on_idle) {
+                if e != last_error {
+                    eprintln!("[prismd/idle] {e}; retrying until the compositor is back");
+                    last_error = e;
                 }
             }
-            if let Err(e) = wake::dispatch(&mut event_queue, &mut state, rx.fd(), -1) {
-                eprintln!("[prismd/idle] Wayland connection lost: {e}");
-                return;
-            }
+            is_idle_flag.store(false, Ordering::SeqCst);
+            thread::sleep(std::time::Duration::from_secs(2));
         }
     });
     Some(IdleHandle { tx })
+}
+
+/// One connection's lifetime; Err when it is lost or cannot be made.
+fn session(
+    rx: &wake::Receiver<IdleSettings>,
+    settings: &mut IdleSettings,
+    is_idle: &Arc<AtomicBool>,
+    on_idle: &Arc<dyn Fn() + Send + Sync>,
+) -> Result<(), String> {
+    let conn = Connection::connect_to_env().map_err(|e| format!("cannot connect to Wayland: {e}"))?;
+    let mut event_queue: EventQueue<IdleState> = conn.new_event_queue();
+    let qh = event_queue.handle();
+    let mut state = IdleState {
+        notifier: None,
+        seat: None,
+        notification: None,
+        settings: *settings,
+        is_idle: Arc::clone(is_idle),
+        on_idle: Arc::clone(on_idle),
+    };
+    let _registry = conn.display().get_registry(&qh, ());
+    event_queue.roundtrip(&mut state).map_err(|e| format!("registry roundtrip failed: {e}"))?;
+    event_queue.roundtrip(&mut state).map_err(|e| format!("registry roundtrip failed: {e}"))?;
+    if state.notifier.is_none() || state.seat.is_none() {
+        eprintln!("[prismd/idle] Compositor does not support ext_idle_notifier_v1 or no wl_seat found.");
+    }
+    eprintln!("[prismd/idle] connected");
+    state.rearm(&qh);
+    loop {
+        if let Some(new) = rx.drain().into_iter().last() {
+            if new != state.settings {
+                state.settings = new;
+                *settings = new;
+                state.rearm(&qh);
+            }
+        }
+        wake::dispatch(&mut event_queue, &mut state, rx.fd(), -1).map_err(|e| format!("Wayland connection lost: {e}"))?;
+    }
 }

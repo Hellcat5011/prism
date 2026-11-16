@@ -70,6 +70,8 @@ pub enum UiCommand {
     Notify(NotifOverlayMessage),
     /// Desktop edit mode: "toggle", "open" or "close".
     EditMode(String),
+    /// Hold (true) or release an idle inhibitor (Caffeinate).
+    Caffeinate(bool),
 }
 
 /// Messages sent to the running notification popup overlay.
@@ -81,6 +83,16 @@ pub enum NotifOverlayMessage {
         summary: String,
         body: String,
         timeout_ms: u64,
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        image: Option<String>,
+        #[serde(default = "normal_urgency")]
+        urgency: u8,
+        #[serde(default)]
+        actions: Vec<(String, String)>,
+        #[serde(default)]
+        desktop_entry: String,
     },
     Dismiss {
         id: u32,
@@ -156,6 +168,10 @@ pub enum IpcCommand {
 
     #[serde(rename = "ping")]
     Ping,
+
+    /// Keep the session awake (idle inhibitor): on, off, or toggle (None).
+    #[serde(rename = "caffeinate")]
+    Caffeinate(Option<bool>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -246,6 +262,25 @@ pub enum NotifAction {
         body: String,
     },
     Dismiss(u32),
+    /// Silent mode (no popups except critical ones): on, off, or toggle (None).
+    Silent(Option<bool>),
+    /// Remove every notification of one app (case-insensitive app name).
+    ClearApp(String),
+    /// JSON `DaemonFlags` for the control centre.
+    State,
+    /// The user picked an action of a notification (sent to the app as ActionInvoked).
+    Invoke { id: u32, action: String },
+}
+
+fn normal_urgency() -> u8 {
+    1
+}
+
+/// Daemon-side switches shown in the control centre.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
+pub struct DaemonFlags {
+    pub silent: bool,
+    pub caffeinate: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -440,5 +475,21 @@ mod tests {
         let s = serde_json::to_string(&resp).unwrap();
         let deser: IpcResponse = serde_json::from_str(&s).unwrap();
         assert_eq!(resp, deser);
+    }
+}
+
+/// Send one command to prismd and wait for its reply (blocking; call off the render path).
+pub fn request(cmd: &IpcCommand) -> Result<Option<String>, String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(get_socket_path()).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+    let mut payload = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
+    payload.push('\n');
+    stream.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).map_err(|e| e.to_string())?;
+    match serde_json::from_str::<IpcResponse>(&line).map_err(|e| e.to_string())? {
+        IpcResponse::Ok(v) => Ok(v),
+        IpcResponse::Error(e) => Err(e),
     }
 }

@@ -17,7 +17,8 @@ Targets & Commands:
   wallpaper [set <path> [scheme] [mode]|get|toggle|open|close]
   media [status|play-pause|next|prev|stop]
   theme [reload|palette]
-  notif [list|clear|send <summary> [body]|toggle|open|close]
+  notif [list|clear|send <summary> [body]|toggle|open|close|silent [on|off]|state]
+  caffeinate [on|off]
   osd volume [+<step>%|-<step>%|mute|<value>]
   osd brightness [+<step>%|-<step>%|<value>]
   clipboard [toggle|open|close]
@@ -147,10 +148,13 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 }
                 Some("open") => NotifAction::Open,
                 Some("close") => NotifAction::Close,
+                Some("silent") => NotifAction::Silent(on_off(args.get(2))),
+                Some("state") => NotifAction::State,
                 _ => NotifAction::Toggle,
             };
             Ok(IpcCommand::Notif(act))
         }
+        "caffeinate" => Ok(IpcCommand::Caffeinate(on_off(args.get(1)))),
         "clipboard" => {
             let act = match action_str {
                 Some("open") => ClipboardAction::Open,
@@ -172,7 +176,10 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                     }
                     let mut input = String::new();
                     let _ = std::io::stdin().read_to_string(&mut input);
-                    if input.trim().is_empty() || prism_common::clipboard::ClipboardItem::is_sensitive(&input) {
+                    if input.trim().is_empty()
+                        || prism_common::clipboard::selection_is_secret()
+                        || prism_common::clipboard::ClipboardItem::is_sensitive(&input)
+                    {
                         std::process::exit(0);
                     }
                     ClipboardAction::Add(input)
@@ -184,7 +191,7 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                     }
                     let mut bytes = Vec::new();
                     let _ = std::io::stdin().read_to_end(&mut bytes);
-                    if bytes.is_empty() {
+                    if bytes.is_empty() || prism_common::clipboard::selection_is_secret() {
                         std::process::exit(0);
                     }
                     ClipboardAction::AddImage(bytes)
@@ -485,5 +492,14 @@ fn main() {
             // Raw response fallback
             print!("{}", response_line);
         }
+    }
+}
+
+/// "on" / "off" to Some(bool); anything else (or nothing) means toggle.
+fn on_off(arg: Option<&String>) -> Option<bool> {
+    match arg.map(|s| s.as_str()) {
+        Some("on") | Some("true") | Some("1") => Some(true),
+        Some("off") | Some("false") | Some("0") => Some(false),
+        _ => None,
     }
 }

@@ -88,16 +88,21 @@ unsafe extern "C" fn pam_conversation_callback(
     PAM_SUCCESS
 }
 
-/// Authenticates the given user against PAM.
-/// Tries "prism" service first, falls back to "quickshell", "system-local-login", or "login".
-pub fn authenticate(user: &str, password: &str) -> bool {
-    let services = ["prism", "quickshell", "system-local-login", "login"];
-    for service in services {
-        if try_authenticate(service, user, password) {
-            return true;
-        }
+/// PAM service used for unlocking: Prism's own (/etc/pam.d/prism, see deploy/pam.d/prism) when
+/// installed, otherwise "login". Exactly one service is tried per attempt, so a wrong password
+/// counts once toward pam_faillock (trying several services multiplied every failure).
+pub fn service() -> &'static str {
+    if std::path::Path::new("/etc/pam.d/prism").exists() {
+        "prism"
+    } else {
+        "login"
     }
-    false
+}
+
+/// Authenticate `user` with `password` through PAM. Blocking (failures take seconds because of
+/// pam_faildelay): never call this on the Wayland event thread.
+pub fn authenticate(user: &str, password: &str) -> bool {
+    try_authenticate(service(), user, password)
 }
 
 fn try_authenticate(service: &str, user: &str, password: &str) -> bool {

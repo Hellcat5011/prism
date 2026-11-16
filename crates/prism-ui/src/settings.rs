@@ -26,7 +26,7 @@ use crate::ui::Style;
 use crate::uikit::{self, ButtonKind, Dropdown, Palette};
 use crate::waker::Waker;
 
-pub const TABS: [&str; 7] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search"];
+pub const TABS: [&str; 8] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search", "Notifications"];
 /// Undo steps kept per Settings session.
 const UNDO_LIMIT: usize = 100;
 
@@ -247,6 +247,29 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.search_include_hidden, |c, v| c.search_include_hidden = v) },
         Row { tab: 6, title: "Rebuild File Index", subtitle: "Indexes files system-wide for search (pkexec updatedb). Can take a few minutes.", visible: always,
             control: Buttons(&[("Rebuild index", Action::RebuildIndex, ButtonKind::Primary)]) },
+        Row { tab: 3, title: "Interface Scale", subtitle: "Size of cards and popups. Auto follows the screen resolution (100% at 1440p).", visible: always,
+            control: Combo {
+                options: || opts(&[("Auto", "0"), ("75%", "0.75"), ("90%", "0.9"), ("100%", "1"), ("110%", "1.1"), ("125%", "1.25"), ("150%", "1.5"), ("175%", "1.75"), ("200%", "2")]),
+                get: |c| if c.ui_scale > 0.0 { format!("{}", c.ui_scale) } else { "0".into() },
+                set: |c, v| c.ui_scale = v.parse().unwrap_or(0.0),
+                fonts: false,
+            } },
+        // ── Notifications ──
+        Row { tab: 7, title: "Popup Position", subtitle: "Where notification popups appear on screen.", visible: always,
+            control: Combo {
+                options: || opts(&[("Top Left", "top-left"), ("Top Center", "top-center"), ("Top Right", "top-right"),
+                    ("Bottom Left", "bottom-left"), ("Bottom Center", "bottom-center"), ("Bottom Right", "bottom-right")]),
+                get: |c| c.notification_popup_position.clone(),
+                set: |c, v| c.notification_popup_position = v.to_string(),
+                fonts: false,
+            } },
+        Row { tab: 7, title: "Notification Center Position", subtitle: "Which side of the screen the notification center opens on.", visible: always,
+            control: Combo {
+                options: || opts(&[("Left", "left"), ("Center", "center"), ("Right", "right")]),
+                get: |c| c.notification_center_position.clone(),
+                set: |c, v| c.notification_center_position = v.to_string(),
+                fonts: false,
+            } },
     ]
 }
 

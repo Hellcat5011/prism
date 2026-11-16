@@ -1,45 +1,43 @@
 // ─────────────────────────────────────────────────────────────────────────
-// status.rs — background system-state worker
+// status.rs — background system-state worker for the control centre
 //
 // The render path must never block. Everything that shells out (nmcli,
-// bluetoothctl, wpctl, brightnessctl, playerctl) or reads stores from disk
-// runs here, on one worker thread, and is published to the UI as an
-// immutable snapshot. The UI wakes up through `Waker` when a new snapshot
-// arrives and only ever reads the cached copy while drawing.
+// bluetoothctl, wpctl, ddcutil) or talks to prismd runs here, on one worker
+// thread, and is published to the UI as an immutable snapshot. The UI wakes
+// up through `Waker` when a new snapshot arrives and only reads the copy.
 //
-// User actions that change state (volume / brightness drags, toggles,
-// rescans) are sent as `StatusRequest`s. Slider requests are coalesced to
-// the latest value, so a 1000 Hz mouse drag results in at most one
-// `wpctl` / `brightnessctl` call per worker cycle instead of one per event.
+// User actions are sent as `StatusRequest`s. Slider requests are coalesced
+// to the latest value. Slow actions (Wi-Fi connect, Bluetooth pairing,
+// scans) run on helper threads that record their progress in `Ops` and ask
+// the worker to refresh when they finish, so the worker never blocks on them.
 // ─────────────────────────────────────────────────────────────────────────
 
+use std::process::Command;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use prism_common::network::{AudioSink, BatteryStatus, BluetoothDevice, BluetoothStatus, NetworkStatus, WifiNetwork};
-use prism_common::notifications::NotificationStore;
+use prism_common::ipc::{DaemonFlags, IpcCommand, NotifAction};
+use prism_common::network::{AudioSink, BatteryStatus};
+use prism_common::notifications::{Notification, NotificationStore};
 
+use crate::nc::dbus::Bus;
+use crate::nc::model::{BtBusy, BtState, NetState};
 use crate::waker::Waker;
-
-/// What the worker should keep fresh. Chosen once per UI mode.
-#[derive(Clone, Copy, Debug)]
-pub struct StatusScope {
-    /// Notification-center data: network, bluetooth, audio, brightness, battery, notifications.
-    pub control_center: bool,
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct StatusSnapshot {
-    pub battery: Option<BatteryStatus>,
-    pub network: NetworkStatus,
-    pub bluetooth: BluetoothStatus,
+    pub net: NetState,
+    pub bt: BtState,
     pub volume: u32,
     pub muted: bool,
-    pub brightness: u32,
-    pub notifications: NotificationStore,
-    pub wifi_networks: Vec<WifiNetwork>,
-    pub bt_devices: Vec<BluetoothDevice>,
-    pub audio_sinks: Vec<AudioSink>,
+    /// None until read (DDC/CI reads are slow) or when there is no brightness control.
+    pub brightness: Option<u32>,
+    pub sinks: Vec<AudioSink>,
+    pub battery: Option<BatteryStatus>,
+    /// Newest first.
+    pub notifications: Vec<Notification>,
+    pub flags: DaemonFlags,
     /// False until the first full refresh has completed.
     pub loaded: bool,
 }
@@ -49,15 +47,23 @@ pub enum StatusRequest {
     SetVolume(u32),
     SetBrightness(u32),
     SetDefaultSink(String),
-    ToggleWifi,
-    ToggleBluetooth,
-    RescanWifi,
-    RescanBluetooth,
-    RefreshSinks,
+    SetWifi(bool),
+    ScanWifi,
     ConnectWifi { ssid: String, password: Option<String> },
+    DisconnectWifi,
+    ForgetWifi(String),
+    SetBluetooth(bool),
+    SetDiscoverable(bool),
+    ScanBluetooth,
+    PairBluetooth(String),
+    CancelPair(String),
     ConnectBluetooth(String),
     DisconnectBluetooth(String),
-    /// Refresh everything now (e.g. after an action performed elsewhere).
+    ForgetBluetooth(String),
+    /// Forwarded to prismd (silent, caffeinate, dismiss, clear).
+    Daemon(IpcCommand),
+    /// Copy text to the clipboard without recording it in clipboard history.
+    Copy(String),
     RefreshAll,
 }
 
@@ -66,63 +72,97 @@ pub struct StatusHandle {
     pub tx: Sender<StatusRequest>,
 }
 
-const FAST_INTERVAL: Duration = Duration::from_secs(2);
-const SLOW_INTERVAL: Duration = Duration::from_secs(15);
+/// Fallback refresh; NetworkManager / BlueZ signals trigger refreshes as things change.
+const INTERVAL: Duration = Duration::from_secs(5);
+/// QML NcNetwork scanTimer: the list is re-read this long after a rescan starts.
+const WIFI_SCAN_MS: u64 = 3000;
+/// QML NcBluetoothPage scanTimer.
+const BT_SCAN_SECS: u64 = 15;
 
-pub fn spawn(scope: StatusScope, waker: Waker) -> StatusHandle {
+/// Progress of background operations, shared with helper threads.
+#[derive(Default)]
+struct Ops {
+    wifi_scan_until: Option<Instant>,
+    connecting: Option<String>,
+    wifi_error: Option<(String, String)>,
+    bt_busy: Vec<(String, BtBusy)>,
+    bt_failed: Vec<String>,
+}
+
+pub fn spawn(waker: Waker) -> StatusHandle {
     let (snap_tx, snap_rx) = std::sync::mpsc::channel::<StatusSnapshot>();
     let (req_tx, req_rx) = std::sync::mpsc::channel::<StatusRequest>();
-
+    let again = req_tx.clone();
     std::thread::Builder::new()
         .name("prism-status".into())
-        .spawn(move || worker(scope, waker, snap_tx, req_rx))
+        .spawn(move || worker(waker, snap_tx, req_rx, again))
         .expect("failed to spawn status worker");
-
     StatusHandle { rx: snap_rx, tx: req_tx }
 }
 
-fn worker(scope: StatusScope, waker: Waker, out: Sender<StatusSnapshot>, req_rx: Receiver<StatusRequest>) {
+fn refresh(snap: &mut StatusSnapshot, ops: &Ops, bus: Option<&Bus>) {
+    if let Some(bus) = bus {
+        bus.refresh_network(&mut snap.net);
+        bus.refresh_bluetooth(&mut snap.bt);
+    }
+    let (vol, muted) = prism_common::hardware::get_volume().unwrap_or((snap.volume, snap.muted));
+    snap.volume = vol;
+    snap.muted = muted;
+    snap.sinks = prism_common::network::list_audio_sinks();
+    snap.battery = prism_common::network::get_battery_status();
+    snap.notifications = NotificationStore::load().notifications;
+    if let Ok(Some(json)) = prism_common::ipc::request(&IpcCommand::Notif(NotifAction::State)) {
+        snap.flags = serde_json::from_str(&json).unwrap_or_default();
+    }
+    apply_ops(snap, ops);
+}
+
+fn apply_ops(snap: &mut StatusSnapshot, ops: &Ops) {
+    snap.net.scanning = ops.wifi_scan_until.map(|t| Instant::now() < t).unwrap_or(false);
+    snap.net.connecting = ops.connecting.clone();
+    snap.net.error = ops.wifi_error.clone();
+    snap.bt.busy = ops.bt_busy.clone();
+    snap.bt.failed = ops.bt_failed.clone();
+}
+
+fn worker(waker: Waker, out: Sender<StatusSnapshot>, req_rx: Receiver<StatusRequest>, again: Sender<StatusRequest>) {
+    let ops = Arc::new(Mutex::new(Ops::default()));
+    let bus = Bus::system().map(Arc::new);
+    if let Some(b) = &bus {
+        b.register_agent();
+        let again2 = again.clone();
+        Bus::watch(move || again2.send(StatusRequest::RefreshAll).is_ok());
+    } else {
+        eprintln!("[prism-ui/status] no system D-Bus: network and Bluetooth unavailable");
+    }
     let mut snap = StatusSnapshot::default();
-    let mut last_fast = Instant::now() - FAST_INTERVAL;
-    let mut last_slow = Instant::now() - SLOW_INTERVAL;
-
+    let mut last = Instant::now() - INTERVAL;
+    let mut brightness_read = false;
     loop {
-        let now = Instant::now();
-        let mut changed = false;
-
-        if scope.control_center && now.duration_since(last_fast) >= FAST_INTERVAL {
-            last_fast = now;
-            refresh_fast(&mut snap);
-            changed = true;
-        }
-        if scope.control_center && now.duration_since(last_slow) >= SLOW_INTERVAL {
-            last_slow = now;
-            snap.wifi_networks = prism_common::network::scan_wifi_networks();
-            snap.bt_devices = prism_common::network::scan_bluetooth_devices();
-            snap.audio_sinks = prism_common::network::list_audio_sinks();
-            changed = true;
-        }
-
-        if changed {
+        if last.elapsed() >= INTERVAL {
+            last = Instant::now();
+            refresh(&mut snap, &ops.lock().unwrap(), bus.as_deref());
             snap.loaded = true;
             if out.send(snap.clone()).is_err() {
                 return; // UI is gone
             }
             waker.wake();
+            if !brightness_read {
+                brightness_read = true;
+                // Never read DDC here: it stalls the compositor while the card animates in.
+                snap.brightness = prism_common::hardware::cached_brightness();
+                if out.send(snap.clone()).is_err() {
+                    return;
+                }
+                waker.wake();
+            }
         }
 
-        // Sleep until the next periodic refresh, waking early for requests.
-        let mut next = Duration::from_secs(60);
-        if scope.control_center {
-            next = next.min(FAST_INTERVAL.saturating_sub(last_fast.elapsed()));
-        }
-
-        let first = match req_rx.recv_timeout(next) {
+        let first = match req_rx.recv_timeout(INTERVAL.saturating_sub(last.elapsed())) {
             Ok(r) => r,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
         };
-
         // Drain everything queued and keep only the latest slider values.
         let mut volume = None;
         let mut brightness = None;
@@ -134,72 +174,188 @@ fn worker(scope: StatusScope, waker: Waker, out: Sender<StatusSnapshot>, req_rx:
                 other => others.push(other),
             }
         }
-
         if let Some(v) = volume {
             let _ = prism_common::hardware::set_volume(v);
             snap.volume = v;
         }
         if let Some(v) = brightness {
-            let _ = prism_common::hardware::set_brightness(v);
-            snap.brightness = v;
-        }
-        for req in others {
-            match req {
-                StatusRequest::SetDefaultSink(id) => {
-                    let _ = prism_common::network::set_default_sink(&id);
-                    snap.audio_sinks = prism_common::network::list_audio_sinks();
-                }
-                StatusRequest::ToggleWifi => {
-                    let _ = prism_common::network::toggle_wifi();
-                    snap.wifi_networks = prism_common::network::scan_wifi_networks();
-                    snap.network = prism_common::network::get_network_status();
-                }
-                StatusRequest::ToggleBluetooth => {
-                    let _ = prism_common::network::toggle_bluetooth();
-                    snap.bt_devices = prism_common::network::scan_bluetooth_devices();
-                    snap.bluetooth = prism_common::network::get_bluetooth_status();
-                }
-                StatusRequest::RescanWifi => snap.wifi_networks = prism_common::network::scan_wifi_networks(),
-                StatusRequest::RescanBluetooth => snap.bt_devices = prism_common::network::scan_bluetooth_devices(),
-                StatusRequest::RefreshSinks => snap.audio_sinks = prism_common::network::list_audio_sinks(),
-                StatusRequest::ConnectWifi { ssid, password } => {
-                    let _ = prism_common::network::connect_wifi(&ssid, password.as_deref());
-                    snap.wifi_networks = prism_common::network::scan_wifi_networks();
-                    snap.network = prism_common::network::get_network_status();
-                }
-                StatusRequest::ConnectBluetooth(mac) => {
-                    let _ = prism_common::network::connect_bluetooth_device(&mac);
-                    snap.bt_devices = prism_common::network::scan_bluetooth_devices();
-                    snap.bluetooth = prism_common::network::get_bluetooth_status();
-                }
-                StatusRequest::DisconnectBluetooth(mac) => {
-                    let _ = prism_common::network::disconnect_bluetooth_device(&mac);
-                    snap.bt_devices = prism_common::network::scan_bluetooth_devices();
-                    snap.bluetooth = prism_common::network::get_bluetooth_status();
-                }
-                StatusRequest::RefreshAll => {
-                    refresh_fast(&mut snap);
-                    last_fast = Instant::now();
-                }
-                StatusRequest::SetVolume(_) | StatusRequest::SetBrightness(_) => unreachable!(),
+            if prism_common::hardware::set_brightness(v).is_ok() {
+                snap.brightness = Some(v);
             }
         }
-
-        snap.loaded = true;
-        if out.send(snap.clone()).is_err() {
-            return;
+        let mut full_refresh = false;
+        for req in others {
+            full_refresh |= handle(req, &ops, &again, bus.as_ref());
         }
-        waker.wake();
+        if full_refresh {
+            last = Instant::now() - INTERVAL; // refresh at the top of the loop
+        } else {
+            apply_ops(&mut snap, &ops.lock().unwrap());
+            if out.send(snap.clone()).is_err() {
+                return;
+            }
+            waker.wake();
+        }
     }
 }
 
-fn refresh_fast(snap: &mut StatusSnapshot) {
-    snap.battery = prism_common::network::get_battery_status();
-    snap.network = prism_common::network::get_network_status();
-    snap.bluetooth = prism_common::network::get_bluetooth_status();
-    let (vol, muted) = prism_common::hardware::get_volume().unwrap_or((snap.volume, snap.muted));
-    snap.volume = vol;
-    snap.muted = muted;
-    snap.brightness = prism_common::hardware::get_brightness().unwrap_or(snap.brightness);
-    snap.notifications = NotificationStore::load();
+/// Run `cmd` in the background and refresh when it finishes.
+fn background(again: &Sender<StatusRequest>, f: impl FnOnce() + Send + 'static) {
+    let again = again.clone();
+    std::thread::spawn(move || {
+        f();
+        let _ = again.send(StatusRequest::RefreshAll);
+    });
+}
+
+/// Handle one request; true when a full refresh should follow.
+fn handle(req: StatusRequest, ops: &Arc<Mutex<Ops>>, again: &Sender<StatusRequest>, bus: Option<&Arc<Bus>>) -> bool {
+    match req {
+        StatusRequest::SetVolume(_) | StatusRequest::SetBrightness(_) => false,
+        StatusRequest::RefreshAll => true,
+        StatusRequest::SetDefaultSink(id) => {
+            let _ = prism_common::network::set_default_sink(&id);
+            true
+        }
+        StatusRequest::Daemon(cmd) => {
+            if let Err(e) = prism_common::ipc::request(&cmd) {
+                eprintln!("[prism-ui/status] prismd: {e}");
+            }
+            true
+        }
+        StatusRequest::Copy(text) => {
+            prism_common::clipboard::touch_self_copy_lock();
+            if let Ok(mut child) = Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
+                use std::io::Write;
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                crate::reap(child);
+            }
+            false
+        }
+        other => match bus {
+            Some(bus) => handle_bus(other, ops, again, Arc::clone(bus)),
+            None => false,
+        },
+    }
+}
+
+/// Network and Bluetooth requests (NetworkManager / BlueZ).
+fn handle_bus(req: StatusRequest, ops: &Arc<Mutex<Ops>>, again: &Sender<StatusRequest>, bus: Arc<Bus>) -> bool {
+    let log = |what: &str, r: Result<(), String>| {
+        if let Err(e) = r {
+            eprintln!("[prism-ui/status] {what}: {e}");
+        }
+    };
+    match req {
+        StatusRequest::SetWifi(on) => {
+            log("wifi radio", bus.set_wifi(on));
+            true
+        }
+        StatusRequest::ScanWifi => {
+            {
+                let mut o = ops.lock().unwrap();
+                if o.wifi_scan_until.map(|t| Instant::now() < t).unwrap_or(false) {
+                    return false;
+                }
+                o.wifi_scan_until = Some(Instant::now() + Duration::from_millis(WIFI_SCAN_MS));
+            }
+            bus.scan_wifi();
+            let again2 = again.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(WIFI_SCAN_MS));
+                let _ = again2.send(StatusRequest::RefreshAll);
+            });
+            false
+        }
+        StatusRequest::ConnectWifi { ssid, password } => {
+            {
+                let mut o = ops.lock().unwrap();
+                if o.connecting.is_some() {
+                    return false;
+                }
+                o.connecting = Some(ssid.clone());
+                o.wifi_error = None;
+            }
+            let ops = Arc::clone(ops);
+            background(again, move || {
+                let result = bus.connect_wifi(&ssid, password.as_deref());
+                let mut o = ops.lock().unwrap();
+                o.connecting = None;
+                if let Err(e) = result {
+                    o.wifi_error = Some((ssid, e));
+                }
+            });
+            true
+        }
+        StatusRequest::DisconnectWifi => {
+            bus.disconnect_wifi();
+            true
+        }
+        StatusRequest::ForgetWifi(ssid) => {
+            bus.forget_wifi(&ssid);
+            true
+        }
+        StatusRequest::SetBluetooth(on) => {
+            log("bluetooth power", bus.set_bluetooth(on));
+            true
+        }
+        StatusRequest::SetDiscoverable(on) => {
+            log("discoverable", bus.set_discoverable(on));
+            true
+        }
+        StatusRequest::ScanBluetooth => {
+            bus.scan_bluetooth(BT_SCAN_SECS);
+            true
+        }
+        StatusRequest::PairBluetooth(mac) => {
+            {
+                let mut o = ops.lock().unwrap();
+                o.bt_failed.retain(|m| *m != mac);
+                o.bt_busy.retain(|(m, _)| *m != mac);
+                o.bt_busy.push((mac.clone(), BtBusy::Pairing));
+            }
+            let ops = Arc::clone(ops);
+            background(again, move || {
+                let result = bus.pair(&mac);
+                let mut o = ops.lock().unwrap();
+                let cancelled = !o.bt_busy.iter().any(|(m, _)| *m == mac);
+                o.bt_busy.retain(|(m, _)| *m != mac);
+                if let Err(e) = result {
+                    eprintln!("[prism-ui/status] pairing {mac}: {e}");
+                    if !cancelled {
+                        o.bt_failed.push(mac.clone());
+                    }
+                }
+            });
+            true
+        }
+        StatusRequest::CancelPair(mac) => {
+            ops.lock().unwrap().bt_busy.retain(|(m, _)| *m != mac);
+            bus.cancel_pair(&mac);
+            true
+        }
+        StatusRequest::ConnectBluetooth(mac) => {
+            ops.lock().unwrap().bt_busy.push((mac.clone(), BtBusy::Connecting));
+            let ops = Arc::clone(ops);
+            background(again, move || {
+                let r = bus.connect_bt(&mac);
+                ops.lock().unwrap().bt_busy.retain(|(m, _)| *m != mac);
+                if let Err(e) = r {
+                    eprintln!("[prism-ui/status] connecting {mac}: {e}");
+                }
+            });
+            true
+        }
+        StatusRequest::DisconnectBluetooth(mac) => {
+            log("disconnect", bus.disconnect_bt(&mac));
+            true
+        }
+        StatusRequest::ForgetBluetooth(mac) => {
+            log("forget", bus.forget_bt(&mac));
+            true
+        }
+        _ => false,
+    }
 }

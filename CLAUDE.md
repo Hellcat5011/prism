@@ -23,7 +23,8 @@ journalctl --user -u prismd -f              # logs of prismd and prism-ui
 ```
 
 `prismd` runs as the systemd user unit `prismd.service` (`deploy/prismd.service`); never also start it from the
-compositor config. `prism-ui <mode>` (launcher, search, settings, wallpaper, notif-center, ...) runs a single overlay
+compositor config. Apps are launched through `prism_common::apps::app_command` (systemd-run scope in app.slice) so
+restarting prismd never kills them. `prism-ui <mode>` (launcher, search, settings, wallpaper, notif-center, ...) runs a single overlay
 standalone for debugging; `PRISM_PERF=1` logs per-frame draw times.
 
 ## Architecture
@@ -32,11 +33,12 @@ Workspace crates (`crates/`):
 
 * `prism-common`: shared library. `Config` (`~/.config/prism/config.json`, serde with per-field defaults), `Theme`
   (matugen palette, `~/.config/prism/colors.json` with fallback to the QML path), IPC types (`IpcCommand` for
-  prism-ctl to prismd, `UiCommand` for prismd to prism-ui), and helpers that shell out (nmcli, wpctl, brightnessctl,
-  playerctl, matugen).
+  prism-ctl to prismd, `UiCommand` for prismd to prism-ui), and helpers that shell out (wpctl, brightnessctl/ddcutil,
+  playerctl, matugen; nmcli/bluetoothctl only for prism-ctl's network/bluetooth commands).
 
 * `prismd`: background daemon. IPC socket `$XDG_RUNTIME_DIR/prism.sock`, idle monitor, gamma/blue light, clipboard
-  watchers, notification store, launches the Python D-Bus notification bridge (`scripts/prism-dbus-notif.py`).
+  watchers, notification store, and the notification server (`notifd.rs`: org.freedesktop.Notifications via
+  zbus; actions, urgency, image hints; signals back to apps). The old Python bridge is gone (killed if running).
   It supervises one resident `prism-ui daemon` and forwards UI requests to it via `send_ui()` over
   `$XDG_RUNTIME_DIR/prism-ui.sock`; it never spawns per-window processes.
 
@@ -44,7 +46,14 @@ Workspace crates (`crates/`):
 
 * `prism-ui`: all UI. Raw FFI to cairo/pango/gdk-pixbuf (`cairo_backend.rs`), wayland-client, xkbcommon, zbus.
 
-* `prism-lock`: lockscreen / greetd greeter (separate binary, not yet on the shared style).
+* `prism-lock`: lockscreen (ext-session-lock) and greetd greeter (`--greeter`, run under `cage -s --`), QML
+  Lockscreen.qml look. PAM runs on a worker thread with one service (`/etc/pam.d/prism`, else `login`); lock
+  surfaces are created right after `lock()`. prismd supervises it: a lock client that exits non-zero is
+  restarted so the locked session always has a prompt (exit 3 = compositor cannot lock). Test locking only in
+  a nested Mango (`mango -c <empty conf>`, then `WAYLAND_DISPLAY=wayland-1 prism-lock`), never on the live
+  session. `prism-lock --check-auth` checks PAM from a terminal. A nested Mango rewrites `WAYLAND_DISPLAY` in the systemd user environment and,
+  when it exits, stops `mango-session.target` (and with it prismd). Afterwards run
+  `systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP && systemctl --user start mango-session.target prismd`.
 
 ### prism-ui process model (`main.rs`)
 
@@ -54,10 +63,17 @@ an `Overlay`: its own `EventQueue<UiState>` + `UiState`, created by `Overlay::op
 Wayland fd, a `Waker` pipe (worker threads wake the loop) and the desktop's inotify fd; `handle_command` applies
 `UiCommand`s (toggle/open/close modal, OSD, notifications, edit mode). EAGAIN on read is not a disconnect.
 
-`UiState` is still one large struct with per-mode `match` arms for drawing and input. Newer screens are
-self-contained views owned by `UiState` and routed to before the old arms: `settings.rs` (`SettingsView`,
-a table of rows bound to `Config` via fn getters/setters, draft + save) and `wallpaper.rs` (`WallpaperView`).
-Prefer this pattern for rewrites over adding more arms to `main.rs`.
+`UiState` owns the surfaces, transitions and input plumbing; every screen is a self-contained view.
+The modal cards implement `view::CardView` (`launcher.rs`, `spotlight.rs`, `power.rs`, `clipboard.rs`,
+`emoji.rs`, `keybinds.rs`) and are held as `UiState::view`; `settings.rs` (`SettingsView`, rows bound to
+`Config` via fn getters/setters, live apply + undo), `wallpaper.rs` and `nc/` (notification center;
+`nc/model.rs` holds the network/Bluetooth state, `nc/dbus.rs` fills it from NetworkManager and BlueZ over the
+system bus, with a pairing agent and signal-driven refreshes) have their own fields. `launcher.rs` also has
+the shared `Query` text input. Add new screens as views, not as `UiMode` match arms.
+
+Not overlays: `osd.rs` (UiState view whose layer surface slides by margin), `toasts.rs` (notification popups:
+own event queue, one surface per popup), `caffeinate.rs` (idle inhibitor), `svg.rs` (SVG path icons, the QML
+NcIcon set).
 
 ### Rendering and motion
 

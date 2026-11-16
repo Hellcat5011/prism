@@ -13,6 +13,7 @@ mod bluelight;
 mod config_watch;
 mod gamma;
 mod idle;
+mod notifd;
 mod wake;
 
 use bluelight::BlueLight;
@@ -33,8 +34,17 @@ struct DaemonState {
     clipboard: ClipboardStore,
     notifications: NotificationStore,
     emojis: Vec<EmojiItem>,
-    /// The running lockscreen, so repeated lock requests never stack instances.
-    lock_child: Option<Child>,
+    /// Silent mode: notifications are stored but only critical ones pop up.
+    silent: bool,
+}
+
+/// Caffeinate (idle inhibitor held by prism-ui). Global so the prism-ui supervisor can
+/// re-apply it when prism-ui restarts.
+static CAFFEINATE: AtomicBool = AtomicBool::new(false);
+
+fn set_caffeinate(on: bool) -> Result<(), String> {
+    CAFFEINATE.store(on, Ordering::SeqCst);
+    send_ui(&prism_common::UiCommand::Caffeinate(on)).map(|_| ())
 }
 
 fn resolve_sibling_bin(bin_name: &str) -> std::path::PathBuf {
@@ -148,6 +158,17 @@ fn ensure_ui_daemon() {
             let started = std::time::Instant::now();
             match spawn_prism_ui(&["daemon"]) {
                 Ok(mut child) => {
+                    if CAFFEINATE.load(Ordering::SeqCst) {
+                        // Re-apply once the new prism-ui has bound its socket.
+                        thread::spawn(|| {
+                            for _ in 0..20 {
+                                thread::sleep(Duration::from_millis(250));
+                                if !CAFFEINATE.load(Ordering::SeqCst) || set_caffeinate(true).is_ok() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
                     let _ = child.wait();
                 }
                 Err(e) => eprintln!("[prismd] {}", e),
@@ -220,34 +241,81 @@ fn start_clipboard_daemon() {
     });
 }
 
-fn start_dbus_notif_daemon() {
-    let script_paths = [
-        std::path::PathBuf::from(std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-            format!("{}/.local/share", std::env::var("HOME").unwrap_or_default())
-        }))
-        .join("prism/scripts/prism-dbus-notif.py"),
-        std::path::PathBuf::from("./scripts/prism-dbus-notif.py"),
-    ];
+/// Receives notifications from the notification server (notifd.rs).
+struct NotifHandler {
+    state: std::sync::Weak<Mutex<DaemonState>>,
+}
 
-    let found_script = script_paths.iter().find(|p| p.exists()).cloned();
-    if let Some(script) = found_script {
-        eprintln!("[prismd/notif] Spawning D-Bus Notification daemon: {:?}", script);
-        let _ = Command::new("pkill")
-            .args(["-f", "prism-dbus-notif.py"])
-            .status();
+/// Popup message for a stored notification.
+fn popup_for(n: &Notification) -> prism_common::NotifOverlayMessage {
+    prism_common::NotifOverlayMessage::Add {
+        id: n.id,
+        app_name: n.app_name.clone(),
+        summary: n.summary.clone(),
+        body: n.body.clone(),
+        timeout_ms: n.timeout_ms as u64,
+        icon: n.icon.clone(),
+        image: n.image.clone(),
+        urgency: n.urgency,
+        actions: n.actions.clone(),
+        desktop_entry: n.desktop_entry.clone(),
+    }
+}
 
-        thread::spawn(move || {
-            loop {
-                let mut cmd = Command::new("python3");
-                cmd.arg(&script);
-                if let Ok(mut child) = cmd.spawn() {
-                    let _ = child.wait();
-                }
-                thread::sleep(Duration::from_secs(3));
+impl notifd::Handler for NotifHandler {
+    fn notify(&self, i: notifd::Incoming) -> u32 {
+        let Some(state) = self.state.upgrade() else { return 0 };
+        let mut n = Notification::new(0, i.app_name, i.summary, i.body);
+        n.icon = i.icon;
+        n.urgency = i.urgency;
+        n.timeout_ms = i.timeout_ms;
+        n.actions = i.actions;
+        n.desktop_entry = i.desktop_entry;
+        n.image = i.image;
+        let (popup, silent) = {
+            let mut st = state.lock().unwrap();
+            if i.transient {
+                n.id = if i.replaces_id != 0 { i.replaces_id } else { st.notifications.reserve_id() };
+            } else {
+                n.id = st.notifications.upsert(i.replaces_id, n.clone());
             }
-        });
-    } else {
-        eprintln!("[prismd/notif] prism-dbus-notif.py not found, skipping D-Bus server");
+            (popup_for(&n), st.silent)
+        };
+        // Silent mode keeps critical notifications (QML silentAllowsCritical).
+        if !silent || n.urgency >= 2 {
+            send_notif(popup);
+        }
+        n.id
+    }
+
+    fn close(&self, id: u32) {
+        let Some(state) = self.state.upgrade() else { return };
+        send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
+        state.lock().unwrap().notifications.remove(id);
+        notifd::emit_closed(id, notifd::CLOSED_BY_CALL);
+    }
+}
+
+/// Stop the old Python notification bridge (replaced by notifd.rs) if it is still running.
+/// Matches only `python* .../prism-dbus-notif.py` processes of this user (a `pkill -f` pattern
+/// would also hit shells or editors that merely mention the file name).
+fn stop_python_bridge() {
+    let uid = unsafe { libc::getuid() };
+    let Ok(dir) = std::fs::read_dir("/proc") else { return };
+    for e in dir.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else { continue };
+        let owner = std::fs::metadata(e.path()).map(|m| std::os::unix::fs::MetadataExt::uid(&m)).unwrap_or(u32::MAX);
+        if owner != uid {
+            continue;
+        }
+        let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else { continue };
+        let args: Vec<&[u8]> = cmd.split(|b| *b == 0).filter(|a| !a.is_empty()).collect();
+        let is_python = args.first().map(|a| a.rsplit(|b| *b == b'/').next().unwrap_or(a).starts_with(b"python")).unwrap_or(false);
+        let is_bridge = args.get(1).map(|a| a.ends_with(b"/prism-dbus-notif.py") || *a == b"prism-dbus-notif.py").unwrap_or(false);
+        if is_python && is_bridge {
+            eprintln!("[prismd/notif] stopping the old Python bridge (pid {pid})");
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
     }
 }
 
@@ -257,10 +325,7 @@ fn start_popup_watcher(state: Arc<Mutex<DaemonState>>) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(1));
         if let Ok(mut st) = state.lock() {
-            let lock_exited = st.lock_child.as_mut().map(|c| !child_running(c)).unwrap_or(false);
-            if lock_exited {
-                st.lock_child = None;
-            }
+            let _ = &mut st;
         }
     });
 }
@@ -277,15 +342,57 @@ fn start_clipboard_pruner(state: Arc<Mutex<DaemonState>>) {
 }
 
 /// Start prism-lock unless one is already running.
-fn lock_screen(st: &mut DaemonState) -> Result<&'static str, String> {
-    if st.lock_child.as_mut().map(child_running).unwrap_or(false) {
+/// A lock is in progress (a supervisor thread owns the prism-lock process).
+static LOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Lock the session. A supervisor thread runs prism-lock until it exits 0 (unlocked). If it
+/// dies any other way the compositor keeps the session locked with nothing on screen, so a
+/// new prism-lock is started to take the lock over. Exit code 3 means the compositor cannot
+/// lock at all; that is not retried.
+fn lock_screen(_st: &mut DaemonState) -> Result<&'static str, String> {
+    if LOCK_ACTIVE.swap(true, Ordering::SeqCst) {
         return Ok("already_locked");
     }
-    if let Some(mut old) = st.lock_child.take() {
-        let _ = old.wait(); // already exited; collect its status
-    }
     eprintln!("[prismd] Spawning prism-lock...");
-    st.lock_child = Some(spawn_prism_lock(&[])?);
+    let mut child = match spawn_prism_lock(&[]) {
+        Ok(c) => c,
+        Err(e) => {
+            LOCK_ACTIVE.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    thread::spawn(move || {
+        let mut quick_failures = 0;
+        loop {
+            let started = std::time::Instant::now();
+            let status = child.wait();
+            let code = status.as_ref().ok().and_then(|s| s.code());
+            match code {
+                Some(0) => break,
+                Some(3) => {
+                    eprintln!("[prismd] prism-lock: compositor cannot lock the session");
+                    break;
+                }
+                _ => {
+                    eprintln!("[prismd] prism-lock exited without unlocking ({status:?}); restarting it");
+                    quick_failures = if started.elapsed() < Duration::from_secs(5) { quick_failures + 1 } else { 0 };
+                    if quick_failures >= 10 {
+                        eprintln!("[prismd] prism-lock keeps failing; giving up (unlock from a TTY: run prism-lock with WAYLAND_DISPLAY set)");
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(300));
+                    match spawn_prism_lock(&[]) {
+                        Ok(c) => child = c,
+                        Err(e) => {
+                            eprintln!("[prismd] cannot restart prism-lock: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        LOCK_ACTIVE.store(false, Ordering::SeqCst);
+    });
     Ok("lock_invoked")
 }
 
@@ -327,7 +434,8 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             Ok(IpcCommand::Lock(LockAction::Status)) => {
                 let st = state.lock().unwrap();
                 let idle = st.is_idle.load(Ordering::SeqCst);
-                IpcResponse::Ok(Some(format!("unlocked, idle={}", idle)))
+                let locked = if LOCK_ACTIVE.load(Ordering::SeqCst) { "locked" } else { "unlocked" };
+                IpcResponse::Ok(Some(format!("{locked}, idle={}", idle)))
             }
             Ok(IpcCommand::Lock(LockAction::Lock)) => {
                 let mut st = state.lock().unwrap();
@@ -612,12 +720,16 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some(msg))
             }
             Ok(IpcCommand::Notif(NotifAction::Send { app_name, summary, body })) => {
-                let notif = Notification::new(0, app_name.clone(), summary.clone(), body.clone());
-                let id = {
+                let mut notif = Notification::new(0, app_name, summary, body);
+                let silent = {
                     let mut st = state.lock().unwrap();
-                    st.notifications.add(notif)
+                    notif.id = st.notifications.add(notif.clone());
+                    st.silent
                 };
-                send_notif(prism_common::NotifOverlayMessage::Add { id, app_name, summary, body, timeout_ms: 5000 });
+                let id = notif.id;
+                if !silent {
+                    send_notif(popup_for(&notif));
+                }
                 IpcResponse::Ok(Some(format!("notification_id:{}", id)))
             }
             Ok(IpcCommand::Notif(NotifAction::List)) => {
@@ -635,13 +747,55 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             Ok(IpcCommand::Notif(NotifAction::Clear)) => {
                 send_notif(prism_common::NotifOverlayMessage::Dismiss { id: 0 });
                 let mut st = state.lock().unwrap();
+                let ids: Vec<u32> = st.notifications.notifications.iter().map(|n| n.id).collect();
                 st.notifications.clear();
+                drop(st);
+                for id in ids {
+                    notifd::emit_closed(id, notifd::CLOSED_DISMISSED);
+                }
                 IpcResponse::Ok(Some("Notifications cleared".to_string()))
+            }
+            Ok(IpcCommand::Notif(NotifAction::Silent(want))) => {
+                let mut st = state.lock().unwrap();
+                st.silent = want.unwrap_or(!st.silent);
+                IpcResponse::Ok(Some(format!("silent:{}", st.silent)))
+            }
+            Ok(IpcCommand::Notif(NotifAction::ClearApp(app))) => {
+                let mut st = state.lock().unwrap();
+                let key = app.to_lowercase();
+                let ids: Vec<u32> = st.notifications.notifications.iter().filter(|n| n.app_name.to_lowercase() == key).map(|n| n.id).collect();
+                for id in &ids {
+                    send_notif(prism_common::NotifOverlayMessage::Dismiss { id: *id });
+                    st.notifications.remove(*id);
+                    notifd::emit_closed(*id, notifd::CLOSED_DISMISSED);
+                }
+                IpcResponse::Ok(Some(format!("cleared:{}", ids.len())))
+            }
+            Ok(IpcCommand::Notif(NotifAction::Invoke { id, action })) => {
+                // Tell the app, then close the notification (spec: unless "resident").
+                notifd::emit_action(id, &action);
+                send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
+                state.lock().unwrap().notifications.remove(id);
+                notifd::emit_closed(id, notifd::CLOSED_DISMISSED);
+                IpcResponse::Ok(Some(format!("invoked:{id}:{action}")))
+            }
+            Ok(IpcCommand::Notif(NotifAction::State)) => {
+                let st = state.lock().unwrap();
+                let flags = prism_common::ipc::DaemonFlags { silent: st.silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst) };
+                IpcResponse::Ok(serde_json::to_string(&flags).ok())
+            }
+            Ok(IpcCommand::Caffeinate(want)) => {
+                let on = want.unwrap_or(!CAFFEINATE.load(Ordering::SeqCst));
+                match set_caffeinate(on) {
+                    Ok(()) => IpcResponse::Ok(Some(format!("caffeinate:{}", on))),
+                    Err(e) => IpcResponse::Error(e),
+                }
             }
             Ok(IpcCommand::Notif(NotifAction::Dismiss(id))) => {
                 send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
                 let mut st = state.lock().unwrap();
                 if st.notifications.remove(id) {
+                    notifd::emit_closed(id, notifd::CLOSED_DISMISSED);
                     IpcResponse::Ok(Some(format!("Dismissed notification #{}", id)))
                 } else {
                     IpcResponse::Error(format!("Notification #{} not found", id))
@@ -989,10 +1143,21 @@ fn main() {
     let apps = load_all_desktop_apps();
     println!("Loaded {} desktop application entries.", apps.len());
 
-    let clipboard = ClipboardStore::load();
+    // Prism's cache holds clipboard and notification history: owner-only.
+    if let Ok(home) = std::env::var("HOME") {
+        let _ = prism_common::clipboard::private_dir(&std::path::PathBuf::from(home).join(".cache/prism"));
+    }
+    let mut clipboard = ClipboardStore::load();
+    // Re-apply the sensitivity filter to stored history and tighten file permissions.
+    let purged = clipboard.purge_sensitive();
+    if purged > 0 {
+        eprintln!("[prismd/clipboard] removed {purged} stored entries that look sensitive");
+    }
+    let _ = clipboard.save();
     println!("Loaded {} clipboard history entries.", clipboard.items.len());
 
     let notifications = NotificationStore::load();
+    notifications.save(); // rewrite with owner-only permissions
     println!("Loaded {} notification entries.", notifications.notifications.len());
 
     let emojis = prism_common::load_emojis();
@@ -1011,7 +1176,7 @@ fn main() {
         clipboard,
         notifications,
         emojis,
-        lock_child: None,
+        silent: false,
     }));
 
     let idle_state = Arc::downgrade(&state);
@@ -1045,7 +1210,8 @@ fn main() {
         start_clipboard_daemon();
         start_clipboard_pruner(Arc::clone(&state));
         start_popup_watcher(Arc::clone(&state));
-        start_dbus_notif_daemon();
+        stop_python_bridge();
+        notifd::start(Arc::new(NotifHandler { state: Arc::downgrade(&state) }));
     }
 
     println!("Prism IPC listening on '{}'", socket_path.display());
