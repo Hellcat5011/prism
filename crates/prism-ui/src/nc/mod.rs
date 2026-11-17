@@ -319,8 +319,8 @@ impl NcView {
         }
         y += 32.0 + 16.0;
 
-        // Tiles.
-        self.draw_tiles(cr, x, y, w, &p);
+        // Tiles. Sections enter one after another (ui::staggered): tiles, groups, footer.
+        crate::ui::staggered(cr, 0, Rect { x, y, w, h: 44.0 }, || self.draw_tiles(cr, x, y, w, &p));
         y += 44.0 + 16.0;
 
         // Footer (bottom-up so the page gets the remaining height).
@@ -357,7 +357,7 @@ impl NcView {
             }
         }
 
-        self.draw_footer(cr, footer, sink_h, &p);
+        crate::ui::staggered(cr, 4, footer, || self.draw_footer(cr, footer, sink_h, &p));
     }
 
     fn draw_tiles(&mut self, cr: *mut Cairo, x: f64, y: f64, w: f64, p: &Pal) {
@@ -529,7 +529,10 @@ impl NcView {
         self.scrolled(cr, 0, list, |v, mut y| {
             let start = y;
             for (gi, (key, items)) in groups.iter().enumerate() {
-                let h = v.draw_group(cr, Rect { x: list.x, y, w: list.w, h: 0.0 }, gi, key, items, &p);
+                let mut h = 0.0;
+                crate::ui::staggered(cr, gi + 1, Rect { x: list.x, y, w: list.w, h: list.h }, || {
+                    h = v.draw_group(cr, Rect { x: list.x, y, w: list.w, h: 0.0 }, gi, key, items, &p);
+                });
                 y += h + 8.0;
             }
             y - start - 8.0

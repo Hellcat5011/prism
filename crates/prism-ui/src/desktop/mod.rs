@@ -879,6 +879,12 @@ impl Desk {
                     }
                     Hit::Tray(k) => self.tray_click(k, button, qh),
                     Hit::Shortcut(k) => {
+                        // The card opens out of this button (collapse to origin, ui.rs).
+                        if let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Shortcuts) {
+                            if let Some((_, r)) = w.hits.iter().find(|(h, _)| *h == Hit::Shortcut(k)) {
+                                crate::ui::set_open_origin(w.rect.x + r.x + r.w / 2.0, w.rect.y + r.y + r.h / 2.0);
+                            }
+                        }
                         let args: &[&str] = match k {
                             0 => &["launcher", "toggle"],
                             1 => &["notif", "toggle"],

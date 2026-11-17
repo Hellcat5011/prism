@@ -382,6 +382,7 @@ impl SpotlightView {
                 }
                 let hovered = self.hovered();
                 let mut y = self.list.y - self.scroll;
+                let mut vis = 0usize;
                 for line in self.lines() {
                     if y > self.list.y + self.list.h {
                         break;
@@ -390,14 +391,19 @@ impl SpotlightView {
                         Line::Header(s) => {
                             let f = "Inter, Sans Semi-Bold 11px";
                             let (_, th) = cb::measure_pango_text(cr, s, f, 1000, Some(1));
-                            cb::draw_pango_text(cr, self.list.x + 12.0, y + ((SECTION_H - th as f64) / 2.0).round(), &s.to_uppercase(), f, (sv_text.0, sv_text.1, sv_text.2, 0.75), None);
+                            let head = Rect { x: self.list.x, y, w: self.list.w, h: SECTION_H };
+                            crate::ui::staggered(cr, vis, head, || {
+                                cb::draw_pango_text(cr, self.list.x + 12.0, y + ((SECTION_H - th as f64) / 2.0).round(), &s.to_uppercase(), f, (sv_text.0, sv_text.1, sv_text.2, 0.75), None);
+                            });
+                            vis += 1;
                             y += SECTION_H + ROW_GAP;
                         }
                         Line::Item(i) => {
                             let row = Rect { x: self.list.x, y, w: self.list.w, h: ROW_H };
                             if row.y + row.h >= self.list.y {
                                 self.rows.push((i, row));
-                                self.draw_row(cr, row, i, hovered == Some(i), fg, inv, sv_text);
+                                crate::ui::staggered(cr, vis, row, || self.draw_row(cr, row, i, hovered == Some(i), fg, inv, sv_text));
+                                vis += 1;
                             }
                             y += ROW_H + ROW_GAP;
                         }

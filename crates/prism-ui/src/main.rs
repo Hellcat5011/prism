@@ -63,6 +63,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape as CursorShape, WpCursorShapeDeviceV1};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+use wayland_protocols::wp::alpha_modifier::v1::client::{wp_alpha_modifier_surface_v1::WpAlphaModifierSurfaceV1, wp_alpha_modifier_v1::WpAlphaModifierV1};
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
@@ -119,6 +120,19 @@ struct UiState {
     scrim_layer: Option<ZwlrLayerSurfaceV1>,
     scrim_viewport: Option<WpViewport>,
     scrim_buffer: Option<wl_buffer::WlBuffer>,
+    /// Compositor-side opacity of the card surface (wp_alpha_modifier_v1). Fading the whole
+    /// surface fades the compositor's blur behind it too; fading only the pixels left the blur
+    /// rectangle behind until the surface was destroyed.
+    alpha_surface: Option<WpAlphaModifierSurfaceV1>,
+    alpha_multiplier: u32,
+    /// Collapse to origin: the card's layer surface is scaled toward `origin` (screen px; the
+    /// card centre if None) during the scale transitions, its buffer stretched by this viewport.
+    card_viewport: Option<WpViewport>,
+    origin: Option<(f64, f64)>,
+    /// Layer surface geometry last sent (x, y, w, h).
+    geom: (i32, i32, i32, i32),
+    /// A buffer of the current card size is attached (geometry-only frames may reuse it).
+    buffer_committed: bool,
     scrim_configured: bool,
     /// True when the main surface is sized to the card instead of the whole screen.
     card_surface: bool,
@@ -248,6 +262,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for UiState {
 impl Dispatch<WpSinglePixelBufferManagerV1, ()> for UiState {
     fn event(_: &mut Self, _: &WpSinglePixelBufferManagerV1, _: <WpSinglePixelBufferManagerV1 as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
+impl Dispatch<WpAlphaModifierSurfaceV1, ()> for UiState {
+    fn event(_: &mut Self, _: &WpAlphaModifierSurfaceV1, _: <WpAlphaModifierSurfaceV1 as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
 impl Dispatch<WpViewporter, ()> for UiState {
     fn event(_: &mut Self, _: &WpViewporter, _: <WpViewporter as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
@@ -393,6 +411,9 @@ impl Dispatch<wl_callback::WlCallback, ()> for UiState {
         if let Some(tr) = state.transition.as_mut() {
             if !tr.started() {
                 tr.start_clock();
+                if tr.entering {
+                    ui::begin_entrance(&state.style);
+                }
                 state.animating = true;
             }
         }
@@ -996,8 +1017,8 @@ impl UiState {
                 let (x, y, w, h) = (c.x as i32, c.y as i32, c.w as i32, c.h as i32);
                 let sliding = self.transition.is_some() && matches!(self.motion, Motion::SlideLeft { .. } | Motion::SlideRight { .. });
                 match (sliding, self.config.notification_center_position.as_str()) {
-                    // While sliding (OutBack overshoots ~13% of 500 px) the surface spans from the
-                    // screen edge past the overshoot, then shrinks to the card.
+                    // While sliding (the spring overshoots ~1-2% of 500 px) the surface spans from
+                    // the screen edge past the overshoot, then shrinks to the card.
                     (true, "right") => (x - 80, y, sw as i32 - (x - 80), h),
                     (true, _) => (0, y, x + w + 80, h),
                     _ => (x, y, w, h),
@@ -1016,6 +1037,60 @@ impl UiState {
     fn design_card(&self) -> desktop::layout::Rect {
         let (x, y, w, h) = self.design_card_rect();
         desktop::layout::Rect { x: x as f64, y: y as f64, w: w as f64, h: h as f64 }
+    }
+
+    /// Cards that grow from / collapse to their origin by scaling the surface itself.
+    fn collapse(&self) -> bool {
+        self.card_viewport.is_some() && matches!(self.motion, Motion::Scale)
+    }
+
+    /// Layer surface geometry for `pose`: the card rectangle, scaled toward the origin while
+    /// a collapse transition runs.
+    fn geometry_for(&self, pose: &Pose) -> (i32, i32, i32, i32) {
+        let (x, y, w, h) = self.surf_rect;
+        if !self.collapse() || (pose.scale - 1.0).abs() < 1e-4 {
+            return (x, y, w, h);
+        }
+        let s = pose.scale.max(0.01);
+        let (ox, oy) = self.origin.unwrap_or((x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0));
+        let nx = ox + (x as f64 - ox) * s;
+        let ny = oy + (y as f64 - oy) * s;
+        ((nx.round()) as i32, (ny.round()) as i32, ((w as f64 * s).round() as i32).max(1), ((h as f64 * s).round() as i32).max(1))
+    }
+
+    /// Send the layer surface geometry (applied with the next commit).
+    fn apply_geometry(&mut self, g: (i32, i32, i32, i32)) {
+        if g == self.geom {
+            return;
+        }
+        if let Some(ls) = &self.layer_surface {
+            ls.set_size(g.2.max(1) as u32, g.3.max(1) as u32);
+            ls.set_margin(g.1, 0, 0, g.0);
+        }
+        if let Some(vp) = &self.card_viewport {
+            vp.set_destination(g.2.max(1), g.3.max(1));
+        }
+        self.geom = g;
+    }
+
+    /// Per-frame transition state besides the pixels: surface opacity, scrim, end of exit.
+    fn finish_pose(&mut self, pose: &Pose) {
+        if let Some(a) = &self.alpha_surface {
+            // The compositor fades the whole surface.
+            let m = (pose.alpha.clamp(0.0, 1.0) * u32::MAX as f64).round() as u32;
+            if m != self.alpha_multiplier {
+                a.set_multiplier(m);
+                self.alpha_multiplier = m;
+            }
+        }
+        if pose.done && !self.closing {
+            self.transition = None;
+        }
+        // Fade the scrim with the card; applied after drawing (see draw_frame).
+        self.scrim_pending = Some(if self.settings_hidden() { 0.0 } else { pose.shown.clamp(0.0, 1.0) });
+        if self.closing && pose.done {
+            self.exit_requested = true;
+        }
     }
 
     /// Settings is hidden while a polkit dialog it started is open.
@@ -1081,16 +1156,32 @@ impl UiState {
                 // Move/resize and attach a buffer of the new size in the same commit. Waiting
                 // for the configure first let the old buffer jump with the new margin for a
                 // frame (the shake at the end of the slide-in).
-                if let Some(ls) = &self.layer_surface {
-                    ls.set_size(want.2.max(1) as u32, want.3.max(1) as u32);
-                    ls.set_margin(want.1, 0, 0, want.0);
-                }
                 self.surf_rect = want;
                 self.content_dirty = true;
+                self.buffer_committed = false;
+            }
+            let pose = self.transition.as_ref().map(|t| t.sample()).unwrap_or(Pose::REST);
+            let geo = self.geometry_for(&pose);
+            self.apply_geometry(geo);
+
+            // Collapse/grow frames where only the geometry changes: no new buffer, the
+            // compositor scales the attached one.
+            let can_fade = self.alpha_surface.is_some() || pose.alpha >= 0.999;
+            if self.collapse() && self.buffer_committed && !self.content_dirty && !self.content_animating && can_fade {
+                if let Some(surface) = self.surface.clone() {
+                    self.finish_pose(&pose);
+                    if self.frame_callback.is_none() {
+                        self.frame_callback = Some(surface.frame(qh, ()));
+                    }
+                    self.animating = !pose.done;
+                    self.needs_render = false;
+                    surface.commit();
+                    return;
+                }
             }
         }
 
-        let (surface, shm) = match (&self.surface, &self.shm) {
+        let (surface, shm) = match (self.surface.clone(), self.shm.clone()) {
             (Some(s), Some(shm)) => (s, shm),
             _ => return,
         };
@@ -1125,7 +1216,7 @@ impl UiState {
         let slot_idx = if let Some(idx) = self.buffer_pool.iter().position(|s| !s.busy) {
             idx
         } else if self.buffer_pool.len() < 3 {
-            if let Some(slot) = create_buffer_slot(shm, qh, bw, bh, stride, size) {
+            if let Some(slot) = create_buffer_slot(&shm, qh, bw, bh, stride, size) {
                 self.buffer_pool.push(slot);
                 self.buffer_pool.len() - 1
             } else {
@@ -1199,6 +1290,7 @@ impl UiState {
 
             cairo_backend::cairo_save(cr);
             let content_t0 = std::time::Instant::now();
+            ui::take_stagger_pending(); // only rows drawn in this frame count
 
             if redraw_content {
             match &self.mode {
@@ -1254,6 +1346,8 @@ impl UiState {
             } // if redraw_content
             if redraw_content {
                 PERF_CONTENT_MS.with(|c| c.set(content_t0.elapsed().as_secs_f64() * 1000.0));
+                // Rows still fading in: keep rendering the content.
+                is_animating |= ui::take_stagger_pending();
             }
 
             cairo_backend::cairo_restore(cr);
@@ -1274,8 +1368,12 @@ impl UiState {
                 }
                 if let (Some((img, _, _)), false) = (self.card_cache, self.settings_hidden()) {
                     let out = cairo_backend::cairo_create(cairo_surface);
-                    cairo_backend::cairo_translate(out, pose.tx * ui_scale, pose.ty * ui_scale);
-                    let scaled = (pose.scale - 1.0).abs() > 1e-3;
+                    // Collapse to origin scales the surface itself (viewport), not the pixels.
+                    let collapse = self.collapse();
+                    if !collapse {
+                        cairo_backend::cairo_translate(out, pose.tx * ui_scale, pose.ty * ui_scale);
+                    }
+                    let scaled = !collapse && (pose.scale - 1.0).abs() > 1e-3;
                     if scaled {
                         let (cx, cy) = (bw as f64 / 2.0, bh as f64 / 2.0);
                         cairo_backend::cairo_translate(out, cx, cy);
@@ -1286,18 +1384,17 @@ impl UiState {
                     if scaled {
                         cairo_backend::cairo_pattern_set_filter(cairo_backend::cairo_get_source(out), cairo_backend::CAIRO_FILTER_BILINEAR);
                     }
-                    if pose.alpha >= 0.999 {
+                    if self.alpha_surface.is_some() {
+                        // The compositor fades the surface (finish_pose sets the multiplier).
+                        cairo_backend::cairo_paint(out);
+                    } else if pose.alpha >= 0.999 {
                         cairo_backend::cairo_paint(out);
                     } else {
                         cairo_backend::cairo_paint_with_alpha(out, pose.alpha.max(0.0));
                     }
                     cairo_backend::cairo_destroy(out);
                 }
-                // Fade the scrim with the card; applied after drawing (see draw_frame).
-                self.scrim_pending = Some(if self.settings_hidden() { 0.0 } else { pose.shown.clamp(0.0, 1.0) });
-                if self.closing && pose.done {
-                    self.exit_requested = true;
-                }
+                self.finish_pose(&pose);
             }
             cairo_backend::cairo_surface_destroy(cairo_surface);
 
@@ -1313,6 +1410,7 @@ impl UiState {
 
             surface.damage_buffer(0, 0, bw, bh);
             surface.commit();
+            self.buffer_committed = true;
         }
     }
 }
@@ -1347,6 +1445,7 @@ pub struct Globals {
     single_pixel_mgr: Option<WpSinglePixelBufferManagerV1>,
     viewporter: Option<WpViewporter>,
     idle_inhibit: Option<ZwpIdleInhibitManagerV1>,
+    alpha_modifier: Option<WpAlphaModifierV1>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
@@ -1361,6 +1460,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
                 "wp_single_pixel_buffer_manager_v1" => g.single_pixel_mgr = Some(reg.bind(name, 1, qh, ())),
                 "wp_viewporter" => g.viewporter = Some(reg.bind(name, 1, qh, ())),
                 "zwp_idle_inhibit_manager_v1" => g.idle_inhibit = Some(reg.bind(name, 1, qh, ())),
+                "wp_alpha_modifier_v1" => g.alpha_modifier = Some(reg.bind(name, 1, qh, ())),
                 _ => {}
             }
         }
@@ -1374,7 +1474,7 @@ macro_rules! globals_ignore {
         }
     )*};
 }
-globals_ignore!(wl_compositor::WlCompositor, wl_shm::WlShm, ZwlrLayerShellV1, wl_seat::WlSeat, WpCursorShapeManagerV1, WpSinglePixelBufferManagerV1, WpViewporter, ZwpIdleInhibitManagerV1);
+globals_ignore!(wl_compositor::WlCompositor, wl_shm::WlShm, ZwlrLayerShellV1, wl_seat::WlSeat, WpCursorShapeManagerV1, WpSinglePixelBufferManagerV1, WpViewporter, ZwpIdleInhibitManagerV1, WpAlphaModifierV1);
 
 /// Data that is expensive to load, kept between overlay openings.
 #[derive(Default)]
@@ -1599,6 +1699,16 @@ impl Overlay {
             | UiMode::Settings | UiMode::Power | UiMode::Keybinds => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
+        // Opened from a desktop shortcut: grow out of the button (needs a scalable surface).
+        let open_origin = ui::take_open_origin().filter(|_| g.viewporter.is_some());
+        let transition = match (transition, open_origin) {
+            (Some(t), Some(_)) if t.motion == Motion::Scale => Some(t.with_min_scale(ui::ORIGIN_SCALE)),
+            (t, _) => t,
+        };
+        // Rows of the new card start hidden; the entrance restarts with its first shown frame.
+        if transition.is_some() {
+            ui::begin_entrance(&style);
+        }
 
 
 
@@ -1640,6 +1750,12 @@ impl Overlay {
             scrim_layer: None,
             scrim_viewport: None,
             scrim_buffer: None,
+            alpha_surface: None,
+            alpha_multiplier: u32::MAX,
+            card_viewport: None,
+            origin: open_origin,
+            geom: (0, 0, 0, 0),
+            buffer_committed: false,
             scrim_configured: false,
             card_surface: false,
             surf_rect: (0, 0, 0, 0),
@@ -1746,6 +1862,16 @@ impl Overlay {
                 layer_surface.set_margin(0, 0, state.osd_margin, 0);
             }
         }
+        if state.card_surface {
+            state.alpha_surface = g.alpha_modifier.as_ref().map(|m| m.get_surface(&surface, &qh, ()));
+            if matches!(state.motion, Motion::Scale) {
+                state.card_viewport = g.viewporter.as_ref().map(|v| v.get_viewport(&surface, &qh, ()));
+                // Map at the first, smallest geometry of the grow-in, not at full size.
+                let pose = state.transition.as_ref().map(|t| t.sample()).unwrap_or(Pose::REST);
+                let geo = state.geometry_for(&pose);
+                state.apply_geometry(geo);
+            }
+        }
         surface.commit();
         state.surface = Some(surface);
         state.layer_surface = Some(layer_surface);
@@ -1779,7 +1905,9 @@ impl Overlay {
             state.closing = true;
             state.exit_requested = false;
             let motion = state.motion;
-            state.transition = Some(Transition::exit(motion, &state.style));
+            // An enter that is still running hands over its position and speed.
+            let exit = Transition::exit(motion, &state.style, state.transition.as_ref());
+            state.transition = Some(if state.collapse() { exit.with_min_scale(ui::COLLAPSE_SCALE) } else { exit });
             if let Some(tr) = state.transition.as_mut() {
                 tr.start_clock();
             }
@@ -1879,6 +2007,12 @@ impl Overlay {
         if let Some((img, _, _)) = s.card_cache.take() {
             unsafe { cairo_backend::cairo_surface_destroy(img) };
         }
+        if let Some(a) = s.alpha_surface.take() {
+            a.destroy();
+        }
+        if let Some(v) = s.card_viewport.take() {
+            v.destroy();
+        }
         if let Some(l) = s.layer_surface.take() {
             l.destroy();
         }
@@ -1971,6 +2105,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         single_pixel_mgr: None,
         viewporter: None,
         idle_inhibit: None,
+        alpha_modifier: None,
     };
     let _registry = conn.display().get_registry(&gq.handle(), ());
     if gq.roundtrip(&mut globals).is_err() {

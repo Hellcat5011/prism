@@ -68,24 +68,26 @@ impl CardView for PowerView {
         for (i, (label, path)) in BUTTONS.iter().enumerate() {
             let r = Rect { x: inner.x + i as f64 * (bw + gap), y: inner.y, w: bw, h: inner.h };
             self.buttons.push(r);
-            let on = self.selected == Some(i) || self.hover == Some(i);
-            if on {
-                cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, BUTTON_RADIUS, (fg.0, fg.1, fg.2, 0.85));
-                cb::stroke_rounded_rect(cr, r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, BUTTON_RADIUS, inv, 2.0);
-            } else {
-                cb::stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, BUTTON_RADIUS, outline, 1.0);
-            }
-            let color = if on { inv } else { fg };
-            let font = "Inter, Sans Semi-Bold 22px";
-            let (lw, lh) = cb::measure_pango_text(cr, label, font, 1000, Some(1));
-            let size = if on { ICON * 1.05 } else { ICON };
-            let total = ICON + 16.0 + lh as f64;
-            let top = r.y + ((r.h - total) / 2.0).round();
-            let icon_x = r.x + (r.w - size) / 2.0;
-            let icon_y = top + (ICON - size) / 2.0;
-            // stroke-width 1.8 in the 24-unit viewBox
-            svg::draw_path(cr, path, icon_x, icon_y, size, color, Some(1.8));
-            cb::draw_pango_text(cr, r.x + ((r.w - lw as f64) / 2.0).round(), top + ICON + 16.0, label, font, color, None);
+            crate::ui::staggered(cr, i, r, || {
+                let on = self.selected == Some(i) || self.hover == Some(i);
+                if on {
+                    cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, BUTTON_RADIUS, (fg.0, fg.1, fg.2, 0.85));
+                    cb::stroke_rounded_rect(cr, r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, BUTTON_RADIUS, inv, 2.0);
+                } else {
+                    cb::stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, BUTTON_RADIUS, outline, 1.0);
+                }
+                let color = if on { inv } else { fg };
+                let font = "Inter, Sans Semi-Bold 22px";
+                let (lw, lh) = cb::measure_pango_text(cr, label, font, 1000, Some(1));
+                let size = if on { ICON * 1.05 } else { ICON };
+                let total = ICON + 16.0 + lh as f64;
+                let top = r.y + ((r.h - total) / 2.0).round();
+                let icon_x = r.x + (r.w - size) / 2.0;
+                let icon_y = top + (ICON - size) / 2.0;
+                // stroke-width 1.8 in the 24-unit viewBox
+                svg::draw_path(cr, path, icon_x, icon_y, size, color, Some(1.8));
+                cb::draw_pango_text(cr, r.x + ((r.w - lw as f64) / 2.0).round(), top + ICON + 16.0, label, font, color, None);
+            });
         }
     }
 

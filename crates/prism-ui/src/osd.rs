@@ -1,8 +1,10 @@
 //! Volume / brightness OSD (port of QML Osd.qml).
 //!
-//! A 320x64 card at the bottom centre of the screen. It slides up from below the screen edge
-//! (OutBack, overshoot 2.0, 300 ms), stays 2 s after the last update and slides back down
-//! (InCubic, 200 ms). The surface is exactly the card and the slide moves the layer surface's
+//! A 320x64 card at the bottom centre of the screen. It slides up from below the screen edge on
+//! a spring (slight overshoot), stays 2 s after the last update and slides back down on a
+//! critically damped spring; the level bar follows key presses on a spring too, keeping its
+//! speed when the value changes again. The surface is exactly the card and the slide moves the
+//! layer surface's
 //! bottom margin, so compositor blur (which covers the whole layer surface on Mango) stays
 //! behind the card during the motion too.
 
@@ -11,18 +13,18 @@ use std::time::{Duration, Instant};
 use prism_common::Theme;
 
 use crate::cairo_backend::{self as cb, Cairo};
-use crate::ui::{in_cubic, out_back, Style};
+use crate::ui::{SpringValue, Style};
 
 pub const CARD_W: u32 = 320;
 pub const CARD_H: u32 = 64;
 /// QML: 224 px window anchored to the bottom, card at y 60 when shown, 260 when hidden.
 const SHOWN_MARGIN: f64 = 100.0;
 const HIDDEN_MARGIN: f64 = -100.0;
-const IN_MS: f64 = 300.0;
-const OUT_MS: f64 = 200.0;
+/// Slide springs (response s, damping ratio) and the level bar's.
+const SPRING_IN: (f64, f64) = (0.36, 0.8);
+const SPRING_OUT: (f64, f64) = (0.28, 1.0);
+const SPRING_BAR: (f64, f64) = (0.18, 1.0);
 const HIDE_AFTER: Duration = Duration::from_millis(2000);
-/// Bar width Behavior (Theme.animFast).
-const BAR_MS: f64 = 53.0;
 const RADIUS: f64 = 12.0; // Theme.radiusSmall
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -37,32 +39,26 @@ pub struct OsdView {
     /// Percent (volume is clamped to 100, brightness is shown as reported).
     value: i32,
     phase: Phase,
-    phase_start: Instant,
-    phase_ms: f64,
-    from_margin: f64,
+    /// Bottom margin of the layer surface (the slide).
+    slide: SpringValue,
     hide_at: Instant,
-    bar_from: f64,
-    bar_to: f64,
-    bar_start: Instant,
-    bar_ms: f64,
+    /// Shown level of the bar (percent).
+    bar: SpringValue,
 }
 
 impl OsdView {
     pub fn new(kind: &str, value_pct: f32, style: &Style) -> Self {
         let now = Instant::now();
         let value = clamp_value(kind, value_pct);
+        let mut slide = SpringValue::new(HIDDEN_MARGIN);
+        slide.set(SHOWN_MARGIN, SPRING_IN, style);
         Self {
             kind: kind.to_string(),
             value,
             phase: Phase::In,
-            phase_start: now,
-            phase_ms: style.duration_ms(IN_MS),
-            from_margin: HIDDEN_MARGIN,
+            slide,
             hide_at: now + HIDE_AFTER,
-            bar_from: value as f64,
-            bar_to: value as f64,
-            bar_start: now,
-            bar_ms: 0.0,
+            bar: SpringValue::new(value as f64),
         }
     }
 
@@ -72,18 +68,16 @@ impl OsdView {
         let value = clamp_value(kind, value_pct);
         if kind != self.kind {
             self.kind = kind.to_string();
-            self.bar_from = value as f64;
-            self.bar_ms = 0.0;
-        } else {
-            self.bar_from = self.bar_value(now);
-            self.bar_ms = style.duration_ms(BAR_MS);
+            self.bar.snap(value as f64);
+        } else if value as f64 != self.bar.target() {
+            self.bar.set(value as f64, SPRING_BAR, style);
         }
-        self.bar_to = value as f64;
-        self.bar_start = now;
         self.value = value;
         self.hide_at = now + HIDE_AFTER;
         if self.phase != Phase::In {
-            self.start_phase(Phase::In, style.duration_ms(IN_MS), now);
+            // Reverses from wherever the exit slide is, keeping its speed.
+            self.phase = Phase::In;
+            self.slide.set(SHOWN_MARGIN, SPRING_IN, style);
         }
     }
 
@@ -92,7 +86,8 @@ impl OsdView {
         let now = Instant::now();
         match self.phase {
             Phase::In if now >= self.hide_at => {
-                self.start_phase(Phase::Out, style.duration_ms(OUT_MS), now);
+                self.phase = Phase::Out;
+                self.slide.set(HIDDEN_MARGIN, SPRING_OUT, style);
                 None
             }
             Phase::In => Some(self.hide_at - now),
@@ -100,53 +95,21 @@ impl OsdView {
         }
     }
 
-    fn start_phase(&mut self, phase: Phase, ms: f64, now: Instant) {
-        self.from_margin = self.margin_at(now);
-        self.phase = phase;
-        self.phase_start = now;
-        self.phase_ms = ms;
-    }
-
-    fn progress(&self, now: Instant) -> f64 {
-        if self.phase_ms <= 0.0 {
-            return 1.0;
-        }
-        (now.duration_since(self.phase_start).as_secs_f64() * 1000.0 / self.phase_ms).clamp(0.0, 1.0)
-    }
-
-    fn margin_at(&self, now: Instant) -> f64 {
-        let t = self.progress(now);
-        match self.phase {
-            Phase::In => self.from_margin + (SHOWN_MARGIN - self.from_margin) * out_back(t, 2.0),
-            Phase::Out => self.from_margin + (HIDDEN_MARGIN - self.from_margin) * in_cubic(t),
-            Phase::Done => HIDDEN_MARGIN,
-        }
-    }
-
     /// Bottom margin of the layer surface for this frame.
     pub fn margin(&self) -> i32 {
-        self.margin_at(Instant::now()).round() as i32
-    }
-
-    fn bar_value(&self, now: Instant) -> f64 {
-        if self.bar_ms <= 0.0 {
-            return self.bar_to;
-        }
-        let t = (now.duration_since(self.bar_start).as_secs_f64() * 1000.0 / self.bar_ms).clamp(0.0, 1.0);
-        self.bar_from + (self.bar_to - self.bar_from) * t
+        self.slide.value().round() as i32
     }
 
     /// Another frame is wanted (slide or bar animation running).
     pub fn animating(&self) -> bool {
-        let now = Instant::now();
-        let sliding = self.phase != Phase::Done && self.progress(now) < 1.0;
-        let bar = self.bar_ms > 0.0 && now.duration_since(self.bar_start).as_secs_f64() * 1000.0 < self.bar_ms;
-        sliding || bar
+        let sliding = self.phase != Phase::Done && !self.slide.settled(0.5);
+        sliding || !self.bar.settled(0.05)
     }
 
     /// The exit slide has finished; the overlay can be torn down.
     pub fn finished(&mut self) -> bool {
-        if self.phase == Phase::Out && self.progress(Instant::now()) >= 1.0 {
+        // Done once the card is fully below the screen edge (bottom margin past its height).
+        if self.phase == Phase::Out && (self.slide.value() <= -(CARD_H as f64) || self.slide.settled(0.5)) {
             self.phase = Phase::Done;
         }
         self.phase == Phase::Done
@@ -175,7 +138,7 @@ impl OsdView {
         let bar_w = (label_right - label_w - 16.0 - bar_x).max(1.0);
         let bar_y = (h - 8.0) / 2.0;
         cb::fill_rounded_rect(cr, bar_x, bar_y, bar_w, 8.0, 4.0, cb::hex_to_rgba(&theme.surface, 1.0));
-        let frac = (self.bar_value(Instant::now()) / 100.0).clamp(0.0, 1.0);
+        let frac = (self.bar.value() / 100.0).clamp(0.0, 1.0);
         if frac > 0.0 {
             let fill_w = (bar_w * frac).max(8.0);
             cb::fill_rounded_rect(cr, bar_x, bar_y, fill_w, 8.0, 4.0, primary);

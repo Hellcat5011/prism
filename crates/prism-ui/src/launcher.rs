@@ -309,26 +309,28 @@ impl LauncherView {
             }
             let row = Rect { x, y: ry, w, h: ROW_H };
             self.rows.push((i, row));
-            let app = &self.results[i];
-            let on = i == self.selected || hovered == Some(i);
-            if on {
-                cb::fill_rounded_rect(cr, row.x + 2.0, row.y + 2.0, row.w - 4.0, row.h - 4.0, RADIUS, (fg.0, fg.1, fg.2, 0.85));
-            }
-            draw_icon(cr, app.icon.as_deref().unwrap_or(""), "application-x-executable", row.x + 12.0, row.y + 11.0, 32.0);
-            let tx = row.x + 12.0 + 32.0 + 12.0;
-            let right = row.x + row.w - 12.0;
-            let sub = app.generic_name.clone().unwrap_or_default();
-            let sub_font = "Inter, Sans 12px";
-            let sub_w = if sub.is_empty() { 0.0 } else { (cb::measure_pango_text(cr, &sub, sub_font, 4000, Some(1)).0 as f64).min((right - tx) * 0.45) };
-            let title_w = right - tx - if sub_w > 0.0 { sub_w + 12.0 } else { 0.0 };
-            let title_font = "Inter, Sans 15px";
-            let (_, th) = cb::measure_pango_text(cr, "Ag", title_font, 4000, Some(1));
-            cb::draw_pango_text(cr, tx, row.y + ((ROW_H - th as f64) / 2.0).round(), &app.name, title_font, if on { inv } else { fg }, Some(title_w as i32));
-            if sub_w > 0.0 {
-                let (_, sh) = cb::measure_pango_text(cr, "Ag", sub_font, 4000, Some(1));
-                let c = if on { (inv.0, inv.1, inv.2, 0.7) } else { sv_text };
-                cb::draw_pango_text(cr, right - sub_w, row.y + ((ROW_H - sh as f64) / 2.0).round(), &sub, sub_font, c, Some(sub_w.ceil() as i32));
-            }
+            crate::ui::staggered(cr, i - first, row, || {
+                let app = &self.results[i];
+                let on = i == self.selected || hovered == Some(i);
+                if on {
+                    cb::fill_rounded_rect(cr, row.x + 2.0, row.y + 2.0, row.w - 4.0, row.h - 4.0, RADIUS, (fg.0, fg.1, fg.2, 0.85));
+                }
+                draw_icon(cr, app.icon.as_deref().unwrap_or(""), "application-x-executable", row.x + 12.0, row.y + 11.0, 32.0);
+                let tx = row.x + 12.0 + 32.0 + 12.0;
+                let right = row.x + row.w - 12.0;
+                let sub = app.generic_name.clone().unwrap_or_default();
+                let sub_font = "Inter, Sans 12px";
+                let sub_w = if sub.is_empty() { 0.0 } else { (cb::measure_pango_text(cr, &sub, sub_font, 4000, Some(1)).0 as f64).min((right - tx) * 0.45) };
+                let title_w = right - tx - if sub_w > 0.0 { sub_w + 12.0 } else { 0.0 };
+                let title_font = "Inter, Sans 15px";
+                let (_, th) = cb::measure_pango_text(cr, "Ag", title_font, 4000, Some(1));
+                cb::draw_pango_text(cr, tx, row.y + ((ROW_H - th as f64) / 2.0).round(), &app.name, title_font, if on { inv } else { fg }, Some(title_w as i32));
+                if sub_w > 0.0 {
+                    let (_, sh) = cb::measure_pango_text(cr, "Ag", sub_font, 4000, Some(1));
+                    let c = if on { (inv.0, inv.1, inv.2, 0.7) } else { sv_text };
+                    cb::draw_pango_text(cr, right - sub_w, row.y + ((ROW_H - sh as f64) / 2.0).round(), &sub, sub_font, c, Some(sub_w.ceil() as i32));
+                }
+            });
         }
         unsafe { cb::cairo_restore(cr) };
     }

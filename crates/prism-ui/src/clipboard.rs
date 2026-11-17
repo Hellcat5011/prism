@@ -173,6 +173,7 @@ impl CardView for ClipboardView {
             cb::cairo_clip(cr);
         }
         let mut ry = self.list.y - self.scroll;
+        let mut vis = 0usize;
         for (ri, &k) in self.results.iter().enumerate() {
             let h = self.heights[ri];
             if ry > self.list.y + self.list.h {
@@ -182,19 +183,22 @@ impl CardView for ClipboardView {
                 let row = Rect { x, y: ry, w, h };
                 self.rows.push((ri, row));
                 let on = ri == self.selected;
-                if on {
-                    cb::fill_rounded_rect(cr, row.x, row.y, row.w, row.h, 12.0, (fg.0, fg.1, fg.2, 0.85));
-                }
                 let it = &self.all[k];
-                if it.is_image {
-                    let path = it.image_path.as_deref().unwrap_or("").trim_start_matches("file://");
-                    if let Some(img) = cb::cached_image(path, (w - 24.0) as i32, IMAGE_H as i32, true) {
-                        let (iw, ih) = cb::image_size(img);
-                        cb::paint_cached(cr, img, row.x + 12.0 + ((w - 24.0 - iw) / 2.0).round(), row.y + 12.0 + ((IMAGE_H - ih) / 2.0).round());
+                crate::ui::staggered(cr, vis, row, || {
+                    if on {
+                        cb::fill_rounded_rect(cr, row.x, row.y, row.w, row.h, 12.0, (fg.0, fg.1, fg.2, 0.85));
                     }
-                } else {
-                    cb::draw_pango_text_wrapped(cr, row.x + 12.0, row.y + 12.0, &it.content, TEXT_FONT, if on { inv } else { fg }, (w - 24.0) as i32, Some(10));
-                }
+                    if it.is_image {
+                        let path = it.image_path.as_deref().unwrap_or("").trim_start_matches("file://");
+                        if let Some(img) = cb::cached_image(path, (w - 24.0) as i32, IMAGE_H as i32, true) {
+                            let (iw, ih) = cb::image_size(img);
+                            cb::paint_cached(cr, img, row.x + 12.0 + ((w - 24.0 - iw) / 2.0).round(), row.y + 12.0 + ((IMAGE_H - ih) / 2.0).round());
+                        }
+                    } else {
+                        cb::draw_pango_text_wrapped(cr, row.x + 12.0, row.y + 12.0, &it.content, TEXT_FONT, if on { inv } else { fg }, (w - 24.0) as i32, Some(10));
+                    }
+                });
+                vis += 1;
             }
             ry += h + GAP;
         }
