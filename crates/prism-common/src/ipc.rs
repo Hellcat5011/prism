@@ -74,6 +74,10 @@ pub enum UiCommand {
     Caffeinate(bool),
     /// Screen colour picker: "toggle", "open" or "close".
     ColorPicker(String),
+    /// Screen capture overlay and instant screenshots (prism-ui).
+    Capture(CaptureAction),
+    /// Recording state for the indicator: Some while prism-rec runs, None when it stopped.
+    Recording(Option<crate::capture::RecordStatus>),
 }
 
 /// Messages sent to the running notification popup overlay.
@@ -182,6 +186,29 @@ pub enum IpcCommand {
     /// The Phone card: "toggle", "open" or "close".
     #[serde(rename = "phone_card")]
     PhoneCard(String),
+
+    /// Screenshots and screen recording (SCREEN_CAPTURE_PLAN.md).
+    #[serde(rename = "screenshot")]
+    Capture(CaptureAction),
+}
+
+/// `prism-ctl screenshot ...`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureAction {
+    /// Overlay in the last used mode (closes it when open).
+    Toggle,
+    Close,
+    /// Overlay starting in "region", "window" or "screen".
+    Open(String),
+    /// Whole output at once, no overlay.
+    Screen { save: bool, clipboard: bool },
+    /// Overlay in recording mode, or stop the running recording.
+    Record,
+    Stop,
+    Status,
+    /// Start recording (sent by prism-ui's overlay to prismd).
+    Start(crate::capture::RecordJob),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

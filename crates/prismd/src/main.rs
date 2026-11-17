@@ -15,6 +15,7 @@ mod depth;
 mod gamma;
 mod idle;
 mod notifd;
+mod recording;
 mod wake;
 
 use bluelight::BlueLight;
@@ -512,6 +513,26 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 Ok(prism_common::phone::PhoneReply::State { state }) => IpcResponse::Ok(serde_json::to_string(&state).ok()),
                 Err(e) => IpcResponse::Error(e),
             },
+            Ok(IpcCommand::Capture(action)) => {
+                use prism_common::ipc::CaptureAction as A;
+                match action {
+                    A::Start(job) => match recording::start(job) {
+                        Ok(path) => IpcResponse::Ok(Some(path)),
+                        Err(e) => IpcResponse::Error(e),
+                    },
+                    A::Stop => match recording::stop() {
+                        true => IpcResponse::Ok(Some("stopping".into())),
+                        false => IpcResponse::Error("not recording".into()),
+                    },
+                    A::Status => IpcResponse::Ok(serde_json::to_string(&recording::status()).ok()),
+                    // Record toggles: stop a running recording, else open the overlay in record mode.
+                    A::Record if recording::stop() => IpcResponse::Ok(Some("stopping".into())),
+                    a => match send_ui(&prism_common::UiCommand::Capture(a)) {
+                        Ok(_) => IpcResponse::Ok(None),
+                        Err(e) => IpcResponse::Error(e),
+                    },
+                }
+            }
             Ok(IpcCommand::PhoneCard(action)) => {
                 let cmd = match action.as_str() {
                     "open" => prism_common::UiCommand::Open("phone".into()),

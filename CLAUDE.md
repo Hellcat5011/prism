@@ -15,7 +15,7 @@ cargo test --release -p prism-ui settings   # one crate / tests matching a name
 cargo clippy --release --workspace
 
 # Install for live testing (the user runs these binaries from ~/.local/bin)
-install -m755 target/release/{prismd,prism-ui,prism-ctl,prism-lock,prism-phoned} ~/.local/bin/
+install -m755 target/release/{prismd,prism-ui,prism-ctl,prism-lock,prism-phoned,prism-rec} ~/.local/bin/
 systemctl --user restart prismd             # restarts prismd and the prism-ui daemon
 journalctl --user -u prismd -f              # logs of prismd and prism-ui
 ```
@@ -56,6 +56,18 @@ Workspace crates (`crates/`):
   notifications, pair requests and received files are posted over org.freedesktop.Notifications. Local
   `kdeconnectd` works as an interop peer for testing (desktop to desktop), but never leave it running next to
   prism-phoned (both want UDP 1716). `PRISM_PHONE_DEBUG=1` logs every packet.
+
+* `prism-capture`: screen capture core (SCREEN_CAPTURE_PLAN.md) shared by prism-ui and prism-rec: outputs
+  (xdg-output geometry) and windows (`ext_foreign_toplevel_list_v1`), one-shot and streaming capture with
+  `ext_image_copy_capture_v1` (screencopy fallback for outputs), pixels as cairo ARGB32 at buffer size.
+  prism-ui's `capture.rs` is the overlay (freeze, region/window/screen, Screenshot/Record), PNG via cairo,
+  clipboard via `clip_owner.rs` (ext-data-control, no wl-copy); `rec_indicator.rs` is the recording pill (a
+  compact dot when it would be in the picture). The colour picker uses it too (no grim).
+
+* `prism-rec`: recorder, started by prismd (`recording.rs`) only while recording, with a JSON `RecordJob`;
+  SIGINT stops it. System FFmpeg via ffmpeg-next (NVENC, else x264), MKV or fragmented MP4 written as it goes,
+  variable frame rate with presentation timestamps; optional PipeWire audio (desktop monitor and/or mic, mixed
+  on the recording clock, Opus/AAC).
 
 * `prism-lock`: lockscreen (ext-session-lock) and greetd greeter (`--greeter`, run under `cage -s --`), QML
   Lockscreen.qml look. PAM runs on a worker thread with one service (`/etc/pam.d/prism`, else `login`); lock

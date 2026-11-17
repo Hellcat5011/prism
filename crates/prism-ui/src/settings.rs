@@ -26,7 +26,7 @@ use crate::ui::Style;
 use crate::uikit::{self, ButtonKind, Dropdown, Palette};
 use crate::waker::Waker;
 
-pub const TABS: [&str; 9] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search", "Notifications", "Phone"];
+pub const TABS: [&str; 10] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search", "Notifications", "Phone", "Capture"];
 /// Undo steps kept per Settings session.
 const UNDO_LIMIT: usize = 100;
 
@@ -399,6 +399,29 @@ fn rows() -> Vec<Row> {
             control: Text { get: |c| c.phone_download_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.phone_download_dir = v.to_string(); true }, placeholder: "~/Downloads", browse: true } },
         Row { tab: 8, title: "Open Received Files", subtitle: "Open each file with its default app when it arrives.", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_open_received, |c, v| c.phone_open_received = v) },
+        // ── Capture ──
+        heading(9, "Screenshots"),
+        Row { tab: 9, title: "Screenshot Folder", subtitle: "Where screenshots are saved (~ is expanded).", visible: always,
+            control: Text { get: |c| c.capture_screenshot_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.capture_screenshot_dir = v.to_string(); true }, placeholder: "~/Pictures/Screenshots", browse: true } },
+        Row { tab: 9, title: "Copy to Clipboard", subtitle: "Put every screenshot on the clipboard as an image.", visible: always,
+            control: Switch(|c| c.capture_copy_to_clipboard, |c, v| c.capture_copy_to_clipboard = v) },
+        Row { tab: 9, title: "Show the Pointer", subtitle: "Include the mouse pointer in screenshots and recordings.", visible: always,
+            control: Switch(|c| c.capture_cursor, |c, v| c.capture_cursor = v) },
+        heading(9, "Recording"),
+        Row { tab: 9, title: "Recording Folder", subtitle: "Where recordings are saved (~ is expanded).", visible: always,
+            control: Text { get: |c| c.capture_recording_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.capture_recording_dir = v.to_string(); true }, placeholder: "~/Videos/Recordings", browse: true } },
+        Row { tab: 9, title: "File Format", subtitle: "MKV and MP4 are both written as they record, so a crash still leaves a playable file.", visible: always,
+            control: Combo { options: || opts(&[("MKV", "mkv"), ("MP4", "mp4")]), get: |c| c.capture_container.clone(), set: |c, v| c.capture_container = v.to_string(), fonts: false } },
+        Row { tab: 9, title: "Video Codec", subtitle: "Auto uses H.264 on the GPU (NVENC) when available, else x264.", visible: always,
+            control: Combo { options: || opts(&[("Auto (H.264)", "auto"), ("HEVC", "hevc"), ("AV1", "av1")]), get: |c| c.capture_codec.clone(), set: |c, v| c.capture_codec = v.to_string(), fonts: false } },
+        Row { tab: 9, title: "Quality", subtitle: "Higher quality means larger files.", visible: always,
+            control: Combo { options: || opts(&[("Low", "low"), ("Medium", "medium"), ("High", "high"), ("Near lossless", "lossless")]), get: |c| c.capture_quality.clone(), set: |c, v| c.capture_quality = v.to_string(), fonts: false } },
+        Row { tab: 9, title: "Frame Rate", subtitle: "Most frames per second; still screens use none.", visible: always,
+            control: Combo { options: || opts(&[("30 fps", "30"), ("60 fps", "60")]), get: |c| c.capture_fps.to_string(), set: |c, v| c.capture_fps = v.parse().unwrap_or(60), fonts: false } },
+        Row { tab: 9, title: "Desktop Audio", subtitle: "Record what the speakers play. Also switchable in the capture overlay.", visible: always,
+            control: Switch(|c| c.capture_audio_desktop, |c, v| c.capture_audio_desktop = v) },
+        Row { tab: 9, title: "Microphone", subtitle: "Record the default microphone. Also switchable in the capture overlay.", visible: always,
+            control: Switch(|c| c.capture_audio_mic, |c, v| c.capture_audio_mic = v) },
     ]
 }
 

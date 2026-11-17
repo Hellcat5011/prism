@@ -5,6 +5,8 @@ use std::path::Path;
 use std::process::{exit, Command};
 
 mod caffeinate;
+mod capture;
+mod clip_owner;
 mod cairo_backend;
 mod desktop;
 mod icons;
@@ -17,6 +19,7 @@ mod osd;
 mod phone;
 mod phone_client;
 mod picker;
+mod rec_indicator;
 mod power;
 mod portal;
 mod settings;
@@ -2178,6 +2181,10 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut toasts = toasts::Toasts::new(&conn, &globals);
     let mut caffeinate = caffeinate::Caffeinate::new(&conn);
     let mut picker: Option<picker::Picker> = None;
+    let mut shooter: Option<capture::Overlay> = None;
+    let mut indicator: Option<rec_indicator::Indicator> = None;
+    // Clipboard owner for screenshots (ext-data-control), made on first use.
+    let mut clip: Option<clip_owner::ClipOwner> = None;
     if daemon {
         let mut p = Preloader::new(waker.clone());
         p.start();
@@ -2209,6 +2216,58 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 }
                 continue;
             }
+            if let prism_common::UiCommand::Recording(status) = &cmd {
+                if let Some(i) = indicator.take() {
+                    i.teardown();
+                }
+                if let Some(st) = status.clone() {
+                    indicator = rec_indicator::Indicator::open(&conn, &globals, st);
+                }
+                continue;
+            }
+            if let prism_common::UiCommand::Capture(action) = &cmd {
+                use prism_common::ipc::CaptureAction as A;
+                let cfg = Config::load();
+                let open = shooter.as_ref().is_some_and(|s| !s.finished());
+                let kind = match action {
+                    A::Toggle if open => {
+                        shooter.as_mut().unwrap().close();
+                        None
+                    }
+                    A::Close => {
+                        if let Some(s) = shooter.as_mut() {
+                            s.close();
+                        }
+                        None
+                    }
+                    A::Toggle => Some((capture::Kind::parse(&cfg.capture_last_mode), false)),
+                    A::Open(k) => Some((capture::Kind::parse(k), false)),
+                    A::Record => Some((capture::Kind::parse(&cfg.capture_last_mode), true)),
+                    A::Screen { save, clipboard } => {
+                        let mut cfg = cfg.clone();
+                        cfg.capture_copy_to_clipboard &= *clipboard;
+                        if clip.is_none() && cfg.capture_copy_to_clipboard {
+                            clip = globals.seat.as_ref().and_then(|s| clip_owner::ClipOwner::new(&conn, s));
+                        }
+                        let r = capture::capture_screen_now(&conn, None, cfg.capture_cursor).and_then(|img| capture::finish(img, &cfg, *save, clip.as_mut()));
+                        if let Err(e) = r {
+                            eprintln!("[prism-ui] screenshot: {e}");
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let (Some((k, record)), false) = (kind, open) {
+                    for o in overlays.iter_mut().filter(|o| o.is_modal()) {
+                        o.close();
+                    }
+                    match capture::Overlay::open(&conn, &globals, k, record, &cfg) {
+                        Ok(o) => shooter = Some(o),
+                        Err(e) => eprintln!("[prism-ui] screenshot: {e}"),
+                    }
+                }
+                continue;
+            }
             handle_command(cmd, &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
         }
 
@@ -2232,6 +2291,49 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             let t = d.tick();
             if t >= 0 && (timeout < 0 || t < timeout) {
                 timeout = t;
+            }
+        }
+        if let Some(s) = shooter.as_mut() {
+            s.tick();
+        }
+        if let Some(i) = indicator.as_mut() {
+            let t = i.tick();
+            if timeout < 0 || t < timeout {
+                timeout = t;
+            }
+        }
+        if shooter.as_ref().is_some_and(|s| s.finished()) {
+            let s = shooter.take().unwrap();
+            let kind = s.kind();
+            let outcome = s.teardown();
+            let _ = conn.flush();
+            let mut cfg = Config::load();
+            if let capture::Outcome::Record(job) = &outcome {
+                // Remember the recording options, then hand the job to prismd.
+                if cfg.capture_fps != job.fps || cfg.capture_audio_desktop != job.audio_desktop || cfg.capture_audio_mic != job.audio_mic {
+                    cfg.capture_fps = job.fps;
+                    cfg.capture_audio_desktop = job.audio_desktop;
+                    cfg.capture_audio_mic = job.audio_mic;
+                    let _ = cfg.save();
+                }
+                let job = job.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = prism_common::ipc::request(&prism_common::IpcCommand::Capture(prism_common::ipc::CaptureAction::Start(job))) {
+                        eprintln!("[prism-ui] recording: {e}");
+                    }
+                });
+            }
+            if let capture::Outcome::Image(img) = outcome {
+                if clip.is_none() && cfg.capture_copy_to_clipboard {
+                    clip = globals.seat.as_ref().and_then(|s| clip_owner::ClipOwner::new(&conn, s));
+                }
+                if let Err(e) = capture::finish(img, &cfg, true, clip.as_mut()) {
+                    eprintln!("[prism-ui] screenshot: {e}");
+                }
+            }
+            if cfg.capture_last_mode != kind.name() {
+                cfg.capture_last_mode = kind.name().to_string();
+                let _ = cfg.save();
             }
         }
         if let Some(p) = picker.as_mut() {
@@ -2274,6 +2376,15 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         ok &= caffeinate.dispatch();
         if let Some(p) = picker.as_mut() {
             ok &= p.dispatch();
+        }
+        if let Some(s) = shooter.as_mut() {
+            ok &= s.dispatch();
+        }
+        if let Some(i) = indicator.as_mut() {
+            ok &= i.dispatch();
+        }
+        if let Some(c) = clip.as_mut() {
+            ok &= c.dispatch();
         }
         if !ok {
             eprintln!("[prism-ui] Wayland connection error (protocol error: {:?})", conn.protocol_error());
@@ -2325,6 +2436,15 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         caffeinate.dispatch();
         if let Some(p) = picker.as_mut() {
             p.dispatch();
+        }
+        if let Some(s) = shooter.as_mut() {
+            s.dispatch();
+        }
+        if let Some(i) = indicator.as_mut() {
+            i.dispatch();
+        }
+        if let Some(c) = clip.as_mut() {
+            c.dispatch();
         }
     }
     for o in overlays.drain(..) {
@@ -2399,7 +2519,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::ColorPicker(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

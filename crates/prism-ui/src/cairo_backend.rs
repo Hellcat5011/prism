@@ -26,6 +26,8 @@ pub const CAIRO_FORMAT_ARGB32: i32 = 0;
 #[link(name = "gobject-2.0")]
 #[link(name = "gdk_pixbuf-2.0")]
 extern "C" {
+    pub fn cairo_set_fill_rule(cr: *mut Cairo, rule: i32);
+    pub fn cairo_surface_write_to_png(surface: *mut CairoSurface, filename: *const std::ffi::c_char) -> i32;
     pub fn cairo_image_surface_create_for_data(
         data: *mut u8,
         format: i32,

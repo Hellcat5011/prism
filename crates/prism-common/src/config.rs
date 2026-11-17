@@ -178,6 +178,69 @@ pub struct Config {
     /// Tray icon (StatusNotifierItem) that opens the Phone card.
     #[serde(default)]
     pub phone_tray: bool,
+
+    // ── Screen capture (prism-ui screenshots, prism-rec recordings) ──
+    #[serde(default = "default_screenshot_dir")]
+    pub capture_screenshot_dir: String,
+    #[serde(default = "default_true")]
+    pub capture_copy_to_clipboard: bool,
+    /// Include the mouse pointer in screenshots and recordings.
+    #[serde(default)]
+    pub capture_cursor: bool,
+    #[serde(default = "default_recording_dir")]
+    pub capture_recording_dir: String,
+    /// "mkv" or "mp4" (fragmented, crash-safe).
+    #[serde(default = "default_container")]
+    pub capture_container: String,
+    /// "auto", "h264", "hevc" or "av1".
+    #[serde(default = "default_codec")]
+    pub capture_codec: String,
+    /// "low", "medium", "high" or "lossless".
+    #[serde(default = "default_quality")]
+    pub capture_quality: String,
+    #[serde(default = "default_capture_fps")]
+    pub capture_fps: u32,
+    /// Record desktop audio (default sink monitor).
+    #[serde(default)]
+    pub capture_audio_desktop: bool,
+    /// Record the microphone (default source).
+    #[serde(default)]
+    pub capture_audio_mic: bool,
+    /// Last selection kind in the capture overlay: "region", "window" or "screen".
+    #[serde(default = "default_capture_mode")]
+    pub capture_last_mode: String,
+}
+
+fn default_screenshot_dir() -> String {
+    "~/Pictures/Screenshots".to_string()
+}
+fn default_recording_dir() -> String {
+    "~/Videos/Recordings".to_string()
+}
+fn default_container() -> String {
+    "mkv".to_string()
+}
+fn default_codec() -> String {
+    "auto".to_string()
+}
+fn default_quality() -> String {
+    "medium".to_string()
+}
+fn default_capture_fps() -> u32 {
+    60
+}
+fn default_capture_mode() -> String {
+    "region".to_string()
+}
+
+/// `~/x` to `$HOME/x`.
+pub fn expand_home(p: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match p.strip_prefix("~/") {
+        Some(rest) => std::path::PathBuf::from(home).join(rest),
+        None if p == "~" => std::path::PathBuf::from(home),
+        None => std::path::PathBuf::from(p),
+    }
 }
 
 fn default_phone_download_dir() -> String {
@@ -501,6 +564,17 @@ impl Default for Config {
             phone_download_dir: default_phone_download_dir(),
             phone_open_received: false,
             phone_tray: false,
+            capture_screenshot_dir: default_screenshot_dir(),
+            capture_copy_to_clipboard: true,
+            capture_cursor: false,
+            capture_recording_dir: default_recording_dir(),
+            capture_container: default_container(),
+            capture_codec: default_codec(),
+            capture_quality: default_quality(),
+            capture_fps: default_capture_fps(),
+            capture_audio_desktop: false,
+            capture_audio_mic: false,
+            capture_last_mode: default_capture_mode(),
         }
     }
 }

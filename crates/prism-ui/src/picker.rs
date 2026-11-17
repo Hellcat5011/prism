@@ -1,15 +1,14 @@
 //! Screen colour picker (port of QML ColorPicker.qml).
 //!
 //! The overlay first maps transparent and hides the pointer; once a frame without the cursor
-//! has been presented, the screen is frozen with `grim` (so the cursor is not in the capture;
-//! kept in memory, never written to disk) and shown on a
+//! has been presented, the screen is frozen with `prism_capture` (cursor excluded; kept in
+//! memory, never written to disk) and shown on a
 //! full-screen overlay. A 180 px lens magnifies the pixels around the cursor 11x
 //! (nearest-neighbour) with a crosshair on the sampled pixel, a ring tinted with its colour and
 //! a hex label. Arrow keys nudge by one pixel. Click / Enter / Space copies the hex with
 //! wl-copy (so it lands in clipboard history) and posts a notification; right-click, Escape
 //! or Q cancels.
 
-use std::io::Read;
 use std::process::{Command, Stdio};
 
 use wayland_client::protocol::{wl_buffer, wl_callback, wl_keyboard, wl_pointer, wl_shm_pool, wl_surface};
@@ -43,58 +42,22 @@ impl Drop for Shot {
 }
 
 impl Shot {
-    /// `grim -t ppm -`: binary P6 PPM on stdout.
-    fn capture() -> Option<Shot> {
-        let mut child = Command::new("grim").args(["-t", "ppm", "-"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-        let mut data = Vec::new();
-        child.stdout.take()?.read_to_end(&mut data).ok()?;
-        child.wait().ok()?;
-        Self::from_ppm(&data)
-    }
-
-    fn from_ppm(data: &[u8]) -> Option<Shot> {
-        // Header: "P6" whitespace width whitespace height whitespace maxval single-whitespace.
-        let mut fields = Vec::new();
-        let mut i = 0;
-        while fields.len() < 4 && i < data.len() {
-            while i < data.len() && data[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if data.get(i) == Some(&b'#') {
-                while i < data.len() && data[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            let start = i;
-            while i < data.len() && !data[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            fields.push(std::str::from_utf8(&data[start..i]).ok()?.to_string());
-        }
-        i += 1; // the single whitespace after maxval
-        if fields.len() < 4 || fields[0] != "P6" || fields[3] != "255" {
-            return None;
-        }
-        let (w, h): (i32, i32) = (fields[1].parse().ok()?, fields[2].parse().ok()?);
-        let pixels = data.get(i..i + (w * h * 3) as usize)?;
+    /// The first output, at its native resolution, without the cursor.
+    fn capture(conn: &Connection) -> Option<Shot> {
+        let mut cap = prism_capture::Capturer::new(conn).ok()?;
+        let out = cap.outputs().into_iter().next()?;
+        let img = cap.capture_output(&out, false).ok()?;
         unsafe {
-            let img = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h);
-            let stride = cb::cairo_image_surface_get_stride(img) as usize;
-            let dst = std::slice::from_raw_parts_mut(cb::cairo_image_surface_get_data(img), stride * h as usize);
+            let (w, h) = (img.width as i32, img.height as i32);
+            let surf = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h);
+            let stride = cb::cairo_image_surface_get_stride(surf) as usize;
+            let dst = std::slice::from_raw_parts_mut(cb::cairo_image_surface_get_data(surf), stride * h as usize);
             for y in 0..h as usize {
-                for x in 0..w as usize {
-                    let s = (y * w as usize + x) * 3;
-                    let d = y * stride + x * 4;
-                    // ARGB32 is native-endian: B, G, R, A in memory on little-endian.
-                    dst[d] = pixels[s + 2];
-                    dst[d + 1] = pixels[s + 1];
-                    dst[d + 2] = pixels[s];
-                    dst[d + 3] = 255;
-                }
+                let row = &img.data[y * img.stride as usize..y * img.stride as usize + w as usize * 4];
+                dst[y * stride..y * stride + w as usize * 4].copy_from_slice(row);
             }
-            cb::cairo_surface_mark_dirty(img);
-            Some(Shot { img, w, h })
+            cb::cairo_surface_mark_dirty(surf);
+            Some(Shot { img: surf, w, h })
         }
     }
 
@@ -111,6 +74,7 @@ impl Shot {
 pub struct Picker {
     queue: EventQueue<State>,
     st: State,
+    conn: Connection,
 }
 
 /// Capture progress: the cursor has to be off screen before grim runs.
@@ -167,6 +131,7 @@ impl Picker {
         let pointer = seat.get_pointer(&qh, ());
         let cursor_dev = g.cursor_shape_manager.as_ref().map(|m| m.get_pointer(&pointer, &qh, ()));
         Some(Picker {
+            conn: conn.clone(),
             queue,
             st: State {
                 shot: None,
@@ -195,7 +160,7 @@ impl Picker {
     pub fn dispatch(&mut self) -> bool {
         let ok = self.queue.dispatch_pending(&mut self.st).is_ok();
         if self.st.phase == Phase::Capture && !self.st.done {
-            self.st.capture(&self.queue.handle());
+            self.st.capture(&self.conn, &self.queue.handle());
         }
         ok
     }
@@ -250,10 +215,10 @@ impl State {
     }
 
     /// Freeze the screen (the cursor is hidden by now) and show the picker.
-    fn capture(&mut self, qh: &QueueHandle<Self>) {
+    fn capture(&mut self, conn: &Connection, qh: &QueueHandle<Self>) {
         self.phase = Phase::Ready;
-        let Some(shot) = Shot::capture() else {
-            eprintln!("[prism-ui] colour picker: screen capture with grim failed");
+        let Some(shot) = Shot::capture(conn) else {
+            eprintln!("[prism-ui] colour picker: screen capture failed");
             self.done = true;
             return;
         };
@@ -521,19 +486,3 @@ macro_rules! ignore_events {
     )*};
 }
 ignore_events!(wl_surface::WlSurface, wl_shm_pool::WlShmPool, WpCursorShapeDeviceV1);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_ppm() {
-        let mut ppm = b"P6\n# c\n2 1\n255\n".to_vec();
-        ppm.extend_from_slice(&[255, 0, 0, 0, 128, 255]);
-        let s = Shot::from_ppm(&ppm).unwrap();
-        assert_eq!((s.w, s.h), (2, 1));
-        assert_eq!(s.pixel(0, 0), (255, 0, 0));
-        assert_eq!(s.pixel(1, 0), (0, 128, 255));
-        assert_eq!(s.pixel(9, 9), (0, 128, 255)); // clamped
-    }
-}

@@ -2,9 +2,11 @@
 resolver = "2"
 members = [
     "crates/prism-common",
+    "crates/prism-capture",
     "crates/prism-ctl",
     "crates/prism-lock",
     "crates/prism-phone",
+    "crates/prism-rec",
     "crates/prismd",
     "crates/prism-ui",
 ]

@@ -32,6 +32,7 @@ Targets & Commands:
   bluetooth [status|toggle]
   keybinds [list|toggle|open|close]
   lock [lock|unlock|status]
+  screenshot [toggle|region|window|screen [--no-save] [--no-clipboard]|open <mode>|close|record|stop|status]
   phone [toggle|open|close|status|refresh|connect <ip>|pair|unpair|accept|reject [device]
          |ping|ring|clipboard [text]|media [play|pause|next|previous]
          |send <file>...|send --text <text>|send --url <url>]
@@ -426,6 +427,23 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
         }
 
         "phone" => parse_phone(&args[1..]),
+        "screenshot" | "capture" => {
+            use prism_common::ipc::CaptureAction as A;
+            let flag = |f: &str| args.iter().any(|a| a == f);
+            let act = match action_str {
+                None | Some("toggle") => A::Toggle,
+                Some("open") => A::Open(args.get(2).cloned().unwrap_or_else(|| "region".into())),
+                Some("close") => A::Close,
+                Some("region") => A::Open("region".into()),
+                Some("window") => A::Open("window".into()),
+                Some("screen") | Some("output") => A::Screen { save: !flag("--no-save"), clipboard: !flag("--no-clipboard") },
+                Some("record") => A::Record,
+                Some("stop") => A::Stop,
+                Some("status") => A::Status,
+                Some(other) => return Err(format!("unknown screenshot action '{other}'")),
+            };
+            Ok(IpcCommand::Capture(act))
+        }
 
         "ping" => Ok(IpcCommand::Ping),
         "help" => Ok(IpcCommand::Help),

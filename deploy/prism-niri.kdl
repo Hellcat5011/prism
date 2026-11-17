@@ -14,6 +14,9 @@ binds {
     Mod+Shift+Space   hotkey-overlay-title="Spotlight Search"    { spawn "prism-ctl" "search"      "toggle"; }
     Mod+Alt+W         hotkey-overlay-title="Wallpaper Picker"    { spawn "prism-ctl" "wallpaper"   "toggle"; }
     Mod+Alt+V         hotkey-overlay-title="Clipboard History"   { spawn "prism-ctl" "clipboard"   "toggle"; }
+    Print             hotkey-overlay-title="Screenshot"          { spawn "prism-ctl" "screenshot"  "toggle"; }
+    Shift+Print       hotkey-overlay-title="Screenshot (screen)" { spawn "prism-ctl" "screenshot"  "screen"; }
+    Mod+Shift+R       hotkey-overlay-title="Record Screen"       { spawn "prism-ctl" "screenshot"  "record"; }
     Mod+Alt+E         hotkey-overlay-title="Emoji Picker"        { spawn "prism-ctl" "emoji"       "toggle"; }
     Mod+Alt+C         hotkey-overlay-title="Color Picker"        { spawn "prism-ctl" "colorpicker" "toggle"; }
     Mod+Alt+N         hotkey-overlay-title="Notification Center" { spawn "prism-ctl" "notif"       "toggle"; }
