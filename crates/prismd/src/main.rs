@@ -409,7 +409,22 @@ fn idle_settings(cfg: &Config) -> idle::IdleSettings {
 }
 
 /// Push `st.config` to the services that follow it live.
+/// Blur level last sent to the compositor (0 = none yet).
+static BLUR_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Niri / Hyprland blur strength from `blur_strength` (QML applyNiriBlur), only when it changed.
+fn apply_blur(cfg: &Config) {
+    let level = prism_common::blur::level(cfg.blur_strength);
+    if prism_common::blur::compositor().is_none() || BLUR_LEVEL.swap(level, Ordering::SeqCst) == level {
+        return;
+    }
+    if let Err(e) = prism_common::blur::apply(level) {
+        eprintln!("[prismd] applying blur strength failed: {e}");
+    }
+}
+
 fn apply_config(st: &DaemonState) {
+    apply_blur(&st.config);
     st.bluelight.update_config(&st.config);
     st.depth.update_config(&st.config);
     if let Some(idle) = &st.idle {
@@ -1205,6 +1220,7 @@ fn main() {
     let is_idle = Arc::new(AtomicBool::new(false));
     let idle_start = idle_settings(&cfg);
 
+    apply_blur(&cfg);
     let state = Arc::new(Mutex::new(DaemonState {
         config: cfg,
         theme,

@@ -57,9 +57,17 @@ const FADE_OUT_MS: f64 = 350.0;
 const BOX_MS: f64 = 300.0;
 const SHAKE_MS: f64 = 300.0;
 const POP_MS: f64 = 120.0;
+/// Greeter user switch: the old name fades up and out, the new one fades up and in (QML userChangeAnim).
+const NAME_HALF_MS: f64 = 75.0;
+/// Greeter hover: the user name grows to 1.04x and the session label to 1.08x (QML, 150 ms).
+const HOVER_MS: f64 = 150.0;
+const USER_HOVER_SCALE: f64 = 1.04;
+const SESSION_HOVER_SCALE: f64 = 1.08;
 const INACTIVITY: Duration = Duration::from_secs(15);
 const MASK_FONT: &str = "CaskaydiaCove Nerd Font";
 const MASK_GLYPHS: [char; 4] = ['\u{f0d7}', '\u{f0d8}', '\u{f0d9}', '\u{f0da}'];
+/// Greeter: the last slot of the user list, where a name not in the list is typed (QML newUserSentinel).
+const NEW_USER: &str = "+ NEW USER";
 const LOCK_ICON: &str = "M7 10h10a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3v-6a3 3 0 0 1 3-3zM7 10V6a5 5 0 0 1 10 0v4";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -80,6 +88,11 @@ fn in_out_cubic(t: f64) -> f64 {
 fn out_back(t: f64) -> f64 {
     let (c1, t) = (1.70158, t.clamp(0.0, 1.0));
     1.0 + (c1 + 1.0) * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+/// Current value of a (from, to, start) hover tween.
+fn tween(g: (f64, f64, Instant)) -> f64 {
+    g.0 + (g.1 - g.0) * out_cubic(ms_since(g.2) / HOVER_MS)
 }
 
 fn ms_since(t: Instant) -> f64 {
@@ -229,6 +242,16 @@ struct App {
     user: String,
     /// Greeter: typing the user name (before the password).
     entering_user: bool,
+    /// Greeter: system users; `user_idx == users.len()` is the "+ NEW USER" slot.
+    users: Vec<String>,
+    user_idx: usize,
+    /// Greeter: start of the user switch animation and the name it switches away from.
+    name_anim: Option<(Instant, String)>,
+    /// Greeter: start of the session switch animation and the label it switches away from.
+    session_anim: Option<(Instant, String)>,
+    /// Greeter hover growth of the user name and session label: (from, to, start), 0..1.
+    user_grow: (f64, f64, Instant),
+    session_grow: (f64, f64, Instant),
     sessions: Vec<greetd::Session>,
     session_idx: usize,
     text: String,
@@ -266,6 +289,10 @@ impl App {
             || self.failed_at.map(|t| ms_since(t) < SHAKE_MS).unwrap_or(false)
             || self.masks.iter().any(|(_, t)| ms_since(*t) < POP_MS)
             || self.checking
+            || self.name_anim.as_ref().is_some_and(|(t, _)| ms_since(*t) < 2.0 * NAME_HALF_MS)
+            || self.session_anim.as_ref().is_some_and(|(t, _)| ms_since(*t) < 2.0 * NAME_HALF_MS)
+            || ms_since(self.user_grow.2) < HOVER_MS
+            || ms_since(self.session_grow.2) < HOVER_MS
     }
 
     fn set_password_mode(&mut self, on: bool) {
@@ -278,6 +305,78 @@ impl App {
         if !on {
             self.clear_text();
         }
+    }
+
+    /// The name the user block shows (greeter user entry: the typed name or the "+ NEW USER" slot).
+    fn shown_user(&self) -> String {
+        if self.mode == Mode::Greeter && self.entering_user {
+            if self.text.is_empty() { NEW_USER.to_string() } else { self.text.to_uppercase() }
+        } else {
+            self.user.to_uppercase()
+        }
+    }
+
+    /// Greeter: a click on the name steps through the system users, then the "+ NEW USER" slot
+    /// (typing there enters a new name), then wraps around (QML GreeterState.cycleUser).
+    fn cycle_user(&mut self) {
+        if self.mode != Mode::Greeter {
+            return;
+        }
+        let old = self.shown_user();
+        let slots = self.users.len() + 1;
+        self.user_idx = (self.user_idx + 1) % slots;
+        self.status.clear();
+        self.status_error = false;
+        if self.user_idx == self.users.len() {
+            self.clear_text();
+            self.entering_user = true;
+        } else {
+            self.user = self.users[self.user_idx].clone();
+            if self.entering_user {
+                self.leave_user_entry();
+            } else {
+                self.clear_text();
+            }
+        }
+        self.name_anim = Some((Instant::now(), old));
+    }
+
+    /// Greeter: label of the selected session.
+    fn session_name(&self) -> String {
+        self.sessions.get(self.session_idx).map(|s| s.name.clone()).unwrap_or_else(greetd::detect_default_session).to_uppercase()
+    }
+
+    /// Greeter: Tab or a click on the session label picks the next session (QML cycleSession).
+    fn cycle_session(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let old = self.session_name();
+        self.session_idx = (self.session_idx + 1) % self.sessions.len();
+        self.session_anim = Some((Instant::now(), old));
+    }
+
+    /// Greeter: Enter on a typed name selects it, adding it to the list before "+ NEW USER"
+    /// (QML GreeterState.commitNewUser).
+    fn commit_user(&mut self, name: String) {
+        self.user_idx = match self.users.iter().position(|u| *u == name) {
+            Some(i) => i,
+            None => {
+                self.users.push(name.clone());
+                self.users.len() - 1
+            }
+        };
+        self.user = name;
+        self.status.clear();
+        self.leave_user_entry();
+    }
+
+    /// Greeter: back from the user name to the password field, which morphs open from the lock badge.
+    fn leave_user_entry(&mut self) {
+        self.entering_user = false;
+        self.clear_text();
+        self.password_mode = true;
+        self.box_anim = (0.0, 1.0, Instant::now());
     }
 
     fn box_value(&self) -> f64 {
@@ -309,12 +408,9 @@ impl App {
             return;
         }
         if self.mode == Mode::Greeter && self.entering_user {
-            let name = std::mem::take(&mut self.text).trim().to_string();
-            self.masks.clear();
+            let name = self.text.trim().to_string();
             if !name.is_empty() {
-                self.user = name;
-                self.entering_user = false;
-                self.status.clear();
+                self.commit_user(name);
             }
             return;
         }
@@ -412,18 +508,17 @@ impl App {
                 return;
             }
             0xff1b => {
-                // Escape: leave the field (greeter: back to the user name).
-                if self.mode == Mode::Greeter && !self.entering_user && self.text.is_empty() {
-                    self.entering_user = true;
-                    self.text = self.user.clone();
-                    self.masks.clear();
+                // Escape: the password field collapses into the lock badge (as on the lock screen);
+                // any key or click opens it again. Greeter "+ NEW USER": Escape clears the typed name.
+                if self.mode == Mode::Greeter && self.entering_user {
+                    self.clear_text();
                 } else {
                     self.set_password_mode(false);
                 }
                 return;
             }
             0xff0d | 0xff8d => {
-                if self.password_mode || self.mode == Mode::Greeter {
+                if self.password_mode || (self.mode == Mode::Greeter && self.entering_user) {
                     self.submit();
                 } else {
                     self.set_password_mode(true);
@@ -439,12 +534,12 @@ impl App {
                 return;
             }
             0xff09 if self.mode == Mode::Greeter && !self.sessions.is_empty() => {
-                self.session_idx = (self.session_idx + 1) % self.sessions.len();
+                self.cycle_session();
                 return;
             }
             _ => {}
         }
-        if !self.password_mode {
+        if !self.password_mode && !self.entering_user {
             // The first key only opens the password field (as QML).
             self.set_password_mode(true);
             return;
@@ -469,9 +564,11 @@ impl App {
             Some(Hit::Go) => self.submit(),
             Some(Hit::Shutdown) => spawn_detached(&["systemctl", "poweroff"]),
             Some(Hit::Reboot) => spawn_detached(&["systemctl", "reboot"]),
-            Some(Hit::Session) if self.mode == Mode::Greeter && !self.sessions.is_empty() => {
-                self.session_idx = (self.session_idx + 1) % self.sessions.len();
-            }
+            Some(Hit::Session) if self.mode == Mode::Greeter && !self.sessions.is_empty() => self.cycle_session(),
+            // Greeter: clicking the name steps to the next user.
+            Some(Hit::User) if self.mode == Mode::Greeter => self.cycle_user(),
+            // Greeter: a click elsewhere while editing the name keeps editing it.
+            _ if self.entering_user => {}
             _ => self.set_password_mode(true),
         }
     }
@@ -484,6 +581,16 @@ impl App {
             .iter()
             .find(|s| Some(&s.surface) == on.as_ref())
             .and_then(|s| s.hits.iter().find(|h| x >= h.1 && x < h.1 + h.3 && y >= h.2 && y < h.2 + h.4).map(|h| h.0));
+        if self.mode == Mode::Greeter {
+            let retarget = |g: &mut (f64, f64, Instant), on: bool| {
+                let to = if on { 1.0 } else { 0.0 };
+                if g.1 != to {
+                    *g = (tween(*g), to, Instant::now());
+                }
+            };
+            retarget(&mut self.user_grow, self.hover == Some(Hit::User));
+            retarget(&mut self.session_grow, self.hover == Some(Hit::Session));
+        }
     }
 
     // ── Surfaces ─────────────────────────────────────────────────────
@@ -614,15 +721,33 @@ impl App {
         let lw = spaced_width(cr, label, &label_f, px(4.0));
         draw_spaced(cr, balign(lw), by, label, &label_f, a(fg, 0.6), px(4.0));
         by += lh + px(5.0);
-        let shown_user = if self.mode == Mode::Greeter && self.entering_user {
-            if self.text.is_empty() { "USERNAME".to_string() } else { self.text.to_uppercase() }
-        } else {
-            self.user.to_uppercase()
-        };
+        let mut shown_user = self.shown_user();
+        // User switch: the old name slides up and fades out, then the new one slides up into place.
+        let (mut name_a, mut name_dy) = (1.0, 0.0);
+        if let Some((t, old)) = &self.name_anim {
+            let e = ms_since(*t);
+            if e < NAME_HALF_MS {
+                let p = out_cubic(e / NAME_HALF_MS);
+                shown_user = old.clone();
+                (name_a, name_dy) = (1.0 - p, -px(10.0) * p);
+            } else if e < 2.0 * NAME_HALF_MS {
+                let p = out_cubic((e - NAME_HALF_MS) / NAME_HALF_MS);
+                (name_a, name_dy) = (p, px(10.0) * (1.0 - p));
+            }
+        }
         let user_hover = self.hover == Some(Hit::User);
         let (uw, _) = text_size(cr, &shown_user, &user_f);
-        let ucol = if user_hover { l.primary } else if self.entering_user && self.text.is_empty() { a(fg, 0.35) } else { fg };
-        cb::draw_pango_text(cr, balign(uw), by, &shown_user, &user_f, ucol, Some(block_w as i32 + 200));
+        let placeholder = self.entering_user && self.text.is_empty() && shown_user == NEW_USER;
+        let ucol = if user_hover { l.primary } else if placeholder { a(fg, 0.4) } else { fg };
+        // Hover growth from the aligned edge (QML transformOrigin Item.Left / Item.Right).
+        let grow = 1.0 + (USER_HOVER_SCALE - 1.0) * tween(self.user_grow);
+        let ox = if l.right { balign(uw) + uw } else { balign(uw) };
+        cb::cairo_save(cr);
+        cb::cairo_translate(cr, ox, by + uh / 2.0);
+        cb::cairo_scale(cr, grow, grow);
+        cb::cairo_translate(cr, -ox, -(by + uh / 2.0));
+        cb::draw_pango_text(cr, balign(uw), by + name_dy, &shown_user, &user_f, a(ucol, name_a), Some(block_w as i32 + 200));
+        cb::cairo_restore(cr);
         if user_hover {
             cb::fill_rounded_rect(cr, balign(uw), by + uh - px(2.0), uw, px(2.0), 0.0, ucol);
         }
@@ -712,11 +837,23 @@ impl App {
         // Bottom row: SHUTDOWN  REBOOT  • SESSION
         if l.session_controls || self.mode == Mode::Greeter {
             let bf = l.f("Bold", px(14.0));
-            let session_name = match self.mode {
-                Mode::Greeter => self.sessions.get(self.session_idx).map(|s| s.name.clone()).unwrap_or_else(greetd::detect_default_session),
-                Mode::Lock => session_label(),
+            let mut session_name = match self.mode {
+                Mode::Greeter => self.session_name(),
+                Mode::Lock => session_label().to_uppercase(),
+            };
+            // Session switch: the old label slides up and out, the new one slides up into place.
+            let (mut sess_a, mut sess_dy) = (1.0, 0.0);
+            if let Some((t, old)) = &self.session_anim {
+                let e = ms_since(*t);
+                if e < NAME_HALF_MS {
+                    let p = out_cubic(e / NAME_HALF_MS);
+                    session_name = old.clone();
+                    (sess_a, sess_dy) = (1.0 - p, -px(5.0) * p);
+                } else if e < 2.0 * NAME_HALF_MS {
+                    let p = out_cubic((e - NAME_HALF_MS) / NAME_HALF_MS);
+                    (sess_a, sess_dy) = (p, px(5.0) * (1.0 - p));
+                }
             }
-            .to_uppercase();
             let items = [(Hit::Shutdown, "SHUTDOWN".to_string()), (Hit::Reboot, "REBOOT".to_string()), (Hit::Session, session_name)];
             let (_, bh) = text_size(cr, "A", &bf);
             let ry = hf - px(120.0) - bh;
@@ -735,7 +872,22 @@ impl App {
                     cb::fill_circle(cr, rx + dot / 2.0, ry + bh / 2.0, dot / 2.0, a(if hov { l.primary } else { fg }, 0.5));
                     tx += dot + px(15.0);
                 }
-                draw_spaced(cr, tx, ry, text, &bf, col, px(2.0));
+                if *hit == Hit::Session {
+                    let tw = widths[k] - (tx - rx);
+                    let grow = 1.0 + (SESSION_HOVER_SCALE - 1.0) * tween(self.session_grow);
+                    let ox = if l.right { tx + tw } else { tx };
+                    cb::cairo_save(cr);
+                    cb::cairo_translate(cr, ox, ry + bh / 2.0);
+                    cb::cairo_scale(cr, grow, grow);
+                    cb::cairo_translate(cr, -ox, -(ry + bh / 2.0));
+                    draw_spaced(cr, tx, ry + sess_dy, text, &bf, a(col, sess_a), px(2.0));
+                    if hov {
+                        cb::fill_rounded_rect(cr, tx, ry + sess_dy + bh, tw, px(1.5), 0.0, a(col, sess_a));
+                    }
+                    cb::cairo_restore(cr);
+                } else {
+                    draw_spaced(cr, tx, ry, text, &bf, col, px(2.0));
+                }
                 hits.push((*hit, rx - px(10.0), ry - px(10.0), widths[k] + px(20.0), bh + px(20.0)));
                 rx += widths[k] + gap;
             }
@@ -1180,10 +1332,15 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
     }
 
     let sessions = if mode == Mode::Greeter { greetd::sessions() } else { Vec::new() };
-    let mut session_idx = 0;
-    if let Some(last) = greetd::last_session().filter(|_| mode == Mode::Greeter) {
-        session_idx = sessions.iter().position(|s| s.cmd == last).unwrap_or(0);
-    }
+    // Greeter: the last session only when the last user is remembered (QML enum-helper.py),
+    // else the configured `defaultSession`.
+    let session_idx = if mode == Mode::Greeter {
+        let cfg = greetd::load_greeter_config();
+        let last = if cfg.remember_last_user { greetd::last_session() } else { None };
+        greetd::initial_session(&sessions, last.as_deref(), &cfg.default_session)
+    } else {
+        0
+    };
     let user = match mode {
         Mode::Lock => std::env::var("USER").unwrap_or_default(),
         Mode::Greeter => {
@@ -1191,6 +1348,19 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
             if cfg.remember_last_user { greetd::load_last_user().unwrap_or_default() } else { String::new() }
         }
     };
+    // Greeter: the system users; the last user goes into the list when it is missing (QML), and
+    // without one the first user is preselected. No users at all: start on "+ NEW USER".
+    let mut users = if mode == Mode::Greeter { greetd::users() } else { Vec::new() };
+    let mut user = user;
+    if mode == Mode::Greeter {
+        if !user.is_empty() && !users.contains(&user) {
+            users.push(user.clone());
+        }
+        if user.is_empty() {
+            user = users.first().cloned().unwrap_or_default();
+        }
+    }
+    let user_idx = users.iter().position(|u| *u == user).unwrap_or(users.len());
     let entering_user = mode == Mode::Greeter && user.is_empty();
     let now = Instant::now();
     let mut app = App {
@@ -1217,6 +1387,12 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
         hover: None,
         user,
         entering_user,
+        users,
+        user_idx,
+        name_anim: None,
+        session_anim: None,
+        user_grow: (0.0, 0.0, now),
+        session_grow: (0.0, 0.0, now),
         sessions,
         session_idx,
         text: String::new(),
@@ -1305,8 +1481,15 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
             }
         }
         // QML inactivityTimer: 15 s without input clears the field and closes it.
-        if app.password_mode && app.mode == Mode::Lock && !app.checking && app.last_input.elapsed() >= INACTIVITY {
-            app.set_password_mode(false);
+        // Greeter: the same for the password field; a half-typed new user name is cleared.
+        if !app.checking && app.closing.is_none() && app.last_input.elapsed() >= INACTIVITY {
+            if app.mode == Mode::Greeter && app.entering_user {
+                if !app.text.is_empty() {
+                    app.clear_text();
+                }
+            } else if app.password_mode {
+                app.set_password_mode(false);
+            }
         }
         app.draw_all(&qh);
 

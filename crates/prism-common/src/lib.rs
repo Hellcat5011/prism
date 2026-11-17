@@ -1,5 +1,6 @@
 pub mod anim;
 pub mod apps;
+pub mod blur;
 pub mod clipboard;
 pub mod config;
 pub mod depth;

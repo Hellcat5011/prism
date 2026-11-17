@@ -537,6 +537,13 @@ impl CardView for EmojiView {
         Effect::Redraw
     }
 
+    /// Alt+1..9 jumps to the first nine category tabs (QML).
+    fn alt_key(&mut self, typed: char) -> Option<Effect> {
+        let n = typed.to_digit(10).filter(|n| (1..=9).contains(n))?;
+        self.switch_tab(n as usize - 1);
+        Some(Effect::Redraw)
+    }
+
     fn clickable(&self) -> bool {
         let (x, y) = self.pointer;
         self.tab_at(x, y).is_some() || self.clear_btn.contains(x, y) || self.cell_at(x, y).is_some()

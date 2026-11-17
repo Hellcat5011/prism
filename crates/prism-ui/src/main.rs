@@ -706,8 +706,12 @@ impl UiState {
                 (_, t, _) => t,
             };
             let special = if typed.is_some() { 0 } else { special };
+            let alt = state.xkb_state.as_ref().is_some_and(|x| x.mod_name_is_active(xkbcommon::xkb::MOD_NAME_ALT, xkbcommon::xkb::STATE_MODS_EFFECTIVE));
             if let Some(v) = state.view.as_mut() {
-                let eff = v.key(special, typed, shift, ctrl);
+                let eff = match typed.filter(|_| alt && !ctrl).and_then(|c| v.alt_key(c)) {
+                    Some(eff) => eff,
+                    None => v.key(special, typed, shift, ctrl),
+                };
                 state.apply_search_effect(eff, qh);
             } else {
                 let sv = state.settings.as_mut().unwrap();

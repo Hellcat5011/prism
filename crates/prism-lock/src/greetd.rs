@@ -239,6 +239,8 @@ pub fn authenticate_and_start(
 /// A login session from /usr/share/wayland-sessions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
+    /// The .desktop file name without the extension (what `defaultSession` names, e.g. "mango").
+    pub id: String,
     pub name: String,
     pub cmd: Vec<String>,
 }
@@ -253,7 +255,8 @@ pub fn sessions() -> Vec<Session> {
             if p.extension().and_then(|s| s.to_str()) != Some("desktop") {
                 continue;
             }
-            if let Some(s) = fs::read_to_string(&p).ok().and_then(|t| parse_session(&t)) {
+            let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+            if let Some(s) = fs::read_to_string(&p).ok().and_then(|t| parse_session(&id, &t)) {
                 if !out.iter().any(|o: &Session| o.name == s.name) {
                     out.push(s);
                 }
@@ -264,7 +267,7 @@ pub fn sessions() -> Vec<Session> {
     out
 }
 
-fn parse_session(text: &str) -> Option<Session> {
+fn parse_session(id: &str, text: &str) -> Option<Session> {
     let mut name = None;
     let mut exec = None;
     let mut in_entry = false;
@@ -284,8 +287,120 @@ fn parse_session(text: &str) -> Option<Session> {
             return None;
         }
     }
-    let cmd: Vec<String> = exec?.split_whitespace().filter(|a| !a.starts_with('%')).map(String::from).collect();
-    (!cmd.is_empty()).then(|| Session { name: name.unwrap_or_else(|| cmd[0].clone()), cmd })
+    let cmd: Vec<String> = split_exec(&exec?).into_iter().filter(|a| !(a.len() == 2 && a.starts_with('%'))).collect();
+    let name = name.unwrap_or_else(|| if id.is_empty() { cmd[0].clone() } else { id.to_string() });
+    (!cmd.is_empty()).then(|| Session { id: id.to_string(), name, cmd })
+}
+
+/// Split an `Exec=` value into arguments like a POSIX shell (QML used `shlex.split`): single
+/// quotes are literal, double quotes allow `\` escapes, a backslash outside quotes escapes the
+/// next character.
+fn split_exec(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_arg = false;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_arg = true;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    cur.push(q);
+                }
+            }
+            '"' => {
+                in_arg = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(e) = chars.next() {
+                                if !matches!(e, '"' | '\\' | '$' | '`') {
+                                    cur.push('\\');
+                                }
+                                cur.push(e);
+                            }
+                        }
+                        _ => cur.push(q),
+                    }
+                }
+            }
+            '\\' => {
+                in_arg = true;
+                if let Some(e) = chars.next() {
+                    cur.push(e);
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_arg {
+                    out.push(std::mem::take(&mut cur));
+                    in_arg = false;
+                }
+            }
+            c => {
+                in_arg = true;
+                cur.push(c);
+            }
+        }
+    }
+    if in_arg {
+        out.push(cur);
+    }
+    out
+}
+
+/// The session to preselect: the last one when it is remembered and still installed, else
+/// `defaultSession` (matched by .desktop id, name or command, case ignored), else the first.
+pub fn initial_session(sessions: &[Session], last: Option<&[String]>, default: &str) -> usize {
+    if let Some(i) = last.and_then(|l| sessions.iter().position(|s| s.cmd == l)) {
+        return i;
+    }
+    let d = default.trim();
+    sessions
+        .iter()
+        .position(|s| s.id.eq_ignore_ascii_case(d) || s.name.eq_ignore_ascii_case(d) || s.cmd.first().is_some_and(|c| c.eq_ignore_ascii_case(d)))
+        .unwrap_or(0)
+}
+
+/// Login users (QML enum-helper.py): uid 1000..=60000 with a real login shell (listed in /etc/shells
+/// when that file exists). Reads `getent passwd` so NSS users are included, else /etc/passwd.
+pub fn users() -> Vec<String> {
+    let passwd = std::process::Command::new("getent")
+        .arg("passwd")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .or_else(|| fs::read_to_string("/etc/passwd").ok())
+        .unwrap_or_default();
+    let shells: Vec<String> = fs::read_to_string("/etc/shells")
+        .map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect())
+        .unwrap_or_default();
+    parse_users(&passwd, &shells)
+}
+
+fn parse_users(passwd: &str, shells: &[String]) -> Vec<String> {
+    const DENY: [&str; 3] = ["/bin/false", "/sbin/nologin", "/usr/sbin/nologin"];
+    let mut out: Vec<String> = Vec::new();
+    for line in passwd.lines() {
+        let f: Vec<&str> = line.split(':').collect();
+        if f.len() < 7 {
+            continue;
+        }
+        let (name, shell) = (f[0], f[6]);
+        let Ok(uid) = f[2].parse::<u32>() else { continue };
+        if (1000..=60000).contains(&uid)
+            && !DENY.contains(&shell)
+            && (shells.is_empty() || shells.iter().any(|s| s == shell))
+            && !out.iter().any(|u| u == name)
+        {
+            out.push(name.to_string());
+        }
+    }
+    out
 }
 
 /// The session the last user picked, if it is still installed.
@@ -302,8 +417,34 @@ mod tests {
 
     #[test]
     fn parses_session_desktop_files() {
-        let s = parse_session("[Desktop Entry]\nName=Mango\nExec=mango %U\nType=Application\n").unwrap();
-        assert_eq!(s, Session { name: "Mango".into(), cmd: vec!["mango".into()] });
-        assert!(parse_session("[Desktop Entry]\nName=X\nExec=x\nHidden=true\n").is_none());
+        let s = parse_session("mango", "[Desktop Entry]\nName=Mango\nExec=mango %U\nType=Application\n").unwrap();
+        assert_eq!(s, Session { id: "mango".into(), name: "Mango".into(), cmd: vec!["mango".into()] });
+        assert!(parse_session("x", "[Desktop Entry]\nName=X\nExec=x\nHidden=true\n").is_none());
+    }
+
+    #[test]
+    fn splits_exec_like_a_shell() {
+        assert_eq!(split_exec(r#"sh -c "exec niri --session"  'a b' c\ d"#), vec!["sh", "-c", "exec niri --session", "a b", "c d"]);
+        assert_eq!(split_exec(r#"x "" "q\"uote""#), vec!["x", "", "q\"uote"]);
+    }
+
+    #[test]
+    fn picks_the_initial_session() {
+        let mk = |id: &str, name: &str, cmd: &str| Session { id: id.into(), name: name.into(), cmd: vec![cmd.into()] };
+        let s = vec![mk("hyprland", "Hyprland", "Hyprland"), mk("mango", "Mango", "mango"), mk("niri", "Niri", "niri-session")];
+        assert_eq!(initial_session(&s, Some(&["niri-session".to_string()]), "mango"), 2);
+        assert_eq!(initial_session(&s, None, "mango"), 1);
+        assert_eq!(initial_session(&s, None, "NIRI"), 2);
+        assert_eq!(initial_session(&s, Some(&["gone".to_string()]), "unknown"), 0);
+    }
+
+    #[test]
+    fn lists_login_users_only() {
+        let passwd = "root:x:0:0::/root:/bin/bash\nvic:x:1000:1000::/home/vic:/usr/bin/fish\n\
+                      svc:x:1001:1001::/:/usr/sbin/nologin\nnobody:x:65534:65534::/:/bin/bash\n\
+                      ann:x:1002:1002::/home/ann:/bin/zsh\n";
+        let shells = vec!["/usr/bin/fish".to_string(), "/bin/bash".to_string()];
+        assert_eq!(parse_users(passwd, &shells), vec!["vic".to_string()]);
+        assert_eq!(parse_users(passwd, &[]), vec!["vic".to_string(), "ann".to_string()]);
     }
 }

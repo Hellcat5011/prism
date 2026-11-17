@@ -379,7 +379,7 @@ fn default_alignment() -> String { "left".to_string() }
 fn default_session() -> String { "mango".to_string() }
 fn default_window_radius() -> u32 { 16 }
 fn default_bg_opacity() -> f32 { 0.85 }
-fn default_blur_strength() -> f32 { 32.0 }
+fn default_blur_strength() -> f32 { crate::blur::DEFAULT_LEVEL as f32 }
 fn default_blue_light_mode() -> String { "fixed_time".to_string() }
 fn default_night_start() -> String { "20:00".to_string() }
 fn default_night_end() -> String { "06:00".to_string() }

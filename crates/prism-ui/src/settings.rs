@@ -295,6 +295,10 @@ fn rows() -> Vec<Row> {
         heading(5, "Windows"),
         Row { tab: 5, title: "Window Background Blur", subtitle: "Compositor blur behind Prism cards.", visible: always,
             control: Switch(|c| c.blur_enabled, |c, v| c.blur_enabled = v) },
+        // Niri and Hyprland only: Mango has no runtime blur setting (prismd applies it).
+        Row { tab: 5, title: "Blur Strength", subtitle: "Blur passes and offset used by the compositor (level 1 to 5).",
+            visible: |c| c.blur_enabled && prism_common::blur::compositor().is_some(),
+            control: Slider { min: 1.0, max: 5.0, step: 1.0, get: |c| prism_common::blur::level(c.blur_strength) as f64, set: |c, v| c.blur_strength = v.round() as f32, fmt: |v| format!("Level {:.0}", v) } },
         Row { tab: 5, title: "Window Background Opacity", subtitle: "Opacity of every card's background.", visible: always,
             control: Slider { min: 0.2, max: 1.0, step: 0.01, get: |c| c.background_opacity as f64, set: |c, v| c.background_opacity = v as f32, fmt: |v| format!("{:.0}%", v * 100.0) } },
         Row { tab: 5, title: "Window Corner Radius", subtitle: "Corner rounding of every card.", visible: always,

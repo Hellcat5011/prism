@@ -22,6 +22,10 @@ pub trait CardView {
     }
     /// Key press: `special` is a translated key code (0 when `typed` carries text).
     fn key(&mut self, special: u32, typed: Option<char>, shift: bool, ctrl: bool) -> Effect;
+    /// Alt+key shortcut; `None` passes the key on to `key` as usual.
+    fn alt_key(&mut self, _typed: char) -> Option<Effect> {
+        None
+    }
     /// Background results; true when a redraw is needed.
     fn poll(&mut self) -> bool {
         false
