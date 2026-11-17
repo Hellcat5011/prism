@@ -252,6 +252,7 @@ pub fn image_size(img: *mut CairoSurface) -> (f64, f64) {
 }
 
 pub const CAIRO_OPERATOR_CLEAR: i32 = 0;
+pub const CAIRO_OPERATOR_DEST_OUT: i32 = 9;
 pub const CAIRO_FILTER_BILINEAR: i32 = 4;
 
 thread_local! {

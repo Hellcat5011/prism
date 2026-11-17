@@ -70,12 +70,11 @@ pub fn load_keybinds() -> Vec<KeybindEntry> {
     fallback_keybinds()
 }
 
-fn find_script(rel_path: &str) -> Option<PathBuf> {
+pub(crate) fn find_script(rel_path: &str) -> Option<PathBuf> {
     let mut candidates = vec![
         PathBuf::from(rel_path),
         PathBuf::from("..").join(rel_path),
         PathBuf::from("../..").join(rel_path),
-        PathBuf::from("/mnt/hdd/config/quickshell/prism").join(rel_path),
     ];
 
     if let Ok(home) = env::var("HOME") {

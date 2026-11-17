@@ -13,6 +13,7 @@ Usage: prism-ctl <target> [action] [args...]
 
 Targets & Commands:
   launcher [toggle|open|close]
+  settings [toggle|open|close]
   search [toggle|open|close|query <text>]
   wallpaper [set <path> [scheme] [mode]|get|toggle|open|close]
   media [status|play-pause|next|prev|stop]
@@ -311,22 +312,22 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 "volume" => {
                     if raw_val == "mute" {
                         Ok(IpcCommand::Osd(OsdAction::VolumeMute))
-                    } else if raw_val.starts_with('+') {
-                        let delta = raw_val[1..].parse::<i32>().unwrap_or(5);
+                    } else if let Some(v) = raw_val.strip_prefix('+') {
+                        let delta = v.parse::<i32>().unwrap_or(5);
                         Ok(IpcCommand::Osd(OsdAction::VolumeDelta(delta)))
-                    } else if raw_val.starts_with('-') {
-                        let delta = -raw_val[1..].parse::<i32>().unwrap_or(5);
+                    } else if let Some(v) = raw_val.strip_prefix('-') {
+                        let delta = -v.parse::<i32>().unwrap_or(5);
                         Ok(IpcCommand::Osd(OsdAction::VolumeDelta(delta)))
                     } else {
                         Ok(IpcCommand::Osd(OsdAction::Volume(raw_val.to_string())))
                     }
                 }
                 "brightness" => {
-                    if raw_val.starts_with('+') {
-                        let delta = raw_val[1..].parse::<i32>().unwrap_or(5);
+                    if let Some(v) = raw_val.strip_prefix('+') {
+                        let delta = v.parse::<i32>().unwrap_or(5);
                         Ok(IpcCommand::Osd(OsdAction::BrightnessDelta(delta)))
-                    } else if raw_val.starts_with('-') {
-                        let delta = -raw_val[1..].parse::<i32>().unwrap_or(5);
+                    } else if let Some(v) = raw_val.strip_prefix('-') {
+                        let delta = -v.parse::<i32>().unwrap_or(5);
                         Ok(IpcCommand::Osd(OsdAction::BrightnessDelta(delta)))
                     } else {
                         Ok(IpcCommand::Osd(OsdAction::Brightness(raw_val.to_string())))

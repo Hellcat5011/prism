@@ -471,6 +471,7 @@ impl Edit {
             }
             cy += ROW_H;
         }
+        #[allow(clippy::needless_range_loop)] // k is also the shortcut's option index
         for k in 0..shortcut_rows {
             let on = shortcut_enabled(&p, k);
             let row = Rect { x: x + 8.0, y: cy, w: POP_W - 16.0, h: 30.0 };

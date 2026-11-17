@@ -6,7 +6,7 @@ Prism is a Wayland desktop shell written in Rust, ported from a Quickshell/QML s
 `/mnt/hdd/config/quickshell/prism (bak)` and is the reference for look and behaviour (sizes, colours, timings).
 The primary target compositor is MangoWM (layer-shell); Niri and Hyprland snippets exist in `deploy/`.
 `implementation`, `implementation plan2` and `to-do` were written by an earlier agent and are not reliable; use
-them only as a feature inventory. `README.md` describes an older multi-process design and is out of date.
+them only as a feature inventory.
 
 ## Commands
 

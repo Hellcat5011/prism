@@ -28,7 +28,7 @@ impl MediaTrack {
             return None;
         }
 
-        let player = parts.get(0).unwrap_or(&"").trim().to_string();
+        let player = parts.first().unwrap_or(&"").trim().to_string();
         let status = parts.get(1).unwrap_or(&"Stopped").trim().to_string();
         let title = parts.get(2).unwrap_or(&"").trim().to_string();
         let artist = parts.get(3).unwrap_or(&"").trim().to_string();

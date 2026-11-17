@@ -714,7 +714,7 @@ fn walk_menu(node: &Value, depth: u32, out: &mut Vec<MenuEntry>, is_root: bool) 
     let id = val_i64(&f[0]).unwrap_or(0) as i32;
     let prop = |k: &str| -> Option<Value> {
         match unwrap_variant(&f[1]) {
-            Value::Dict(d) => d.iter().find(|(kk, _)| val_str(kk).as_deref() == Some(k)).map(|(_, v)| unwrap_variant(v).try_clone().ok()).flatten(),
+            Value::Dict(d) => d.iter().find(|(kk, _)| val_str(kk).as_deref() == Some(k)).and_then(|(_, v)| unwrap_variant(v).try_clone().ok()),
             _ => None,
         }
     };
@@ -822,7 +822,7 @@ fn best_pixmap(v: &Value) -> Option<(i32, i32, Vec<u8>)> {
         }
         if best.as_ref().map(|b| b.0 * b.1 < w * h).unwrap_or(true) {
             let mut px = Vec::with_capacity(raw.len());
-            for c in raw.chunks_exact(4) {
+            for c in raw.as_chunks::<4>().0 {
                 let (a, r, g, b) = (c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32);
                 let pr = r * a / 255;
                 let pg = g * a / 255;

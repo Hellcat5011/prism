@@ -71,7 +71,7 @@ impl ShmBuf {
         let stride = w * 4;
         let size = (stride * h) as usize;
         unsafe {
-            let fd = libc::memfd_create(b"prism-desktop\0".as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC);
+            let fd = libc::memfd_create(c"prism-desktop".as_ptr(), libc::MFD_CLOEXEC);
             if fd < 0 {
                 return None;
             }
@@ -204,7 +204,14 @@ struct Desk {
     last_second: Option<u32>,
     menu: Option<Menu>,
     pending_menu_anchor: Option<(String, Rect)>,
+    /// Depth effect: wallpaper foreground mask (white, alpha = foreground) published by
+    /// prismd, and when it appeared (fade-in).
+    depth_mask: Option<String>,
+    depth_fade: Option<Instant>,
 }
+
+/// QML DepthService maskFade duration.
+const DEPTH_FADE_MS: f64 = 200.0;
 
 /// The desktop widgets layer as a component of the prism-ui event loop.
 pub struct Desktop {
@@ -275,6 +282,8 @@ impl Desktop {
             last_second: None,
             menu: None,
             pending_menu_anchor: None,
+            depth_mask: None,
+            depth_fade: None,
         };
 
         let _registry = conn.display().get_registry(&qh, ());
@@ -286,6 +295,7 @@ impl Desktop {
         }
         d.update_screen();
         d.sync_time(true, &qh);
+        d.load_depth_mask();
         d.reconcile(&qh);
         Some(Desktop {
             queue,
@@ -428,7 +438,52 @@ impl Desk {
         if self.art.is_none() {
             self.palette = MediaPalette::fallback(&self.look);
         }
+        self.load_depth_mask();
         self.reconcile(qh);
+    }
+
+    fn load_depth_mask(&mut self) {
+        let mask = if self.config.depth_enabled {
+            prism_common::depth::current_mask().map(|p| p.display().to_string())
+        } else {
+            None
+        };
+        if mask != self.depth_mask {
+            eprintln!("[prism-desktop] depth mask: {}", mask.as_deref().unwrap_or("none"));
+            self.depth_fade = mask.as_ref().map(|_| Instant::now());
+            self.depth_mask = mask;
+        }
+    }
+
+    /// Hide the parts of a widget that the wallpaper's foreground covers (QML DepthMask with
+    /// maskInverted): the screen-sized mask, cropped to the widget, is cut out with DEST_OUT.
+    /// Returns true while the mask is still fading in.
+    fn apply_depth_mask(&mut self, cr: *mut Cairo, rect: Rect) -> bool {
+        let Some(path) = &self.depth_mask else { return false };
+        let (sw, sh) = self.screen;
+        let Some(img) = cached_image_cover(path, sw.round() as i32, sh.round() as i32) else { return false };
+        let (iw, ih) = image_size(img);
+        let k = match self.depth_fade {
+            Some(t) => {
+                let dur = self.style.duration_ms(DEPTH_FADE_MS);
+                let k = if dur <= 0.0 { 1.0 } else { (t.elapsed().as_secs_f64() * 1000.0 / dur).min(1.0) };
+                if k >= 1.0 {
+                    self.depth_fade = None;
+                }
+                k
+            }
+            None => 1.0,
+        };
+        // InOutQuad, as the QML Behavior.
+        let a = if k < 0.5 { 2.0 * k * k } else { 1.0 - (-2.0 * k + 2.0).powi(2) / 2.0 };
+        unsafe {
+            cairo_save(cr);
+            cairo_set_operator(cr, CAIRO_OPERATOR_DEST_OUT);
+            cairo_set_source_surface(cr, img, (sw - iw) / 2.0 - rect.x, (sh - ih) / 2.0 - rect.y);
+            cairo_paint_with_alpha(cr, a);
+            cairo_restore(cr);
+        }
+        self.depth_fade.is_some()
     }
 
     /// Request a redraw of one widget (coalesced to its next frame callback).
@@ -619,6 +674,11 @@ impl Desk {
                 draw_shortcuts(cr, w, h, &p, &self.look, shortcuts_vertical(&p, &r), hovered, self.pressed, false)
             }
         };
+        // Only widgets sent to the background pass behind the wallpaper scenery (QML DepthMask).
+        if p.send_to_background {
+            let rect = self.widgets[i].rect;
+            animating |= self.apply_depth_mask(cr, rect);
+        }
         unsafe {
             cairo_destroy(cr);
             cairo_surface_destroy(surf);
@@ -1049,7 +1109,7 @@ impl Inotify {
         }
         let mut files = Vec::new();
         let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-        for path in [Config::config_path(), Theme::source_path()] {
+        for path in [Config::config_path(), Theme::source_path(), prism_common::depth::mask_pointer_path()] {
             if let (Some(dir), Some(name)) = (path.parent(), path.file_name()) {
                 files.push(name.to_os_string());
                 if !dirs.iter().any(|d| d == dir) {
@@ -1122,23 +1182,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Desk {
 impl Dispatch<wl_output::WlOutput, ()> for Desk {
     fn event(d: &mut Self, _: &wl_output::WlOutput, ev: wl_output::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
         match ev {
-            wl_output::Event::Mode { flags, width, height, .. } => {
-                if let WEnum::Value(f) = flags {
-                    if f.contains(wl_output::Mode::Current) && d.output_mode.0 == 0 {
-                        d.output_mode = (width, height);
-                        d.update_screen();
-                    }
+            wl_output::Event::Mode { flags: WEnum::Value(f), width, height, .. } => {
+                if f.contains(wl_output::Mode::Current) && d.output_mode.0 == 0 {
+                    d.output_mode = (width, height);
+                    d.update_screen();
                 }
             }
             wl_output::Event::Scale { factor } => {
                 d.output_scale = factor;
                 d.update_screen();
             }
-            wl_output::Event::Done => {
-                if !d.widgets.is_empty() {
+            wl_output::Event::Done
+                if !d.widgets.is_empty() => {
                     d.reconcile(qh);
                 }
-            }
             _ => {}
         }
     }

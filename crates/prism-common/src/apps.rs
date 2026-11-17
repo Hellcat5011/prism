@@ -152,7 +152,7 @@ impl DesktopApp {
     pub fn launch(&self) -> std::io::Result<Child> {
         // Try gtk-launch first for desktop applications
         if !self.terminal && Path::new("/usr/bin/gtk-launch").exists() && !self.id.is_empty() {
-            let mut cmd = app_command("/usr/bin/gtk-launch", &[self.id.clone()]);
+            let mut cmd = app_command("/usr/bin/gtk-launch", std::slice::from_ref(&self.id));
             cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
@@ -302,7 +302,7 @@ pub fn load_all_desktop_apps() -> Vec<DesktopApp> {
         }
     }
 
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    apps.sort_by_key(|a| a.name.to_lowercase());
     apps
 }
 

@@ -1,7 +1,6 @@
 pub mod anim;
 pub mod apps;
 pub mod clipboard;
-pub mod colorpicker;
 pub mod config;
 pub mod depth;
 pub mod emoji;
@@ -21,9 +20,8 @@ pub mod wallpaper;
 pub use anim::{AnimationCurve, SpringAnimation};
 pub use apps::{DesktopApp, load_all_desktop_apps, search_apps};
 pub use clipboard::{ClipboardItem, ClipboardStore};
-pub use colorpicker::ColorSample;
 pub use config::Config;
-pub use depth::{DepthStatus, get_depth_status, generate_depth, clear_depth};
+pub use depth::{DepthStatus, get_depth_status, clear_depth};
 pub use emoji::{EmojiItem, load_emojis, search_emojis};
 pub use files::{FileResult, search_files};
 pub use ipc::{IpcCommand, IpcResponse, get_socket_path, get_notif_socket_path, get_osd_socket_path, get_ui_socket_path, NotifOverlayMessage, UiCommand};

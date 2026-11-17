@@ -45,6 +45,54 @@ pub enum Action {
     RebuildIndex,
     DepthGenerate,
     DepthClear,
+    DepthInstallCpu,
+    DepthInstallGpu,
+}
+
+/// Title of the row whose subtitle is the live depth-runtime status.
+const DEPTH_STATUS_ROW: &str = "Status & Device";
+
+/// Last `wallpaper-depth.py status`, shown as that row's subtitle (QML DepthService).
+static DEPTH_STATUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// Set when DEPTH_STATUS or INDEX_LAST changed and the view has not redrawn since.
+static DEPTH_STATUS_NEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Title of the file-index row; its subtitle ends with the last index time (QML IndexService).
+const INDEX_ROW: &str = "Rebuild File Index";
+static INDEX_LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Read the plocate database time in the background (no I/O on the render path).
+fn refresh_index_time(waker: Waker) {
+    std::thread::spawn(move || {
+        *INDEX_LAST.lock().unwrap() = prism_common::files::last_indexed();
+        DEPTH_STATUS_NEW.store(true, std::sync::atomic::Ordering::SeqCst);
+        waker.wake();
+    });
+}
+
+/// Query the depth runtime in the background; `waker` redraws when it is known.
+fn refresh_depth_status(waker: Waker) {
+    std::thread::spawn(move || {
+        let text = match prism_common::depth::script()
+            .and_then(|s| std::process::Command::new("python3").arg(s).arg("status").output().ok())
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+        {
+            Some(v) => {
+                let installed = v["installed"].as_bool().unwrap_or(false);
+                let device = if v["gpuInstalled"].as_bool().unwrap_or(false) { "GPU (CUDA)" } else { "CPU" };
+                let cache = v["cacheSizeFormatted"].as_str().unwrap_or("0 B");
+                if installed {
+                    format!("Status: Ready \u{2022} Device: {device} \u{2022} Cache: {cache}")
+                } else {
+                    format!("Status: Not installed \u{2022} Cache: {cache}")
+                }
+            }
+            None => "Status: wallpaper-depth.py unavailable".into(),
+        };
+        *DEPTH_STATUS.lock().unwrap() = text;
+        DEPTH_STATUS_NEW.store(true, std::sync::atomic::Ordering::SeqCst);
+        waker.wake();
+    });
 }
 
 enum Control {
@@ -64,6 +112,22 @@ struct Row {
     subtitle: &'static str,
     control: Control,
     visible: fn(&Config) -> bool,
+}
+
+/// A row's subtitle; the depth status row shows the last runtime status.
+fn row_subtitle(r: &Row) -> std::borrow::Cow<'static, str> {
+    if r.title == DEPTH_STATUS_ROW {
+        let s = DEPTH_STATUS.lock().unwrap();
+        if !s.is_empty() {
+            return s.clone().into();
+        }
+    }
+    if r.title == INDEX_ROW {
+        if let Some(t) = INDEX_LAST.lock().unwrap().as_ref() {
+            return format!("{} \u{2022} Last indexed: {t}", r.subtitle).into();
+        }
+    }
+    r.subtitle.into()
 }
 
 impl Control {
@@ -126,6 +190,8 @@ fn rows() -> Vec<Row> {
             control: Combo { options: || opts(&[("awww", "awww"), ("swww", "swww")]), get: |c| c.wallpaper_daemon.clone(), set: |c, v| c.wallpaper_daemon = v.to_string(), fonts: false } },
         Row { tab: 0, title: "Wallpaper Depth", subtitle: "Makes desktop widgets pass behind wallpaper foregrounds.", visible: always,
             control: Switch(|c| c.depth_enabled, |c, v| c.depth_enabled = v) },
+        Row { tab: 0, title: DEPTH_STATUS_ROW, subtitle: "Status: checking\u{2026}", visible: |c| c.depth_enabled,
+            control: Buttons(&[("Install CPU (~120 MB)", Action::DepthInstallCpu, ButtonKind::Primary), ("Install GPU support (~1.5 GB)", Action::DepthInstallGpu, ButtonKind::Primary)]) },
         Row { tab: 0, title: "Compute Device", subtitle: "Execution provider for neural depth estimation.", visible: |c| c.depth_enabled,
             control: Combo { options: || opts(&[("CPU", "cpu"), ("GPU (CUDA)", "cuda")]), get: |c| c.depth_device.clone(), set: |c, v| c.depth_device = v.to_string(), fonts: false } },
         Row { tab: 0, title: "Generate automatically", subtitle: "Generate the mask when the wallpaper or parameters change.", visible: |c| c.depth_enabled,
@@ -335,12 +401,20 @@ pub struct SettingsView {
     pick_rx: Receiver<Result<Option<std::path::PathBuf>, String>>,
     /// Pending request to lower (true) or restore (false) the window around the dialog.
     layer_request: Option<bool>,
+    /// True while a polkit dialog is up: the window is lowered and drawn empty so the dialog
+    /// is reachable (it comes back when the dialog closes).
+    hidden: bool,
+    hide_rx: Receiver<bool>,
+    hide_tx: std::sync::mpsc::Sender<bool>,
 }
 
 impl SettingsView {
     pub fn new(config: &Config, waker: Waker) -> Self {
         let (bg_tx, bg_rx) = std::sync::mpsc::channel();
         let (pick_tx, pick_rx) = std::sync::mpsc::channel();
+        let (hide_tx, hide_rx) = std::sync::mpsc::channel();
+        refresh_depth_status(waker.clone());
+        refresh_index_time(waker.clone());
         SettingsView {
             rows: rows(),
             baseline: config.clone(),
@@ -375,12 +449,22 @@ impl SettingsView {
             pick_tx,
             pick_rx,
             layer_request: None,
+            hidden: false,
+            hide_rx,
+            hide_tx,
         }
     }
 
     /// Results of background jobs; true if a redraw is needed.
     pub fn poll(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = DEPTH_STATUS_NEW.swap(false, std::sync::atomic::Ordering::SeqCst);
+        for hide in self.hide_rx.try_iter() {
+            if hide != self.hidden {
+                self.hidden = hide;
+                self.layer_request = Some(hide);
+                changed = true;
+            }
+        }
         for m in self.bg_rx.try_iter() {
             self.message = Some(m);
             changed = true;
@@ -557,7 +641,8 @@ impl SettingsView {
         let mut heights = Vec::with_capacity(visible.len());
         for (k, &i) in visible.iter().enumerate() {
             let r = &self.rows[i];
-            let th = 20.0 + if r.subtitle.is_empty() { 0.0 } else { 4.0 + wrapped(cr, r.subtitle, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_)) { list.w } else { text_w }, None) };
+            let sub = row_subtitle(r);
+            let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_)) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
                 Control::Buttons(_) => th + 12.0 + 34.0,
                 _ => th.max(36.0),
@@ -626,9 +711,10 @@ impl SettingsView {
                 draw_in_box(cr, "\u{21BA}", &TextStyle { family: &p.family, px: 16.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, a) }, rr.x, rr.y, rr.w, rr.h, Align::Center);
                 self.hits.push((Hit::Reset(i), rr));
             }
-            if !r.subtitle.is_empty() {
+            let sub = row_subtitle(r);
+            if !sub.is_empty() {
                 let sw = if matches!(r.control, Control::Buttons(_)) { list.w } else { text_w };
-                wrapped(cr, r.subtitle, &TextStyle { family: &p.family, px: 12.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) }, sw, Some((list.x, ry + 24.0)));
+                wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) }, sw, Some((list.x, ry + 24.0)));
             }
             let cx = list.x + list.w - CONTROL_W;
             let mid = y + h / 2.0;
@@ -1168,6 +1254,11 @@ impl SettingsView {
         });
     }
 
+    /// True while the window is hidden for a polkit dialog.
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+
     /// Some(true): lower the window for a dialog; Some(false): restore it.
     pub fn take_layer_request(&mut self) -> Option<bool> {
         self.layer_request.take()
@@ -1293,18 +1384,55 @@ impl SettingsView {
             }
             Action::RebuildIndex => {
                 self.message = Some(("Rebuilding file index…".into(), true));
-                self.spawn_job(|| match std::process::Command::new("pkexec").arg("updatedb").status() {
-                    Ok(s) if s.success() => ("File index rebuilt".into(), true),
-                    Ok(_) => ("Index rebuild cancelled or failed".into(), false),
-                    Err(e) => (format!("pkexec unavailable: {}", e), false),
+                let waker = self.waker.clone();
+                // Hide the window while the polkit dialog is up; show it again once it closes.
+                self.hidden = true;
+                self.layer_request = Some(true);
+                let (hide_tx, hide_waker) = (self.hide_tx.clone(), self.waker.clone());
+                self.spawn_job(move || {
+                    let restore = move || {
+                        let _ = hide_tx.send(false);
+                        hide_waker.wake();
+                    };
+                    let r = match prism_common::files::rebuild_index(restore) {
+                        Ok(()) => ("Index updated".into(), true),
+                        Err(e) => (e, false),
+                    };
+                    refresh_index_time(waker);
+                    r
                 });
             }
             Action::DepthGenerate => {
                 self.message = Some(("Generating depth mask…".into(), true));
-                let wp = std::path::PathBuf::from(format!("{}/.wa.jpg", std::env::var("HOME").unwrap_or_default()));
-                self.spawn_job(move || match prism_common::depth::generate_depth(&wp) {
-                    Ok(m) => (m, true),
+                // prismd's depth worker generates and publishes the mask for the desktop.
+                let cmd = prism_common::IpcCommand::Depth(prism_common::ipc::DepthAction::Generate);
+                self.spawn_job(move || match prism_common::ipc::request(&cmd) {
+                    Ok(_) => ("Generating depth mask; the widgets update when it is ready".into(), true),
                     Err(e) => (format!("Depth generation failed: {}", e), false),
+                });
+            }
+            Action::DepthInstallCpu | Action::DepthInstallGpu => {
+                let gpu = action == Action::DepthInstallGpu;
+                self.message = Some((if gpu { "Installing GPU depth runtime (~1.5 GB)\u{2026}" } else { "Installing CPU depth runtime (~120 MB)\u{2026}" }.into(), true));
+                let waker = self.waker.clone();
+                self.spawn_job(move || {
+                    let r = match prism_common::depth::script() {
+                        None => ("wallpaper-depth.py not found".into(), false),
+                        Some(script) => {
+                            let mut c = std::process::Command::new("python3");
+                            c.arg(script).arg("install");
+                            if gpu {
+                                c.arg("--gpu");
+                            }
+                            match c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+                                Ok(s) if s.success() => ("Depth runtime installed".into(), true),
+                                Ok(_) => ("Depth runtime install failed".into(), false),
+                                Err(e) => (format!("Depth runtime install failed: {e}"), false),
+                            }
+                        }
+                    };
+                    refresh_depth_status(waker);
+                    r
                 });
             }
             Action::DepthClear => {

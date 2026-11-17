@@ -103,7 +103,7 @@ pub fn fit_px(cr: *mut Cairo, text: &str, st: &TextStyle, bw: f64, bh: f64, min_
 
 impl<'a> Clone for TextStyle<'a> {
     fn clone(&self) -> Self {
-        TextStyle { family: self.family, px: self.px, bold: self.bold, color: self.color }
+        *self
     }
 }
 impl<'a> Copy for TextStyle<'a> {}

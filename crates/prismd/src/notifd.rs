@@ -149,7 +149,7 @@ fn normalise(
     let desktop_entry = string_hint("desktop-entry").unwrap_or_default();
 
     // Picture: image-data (raw pixels) > image-path > app_icon when it is a file.
-    let mut image = ["image-data", "image_data", "icon_data"].iter().find_map(|k| hints.get(*k)).and_then(|v| save_image_data(v));
+    let mut image = ["image-data", "image_data", "icon_data"].iter().find_map(|k| hints.get(*k)).and_then(save_image_data);
     if image.is_none() {
         image = string_hint("image-path").or_else(|| string_hint("image_path")).and_then(|p| file_path(&p));
     }

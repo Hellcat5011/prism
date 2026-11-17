@@ -141,7 +141,80 @@ def format_combo(mods_str, key_str):
     return key
 
 
+PRISM_NAMES = {
+    "launcher toggle": "App Launcher",
+    "launcher open": "Open App Launcher",
+    "search toggle": "Spotlight Search",
+    "search open": "Open Spotlight Search",
+    "keybinds toggle": "Keybind Viewer",
+    "keybinds open": "Open Keybind Viewer",
+    "lock lock": "Lock Screen",
+    "power lock": "Lock Screen",
+    "power toggle": "Power Menu",
+    "power logout": "Log Out",
+    "power suspend": "Suspend",
+    "power reboot": "Reboot",
+    "power shutdown": "Shut Down",
+    "wallpaper toggle": "Wallpaper Picker",
+    "wallpaper open": "Open Wallpaper Picker",
+    "colorpicker pick": "Color Picker",
+    "colorpicker toggle": "Color Picker",
+    "colorpicker open": "Color Picker",
+    "clipboard toggle": "Clipboard History",
+    "clipboard open": "Clipboard History",
+    "emoji toggle": "Emoji Picker",
+    "notif toggle": "Notification Center",
+    "notif open": "Notification Center",
+    "notif silent": "Toggle Do Not Disturb",
+    "settings toggle": "Settings",
+    "desktop edit": "Desktop Edit Mode",
+    "edit-mode open": "Desktop Edit Mode",
+    "bluelight toggle": "Blue Light Filter",
+    "bluelight manual_toggle": "Blue Light Filter (Manual)",
+    "caffeinate on": "Caffeinate On",
+    "caffeinate off": "Caffeinate Off",
+    "network toggle-wifi": "Toggle Wi-Fi",
+    "bluetooth toggle": "Toggle Bluetooth",
+}
+
+PRISM_MEDIA = {
+    "play-pause": "Play / Pause",
+    "next": "Next Track",
+    "prev": "Previous Track",
+    "stop": "Stop Playback",
+}
+
+
+def prism_ctl_label(c):
+    """Label and section for a prism-ctl command, or None."""
+    low = c.lower()
+    if re.search(r"\b(killall|pkill)\b.*\bprism(d|-ui)\b", low) or re.search(r"systemctl\s+--user\s+restart\s+prismd", low):
+        return "Restart Shell", "Session & System"
+    m = re.search(r"\bprism-ctl\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?", c)
+    if not m:
+        return None
+    target = m.group(1).lower()
+    action = (m.group(2) or "toggle").lower()
+    arg = m.group(3) or ""
+    if target == "osd" and action in ("volume", "brightness"):
+        kind = action.capitalize()
+        if arg.lower() == "mute":
+            return "Mute Audio", "Media & Hardware"
+        if arg[:1] in "+-" and arg:
+            return f"{kind} {arg[0]}{arg[1:].rstrip('%')}%", "Media & Hardware"
+        return f"Set {kind}", "Media & Hardware"
+    if target == "media":
+        return PRISM_MEDIA.get(action, "Media " + action), "Media & Hardware"
+    key = f"{target} {action}"
+    if key in PRISM_NAMES:
+        return PRISM_NAMES[key], "Shell"
+    return f"{target.capitalize()} → {action}", "Shell"
+
+
 def human_cmd(cmd):
+    prism = prism_ctl_label(cmd.strip())
+    if prism:
+        return prism
     c = cmd.strip()
     m = re.search(r"\b(?:qs|quickshell)\b.*?\bipc\s+call\s+(\w+)\s+(\w+)", c)
     if m:

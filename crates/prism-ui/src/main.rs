@@ -14,6 +14,7 @@ mod keybinds;
 mod launcher;
 mod nc;
 mod osd;
+mod picker;
 mod power;
 mod portal;
 mod settings;
@@ -124,7 +125,8 @@ struct UiState {
     /// Current main-surface rectangle in screen coordinates (x, y, w, h).
     surf_rect: (i32, i32, i32, i32),
     /// Screen-space origin of the surface the pointer is currently over.
-    pointer_origin: (i32, i32),
+    /// True while the pointer is over the scrim (at the screen origin), false over the card.
+    pointer_on_scrim: bool,
     /// True while the last drawn frame was mid-animation (another frame is wanted).
     animating: bool,
     last_frame_at: Option<std::time::Instant>,
@@ -419,14 +421,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
             wl_pointer::Event::Enter { serial, surface, surface_x, surface_y } => {
                 state.pointer_serial = serial;
                 // Pointer coordinates are kept in screen space. The scrim covers the screen at
-                // (0, 0); the card surface sits at surf_rect's origin.
-                state.pointer_origin = if state.scrim_surface.as_ref() == Some(&surface) {
-                    (0, 0)
-                } else {
-                    (state.surf_rect.0, state.surf_rect.1)
-                };
-                state.pointer_x = surface_x as i32 + state.pointer_origin.0;
-                state.pointer_y = surface_y as i32 + state.pointer_origin.1;
+                // (0, 0); the card surface sits at surf_rect's origin, read on every event
+                // because the card can move or resize after the pointer entered it.
+                state.pointer_on_scrim = state.scrim_surface.as_ref() == Some(&surface);
+                let (ox, oy) = state.pointer_origin();
+                state.pointer_x = surface_x as i32 + ox;
+                state.pointer_y = surface_y as i32 + oy;
                 state.set_cursor_shape(qh, CursorShape::Default);
             }
             wl_pointer::Event::Leave { .. } => {
@@ -435,9 +435,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                 }
             }
             wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
-                state.pointer_x = surface_x as i32 + state.pointer_origin.0;
-                state.pointer_y = surface_y as i32 + state.pointer_origin.1;
-                let (px, py) = state.design_point(surface_x + state.pointer_origin.0 as f64, surface_y + state.pointer_origin.1 as f64);
+                let (ox, oy) = state.pointer_origin();
+                state.pointer_x = surface_x as i32 + ox;
+                state.pointer_y = surface_y as i32 + oy;
+                let (px, py) = state.design_point(surface_x + ox as f64, surface_y + oy as f64);
                 if let Some(sv) = state.settings.as_mut() {
                     if sv.motion(px, py, state.pointer_down) {
                         state.render_and_commit(qh);
@@ -464,6 +465,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
 
                 state.set_cursor_shape(qh, CursorShape::Default);
             }
+            // Hidden Settings (polkit dialog up): the scrim must not close it on a click.
+            wl_pointer::Event::Button { .. } if state.settings_hidden() => {}
             wl_pointer::Event::Button { button, state: btn_state, .. } => {
                 match btn_state {
                     WEnum::Value(wl_pointer::ButtonState::Pressed) if state.wallpaper.is_some() => {
@@ -524,13 +527,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                                 UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds
                             );
 
-                            if is_modal && cw > 0 && ch > 0 {
-                                if state.pointer_x < cx || state.pointer_x >= cx + cw ||
-                                   state.pointer_y < cy || state.pointer_y >= cy + ch {
+                            if is_modal && cw > 0 && ch > 0
+                                && (state.pointer_x < cx || state.pointer_x >= cx + cw ||
+                                   state.pointer_y < cy || state.pointer_y >= cy + ch) {
                                     eprintln!("[prism-ui] Click outside modal detected ({}, {}), dismissing.", state.pointer_x, state.pointer_y);
                                     state.exit_requested = true;
                                 }
-                            }
                         }
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
@@ -574,9 +576,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                     state.apply_wallpaper_effect(eff, qh);
                     return;
                 }
-                match &state.mode {
-                    _ => {}
-                }
+                {}
             }
             _ => {}
         }
@@ -775,7 +775,7 @@ fn create_buffer_slot(
     size: usize,
 ) -> Option<BufferSlot> {
     unsafe {
-        let fd = libc::memfd_create(b"prism-ui-shm\0".as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC);
+        let fd = libc::memfd_create(c"prism-ui-shm".as_ptr(), libc::MFD_CLOEXEC);
         if fd < 0 {
             return None;
         }
@@ -985,6 +985,9 @@ impl UiState {
                 (((sw - w) / 2.0).round() as i32, ((sh - h) / 2.0).round() as i32, w as i32, h as i32)
             }
             UiMode::Emoji => centered(emoji::CARD_W, emoji::CARD_H),
+            // Hidden for a polkit dialog: a 1x1 transparent surface (a full-size transparent
+            // card would still show the compositor blur).
+            UiMode::Settings if self.settings_hidden() => (0, 0, 1, 1),
             UiMode::Settings => centered(settings::CARD_W, settings::CARD_H),
             UiMode::NotificationCenter => {
                 let c = nc::card_rect(&self.config.notification_center_position, sw, sh);
@@ -1011,6 +1014,20 @@ impl UiState {
     fn design_card(&self) -> desktop::layout::Rect {
         let (x, y, w, h) = self.design_card_rect();
         desktop::layout::Rect { x: x as f64, y: y as f64, w: w as f64, h: h as f64 }
+    }
+
+    /// Settings is hidden while a polkit dialog it started is open.
+    fn settings_hidden(&self) -> bool {
+        self.settings.as_ref().is_some_and(|s| s.hidden())
+    }
+
+    /// Screen position of the surface the pointer is over.
+    fn pointer_origin(&self) -> (i32, i32) {
+        if self.pointer_on_scrim {
+            (0, 0)
+        } else {
+            (self.surf_rect.0, self.surf_rect.1)
+        }
     }
 
     /// Screen position to design pixels (what views use for hit tests).
@@ -1248,7 +1265,7 @@ impl UiState {
                 if pose.done && !self.closing {
                     self.transition = None;
                 }
-                if let Some((img, _, _)) = self.card_cache {
+                if let (Some((img, _, _)), false) = (self.card_cache, self.settings_hidden()) {
                     let out = cairo_backend::cairo_create(cairo_surface);
                     cairo_backend::cairo_translate(out, pose.tx * ui_scale, pose.ty * ui_scale);
                     let scaled = (pose.scale - 1.0).abs() > 1e-3;
@@ -1270,7 +1287,7 @@ impl UiState {
                     cairo_backend::cairo_destroy(out);
                 }
                 // Fade the scrim with the card; applied after drawing (see draw_frame).
-                self.scrim_pending = Some(pose.shown.clamp(0.0, 1.0));
+                self.scrim_pending = Some(if self.settings_hidden() { 0.0 } else { pose.shown.clamp(0.0, 1.0) });
                 if self.closing && pose.done {
                     self.exit_requested = true;
                 }
@@ -1512,7 +1529,7 @@ impl Overlay {
             scrim_configured: false,
             card_surface: false,
             surf_rect: (0, 0, 0, 0),
-            pointer_origin: (0, 0),
+            pointer_on_scrim: false,
             animating: false,
             last_frame_at: None,
             frame_dt: 1.0 / 60.0,
@@ -1680,29 +1697,26 @@ impl Overlay {
         }
 
         let mut timeout_ms: i32 = -1;
-        match state.mode {
-            UiMode::Osd { .. } => {
-                let update = state.osd_rx.as_ref().and_then(|rx| rx.try_iter().last());
-                let style = state.style.clone();
-                let mut redraw = false;
-                if let Some(v) = state.osd.as_mut() {
-                    if let Some((kind, value)) = update {
-                        v.update(&kind, value * 100.0, &style);
-                        redraw = true;
-                    }
-                    if let Some(wait) = v.tick(&style) {
-                        timeout_ms = (wait.as_millis() as i32).max(1);
-                    } else if v.finished() {
-                        state.exit_requested = true;
-                    } else if v.animating() {
-                        redraw = true;
-                    }
+        if let UiMode::Osd { .. } = state.mode {
+            let update = state.osd_rx.as_ref().and_then(|rx| rx.try_iter().last());
+            let style = state.style.clone();
+            let mut redraw = false;
+            if let Some(v) = state.osd.as_mut() {
+                if let Some((kind, value)) = update {
+                    v.update(&kind, value * 100.0, &style);
+                    redraw = true;
                 }
-                if redraw && !state.exit_requested {
-                    state.render_and_commit(&qh);
+                if let Some(wait) = v.tick(&style) {
+                    timeout_ms = (wait.as_millis() as i32).max(1);
+                } else if v.finished() {
+                    state.exit_requested = true;
+                } else if v.animating() {
+                    redraw = true;
                 }
             }
-            _ => {}
+            if redraw && !state.exit_requested {
+                state.render_and_commit(&qh);
+            }
         }
         if let Some((key, at)) = state.repeat {
             if now >= at && state.repeat_rate > 0 {
@@ -1903,6 +1917,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     // Notification popups: one stack for the whole process (toasts.rs).
     let mut toasts = toasts::Toasts::new(&conn, &globals);
     let mut caffeinate = caffeinate::Caffeinate::new(&conn);
+    let mut picker: Option<picker::Picker> = None;
     if let (Some(t), Some(msg)) = (toasts.as_mut(), toast) {
         t.handle(msg);
     }
@@ -1911,6 +1926,21 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         for cmd in cmd_rx.try_iter() {
             if let prism_common::UiCommand::Caffeinate(on) = cmd {
                 caffeinate.set(on, &globals);
+                continue;
+            }
+            if let prism_common::UiCommand::ColorPicker(what) = &cmd {
+                let open = picker.as_ref().map(|p| !p.finished()).unwrap_or(false);
+                match (what.as_str(), open) {
+                    ("close", true) | ("toggle", true) => picker.as_mut().unwrap().close(),
+                    ("open", false) | ("toggle", false) => {
+                        // Modal cards would be frozen into the screenshot: close them first.
+                        for o in overlays.iter_mut().filter(|o| o.is_modal()) {
+                            o.close();
+                        }
+                        picker = picker::Picker::open(&conn, &globals);
+                    }
+                    _ => {}
+                }
                 continue;
             }
             handle_command(cmd, &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
@@ -1936,6 +1966,13 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             let t = d.tick();
             if t >= 0 && (timeout < 0 || t < timeout) {
                 timeout = t;
+            }
+        }
+        if let Some(p) = picker.as_mut() {
+            if !p.tick() {
+                if let Some(p) = picker.take() {
+                    p.teardown();
+                }
             }
         }
         if let Some(t) = toasts.as_mut() {
@@ -1969,6 +2006,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             ok &= t.dispatch();
         }
         ok &= caffeinate.dispatch();
+        if let Some(p) = picker.as_mut() {
+            ok &= p.dispatch();
+        }
         if !ok {
             eprintln!("[prism-ui] Wayland connection error (protocol error: {:?})", conn.protocol_error());
             break;
@@ -2017,6 +2057,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             t.dispatch();
         }
         caffeinate.dispatch();
+        if let Some(p) = picker.as_mut() {
+            p.dispatch();
+        }
     }
     for o in overlays.drain(..) {
         o.teardown();
@@ -2089,8 +2132,8 @@ fn handle_command(
                 t.handle(msg);
             }
         }
-        // Handled by the run loop (it owns the inhibitor).
-        UiCommand::Caffeinate(_) => {}
+        // Handled by the run loop (it owns the inhibitor and the picker).
+        UiCommand::Caffeinate(_) | UiCommand::ColorPicker(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

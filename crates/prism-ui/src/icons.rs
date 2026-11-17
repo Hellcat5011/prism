@@ -49,11 +49,7 @@ impl DirInfo {
             DirKind::Scalable => {
                 if size < self.min {
                     self.min - size
-                } else if size > self.max {
-                    size - self.max
-                } else {
-                    0
-                }
+                } else { size.saturating_sub(self.max) }
             }
             DirKind::Threshold => {
                 if size + self.threshold < self.size {

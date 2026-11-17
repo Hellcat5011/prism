@@ -54,13 +54,28 @@ pub fn color_temp_to_rgb(kelvin: f64) -> (f64, f64, f64) {
 /// Retry interval for outputs whose gamma control failed (another client held it).
 const RETRY: Duration = Duration::from_secs(10);
 
+/// What the gamma thread should show: a colour temperature (blue light) and a brightness
+/// factor (idle dim). Both end up in one ramp per output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Msg {
+    Temp(Option<u32>),
+    Dim(f64),
+}
+
+#[derive(Clone)]
 pub struct GammaHandle {
-    tx: wake::Sender<Option<u32>>,
+    tx: wake::Sender<Msg>,
 }
 
 impl GammaHandle {
+    /// Colour temperature, or None for neutral.
     pub fn set(&self, kelvin: Option<u32>) {
-        self.tx.send(kelvin);
+        self.tx.send(Msg::Temp(kelvin));
+    }
+
+    /// Brightness factor 0..1 (1 = normal); used to dim the screens before auto-lock.
+    pub fn dim(&self, factor: f64) {
+        self.tx.send(Msg::Dim(factor.clamp(0.05, 1.0)));
     }
 }
 
@@ -69,14 +84,51 @@ struct Output {
     name: String,
     control: Option<ZwlrGammaControlV1>,
     size: u32,
-    applied: Option<u32>,
+    applied: Option<Look>,
     failed_at: Option<Instant>,
+}
+
+/// The ramp an output shows: temperature in K and brightness in per-mille.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Look {
+    kelvin: u32,
+    dim: u16,
 }
 
 struct State {
     manager: Option<ZwlrGammaControlManagerV1>,
     outputs: HashMap<u32, Output>,
     target: Option<u32>,
+    dim: f64,
+}
+
+impl State {
+    /// None = release gamma control (neutral and not dimmed).
+    fn wanted(&self) -> Option<Look> {
+        let dim = (self.dim * 1000.0).round() as u16;
+        match (self.target, dim >= 1000) {
+            (None, true) => None,
+            (k, _) => Some(Look { kelvin: k.unwrap_or(6500), dim: dim.min(1000) }),
+        }
+    }
+}
+
+/// What the thread keeps across reconnects.
+#[derive(Clone, Copy)]
+struct Wanted {
+    target: Option<u32>,
+    dim: f64,
+}
+
+impl Wanted {
+    fn take(&mut self, msgs: Vec<Msg>) {
+        for m in msgs {
+            match m {
+                Msg::Temp(k) => self.target = k,
+                Msg::Dim(d) => self.dim = d,
+            }
+        }
+    }
 }
 
 /// Starts the gamma thread; None without Wayland. The thread survives compositor restarts:
@@ -86,9 +138,9 @@ pub fn start() -> Option<GammaHandle> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("WAYLAND_SOCKET").is_none() {
         return None;
     }
-    let (tx, rx) = wake::channel::<Option<u32>>();
+    let (tx, rx) = wake::channel::<Msg>();
     thread::spawn(move || {
-        let mut target: Option<u32> = None;
+        let mut target = Wanted { target: None, dim: 1.0 };
         let mut last_error = String::new();
         loop {
             if let Err(e) = session(&rx, &mut target) {
@@ -107,32 +159,29 @@ pub fn start() -> Option<GammaHandle> {
 const RECONNECT: Duration = Duration::from_secs(2);
 
 /// One connection's lifetime. Err when the connection is lost or cannot be made.
-fn session(rx: &wake::Receiver<Option<u32>>, target: &mut Option<u32>) -> Result<(), String> {
+fn session(rx: &wake::Receiver<Msg>, target: &mut Wanted) -> Result<(), String> {
     let conn = Connection::connect_to_env().map_err(|e| format!("cannot connect to Wayland: {e}"))?;
     let mut queue: EventQueue<State> = conn.new_event_queue();
     let qh = queue.handle();
     let _registry = conn.display().get_registry(&qh, ());
-    let mut st = State { manager: None, outputs: HashMap::new(), target: *target };
+    let mut st = State { manager: None, outputs: HashMap::new(), target: target.target, dim: target.dim };
     queue.roundtrip(&mut st).map_err(|e| format!("registry roundtrip failed: {e}"))?;
     if st.manager.is_none() {
         eprintln!("[prismd/gamma] compositor lacks zwlr_gamma_control_manager_v1; blue light unavailable");
         // Keep draining requests so senders never block on anything.
         loop {
-            if let Some(last) = rx.drain().into_iter().last() {
-                *target = last;
-            }
+            target.take(rx.drain());
             wake::dispatch(&mut queue, &mut st, rx.fd(), -1).map_err(|e| format!("Wayland connection lost: {e}"))?;
         }
     }
     eprintln!("[prismd/gamma] connected");
     loop {
-        if let Some(last) = rx.drain().into_iter().last() {
-            st.target = last;
-        }
-        *target = st.target;
+        target.take(rx.drain());
+        st.target = target.target;
+        st.dim = target.dim;
         st.sync(&qh);
         let retry_pending = st.outputs.values().any(|o| o.failed_at.is_some());
-        let timeout = if retry_pending && st.target.is_some() { RETRY.as_millis() as i32 } else { -1 };
+        let timeout = if retry_pending && st.wanted().is_some() { RETRY.as_millis() as i32 } else { -1 };
         wake::dispatch(&mut queue, &mut st, rx.fd(), timeout).map_err(|e| format!("Wayland connection lost: {e}"))?;
     }
 }
@@ -141,8 +190,9 @@ impl State {
     /// Bring every output in line with `target`.
     fn sync(&mut self, qh: &QueueHandle<State>) {
         let Some(manager) = self.manager.clone() else { return };
+        let wanted = self.wanted();
         for (id, o) in self.outputs.iter_mut() {
-            match self.target {
+            match wanted {
                 None => {
                     if let Some(c) = o.control.take() {
                         c.destroy();
@@ -168,13 +218,16 @@ impl State {
     }
 }
 
-fn apply(o: &mut Output, kelvin: u32) {
+fn apply(o: &mut Output, look: Look) {
+    let kelvin = look.kelvin;
+    let dim = look.dim as f64 / 1000.0;
     let Some(control) = &o.control else { return };
     let size = o.size as usize;
     if size < 2 {
         return;
     }
     let (rm, gm, bm) = color_temp_to_rgb(kelvin as f64);
+    let (rm, gm, bm) = (rm * dim, gm * dim, bm * dim);
     let mut ramp: Vec<u16> = Vec::with_capacity(size * 3);
     for mult in [rm, gm, bm] {
         ramp.extend((0..size).map(|i| (i as f64 / (size - 1) as f64 * mult * u16::MAX as f64).round() as u16));
@@ -192,8 +245,12 @@ fn apply(o: &mut Output, kelvin: u32) {
         return;
     }
     control.set_gamma(file.as_fd());
-    o.applied = Some(kelvin);
-    eprintln!("[prismd/gamma] {} -> {kelvin}K", o.name);
+    o.applied = Some(look);
+    if look.dim < 1000 {
+        eprintln!("[prismd/gamma] {} -> {kelvin}K, dimmed to {}%", o.name, look.dim / 10);
+    } else {
+        eprintln!("[prismd/gamma] {} -> {kelvin}K", o.name);
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -239,7 +296,7 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for State {
 
 impl Dispatch<ZwlrGammaControlV1, u32> for State {
     fn event(st: &mut Self, control: &ZwlrGammaControlV1, event: zwlr_gamma_control_v1::Event, id: &u32, _: &Connection, _: &QueueHandle<Self>) {
-        let target = st.target;
+        let target = st.wanted();
         let Some(o) = st.outputs.get_mut(id) else { return };
         if o.control.as_ref() != Some(control) {
             return; // a control we already replaced
@@ -280,5 +337,25 @@ mod tests {
         }
         // Warmer means less blue.
         assert!(color_temp_to_rgb(3000.0).2 < color_temp_to_rgb(6500.0).2);
+    }
+}
+
+#[cfg(test)]
+mod dim_tests {
+    use super::*;
+
+    fn st(target: Option<u32>, dim: f64) -> State {
+        State { manager: None, outputs: HashMap::new(), target, dim }
+    }
+
+    #[test]
+    fn temperature_and_dim_share_one_ramp() {
+        assert_eq!(st(None, 1.0).wanted(), None); // neutral: release gamma control
+        assert_eq!(st(Some(4500), 1.0).wanted(), Some(Look { kelvin: 4500, dim: 1000 }));
+        assert_eq!(st(None, 0.3).wanted(), Some(Look { kelvin: 6500, dim: 300 }));
+        assert_eq!(st(Some(4500), 0.3).wanted(), Some(Look { kelvin: 4500, dim: 300 }));
+        let mut w = Wanted { target: Some(4500), dim: 1.0 };
+        w.take(vec![Msg::Dim(0.3), Msg::Temp(None)]);
+        assert_eq!((w.target, w.dim), (None, 0.3));
     }
 }

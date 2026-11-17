@@ -40,10 +40,9 @@ pub struct BlueLight {
 }
 
 impl BlueLight {
-    pub fn start(cfg: &Config) -> BlueLight {
+    pub fn start(cfg: &Config, gamma: Option<gamma::GammaHandle>) -> BlueLight {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(BlueLightStatus::default()));
-        let gamma = gamma::start();
         let thread_status = Arc::clone(&status);
         let thread_tx = tx.clone();
         let cfg = cfg.clone();

@@ -33,16 +33,29 @@ struct IdleState {
     notifier: Option<ExtIdleNotifierV1>,
     seat: Option<wl_seat::WlSeat>,
     notification: Option<ExtIdleNotificationV1>,
+    /// Fires 30 s before the lock (QML dimIdleMonitor).
+    dim_notification: Option<ExtIdleNotificationV1>,
     settings: IdleSettings,
     is_idle: Arc<AtomicBool>,
     on_idle: Arc<dyn Fn() + Send + Sync>,
+    on_dim: Arc<dyn Fn(bool) + Send + Sync>,
 }
+
+/// User data of the idle notifications.
+const LOCK: u8 = 0;
+const DIM: u8 = 1;
+/// The screens dim this long before the lock.
+const DIM_LEAD_SECS: u32 = 30;
 
 impl IdleState {
     /// (Re)create the idle notification for the current settings.
     fn rearm(&mut self, qh: &QueueHandle<Self>) {
         if let Some(n) = self.notification.take() {
             n.destroy();
+        }
+        if let Some(n) = self.dim_notification.take() {
+            n.destroy();
+            (self.on_dim)(false);
         }
         self.is_idle.store(false, Ordering::SeqCst);
         if !self.settings.auto_lock {
@@ -52,7 +65,9 @@ impl IdleState {
         if let (Some(notifier), Some(seat)) = (&self.notifier, &self.seat) {
             let ms = self.settings.timeout_mins.max(1).saturating_mul(60_000);
             eprintln!("[prismd/idle] auto-lock after {} min", self.settings.timeout_mins.max(1));
-            self.notification = Some(notifier.get_idle_notification(ms, seat, qh, ()));
+            self.notification = Some(notifier.get_idle_notification(ms, seat, qh, LOCK));
+            let dim_ms = ms.saturating_sub(DIM_LEAD_SECS * 1000).max(1000);
+            self.dim_notification = Some(notifier.get_idle_notification(dim_ms, seat, qh, DIM));
         }
     }
 }
@@ -104,15 +119,26 @@ impl Dispatch<wl_seat::WlSeat, ()> for IdleState {
     ) {}
 }
 
-impl Dispatch<ExtIdleNotificationV1, ()> for IdleState {
+impl Dispatch<ExtIdleNotificationV1, u8> for IdleState {
     fn event(
         state: &mut Self,
         _: &ExtIdleNotificationV1,
         event: ext_idle_notification_v1::Event,
-        _: &(),
+        kind: &u8,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if *kind == DIM {
+            match event {
+                ext_idle_notification_v1::Event::Idled => {
+                    eprintln!("[prismd/idle] dimming before auto-lock");
+                    (state.on_dim)(true);
+                }
+                ext_idle_notification_v1::Event::Resumed => (state.on_dim)(false),
+                _ => {}
+            }
+            return;
+        }
         match event {
             ext_idle_notification_v1::Event::Idled => {
                 eprintln!("[prismd/idle] idle for {} min", state.settings.timeout_mins.max(1));
@@ -130,26 +156,33 @@ impl Dispatch<ExtIdleNotificationV1, ()> for IdleState {
 
 /// Spawns the Wayland idle monitor thread if a Wayland display is available. `on_idle`
 /// runs on the monitor thread when the timeout passes while auto-lock is on.
-pub fn start_idle_monitor(settings: IdleSettings, is_idle_flag: Arc<AtomicBool>, on_idle: Box<dyn Fn() + Send + Sync>) -> Option<IdleHandle> {
+pub fn start_idle_monitor(
+    settings: IdleSettings,
+    is_idle_flag: Arc<AtomicBool>,
+    on_idle: Box<dyn Fn() + Send + Sync>,
+    on_dim: Box<dyn Fn(bool) + Send + Sync>,
+) -> Option<IdleHandle> {
     if env::var("WAYLAND_DISPLAY").is_err() && env::var("WAYLAND_SOCKET").is_err() {
         eprintln!("[prismd/idle] No active WAYLAND_DISPLAY found; idle monitoring disabled.");
         return None;
     }
     let (tx, rx) = wake::channel::<IdleSettings>();
     let on_idle: Arc<dyn Fn() + Send + Sync> = Arc::from(on_idle);
+    let on_dim: Arc<dyn Fn(bool) + Send + Sync> = Arc::from(on_dim);
 
     // Reconnects when the compositor goes away (session restart), keeping the settings.
     thread::spawn(move || {
         let mut settings = settings;
         let mut last_error = String::new();
         loop {
-            if let Err(e) = session(&rx, &mut settings, &is_idle_flag, &on_idle) {
+            if let Err(e) = session(&rx, &mut settings, &is_idle_flag, &on_idle, &on_dim) {
                 if e != last_error {
                     eprintln!("[prismd/idle] {e}; retrying until the compositor is back");
                     last_error = e;
                 }
             }
             is_idle_flag.store(false, Ordering::SeqCst);
+            on_dim(false);
             thread::sleep(std::time::Duration::from_secs(2));
         }
     });
@@ -162,6 +195,7 @@ fn session(
     settings: &mut IdleSettings,
     is_idle: &Arc<AtomicBool>,
     on_idle: &Arc<dyn Fn() + Send + Sync>,
+    on_dim: &Arc<dyn Fn(bool) + Send + Sync>,
 ) -> Result<(), String> {
     let conn = Connection::connect_to_env().map_err(|e| format!("cannot connect to Wayland: {e}"))?;
     let mut event_queue: EventQueue<IdleState> = conn.new_event_queue();
@@ -170,9 +204,11 @@ fn session(
         notifier: None,
         seat: None,
         notification: None,
+        dim_notification: None,
         settings: *settings,
         is_idle: Arc::clone(is_idle),
         on_idle: Arc::clone(on_idle),
+        on_dim: Arc::clone(on_dim),
     };
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state).map_err(|e| format!("registry roundtrip failed: {e}"))?;

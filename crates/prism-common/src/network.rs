@@ -363,7 +363,7 @@ pub fn list_audio_sinks() -> Vec<AudioSink> {
                 if in_sinks {
                     let trimmed = line.trim();
                     if trimmed.is_empty() || trimmed.starts_with("├") || trimmed.starts_with("└") || trimmed.starts_with("│") {
-                        let clean = trimmed.trim_start_matches(|c| c == '├' || c == '└' || c == '│' || c == '─' || c == ' ');
+                        let clean = trimmed.trim_start_matches(['├', '└', '│', '─', ' ']);
                         let is_default = clean.starts_with('*');
                         let clean_item = clean.trim_start_matches('*').trim();
 

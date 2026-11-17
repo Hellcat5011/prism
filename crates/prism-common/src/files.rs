@@ -175,6 +175,68 @@ pub fn search_files(query: &str, limit: usize) -> Vec<FileResult> {
     folders
 }
 
+// ── plocate index (QML IndexService) ──────────────────────────────────────
+
+/// The database the file search reads.
+pub const PLOCATE_DB: &str = "/var/lib/plocate/plocate.db";
+
+/// When the plocate database was last written, as local "DD/MM/YYYY HH:MM".
+pub fn last_indexed() -> Option<String> {
+    let mtime = std::fs::metadata(PLOCATE_DB).ok()?.modified().ok()?;
+    let secs = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return None;
+    }
+    Some(format!("{:02}/{:02}/{} {:02}:{:02}", tm.tm_mday, tm.tm_mon + 1, tm.tm_year + 1900, tm.tm_hour, tm.tm_min))
+}
+
+/// Rebuild the plocate index through polkit (`pkexec updatedb --prune-bind-mounts no`, as QML).
+/// Blocks for the whole run; Err carries the message to show. `on_dialog_closed` runs once the
+/// polkit dialog is gone: when pkexec has authenticated (it execs updatedb in the same process)
+/// or exited (cancelled or failed), so callers can bring their UI back during the long rebuild.
+pub fn rebuild_index(on_dialog_closed: impl FnOnce()) -> Result<(), String> {
+    let mut child = Command::new("pkexec")
+        .args(["updatedb", "--prune-bind-mounts", "no"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("pkexec unavailable: {e}"))?;
+    let comm = format!("/proc/{}/comm", child.id());
+    let mut on_closed = Some(on_dialog_closed);
+    let status = loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            break st;
+        }
+        if on_closed.is_some() && std::fs::read_to_string(&comm).is_ok_and(|c| c.trim() == "updatedb") {
+            (on_closed.take().unwrap())();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    };
+    if let Some(f) = on_closed.take() {
+        f();
+    }
+    let mut stderr = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        use std::io::Read;
+        let _ = e.read_to_string(&mut stderr);
+    }
+    if status.success() {
+        return Ok(());
+    }
+    let err = stderr.to_lowercase();
+    let code = status.code().unwrap_or(-1);
+    if code == 126 || err.contains("dismissed") || err.contains("cancel") {
+        Err("Cancelled".into())
+    } else if code == 127 && (err.contains("agent") || err.contains("authentication")) {
+        Err("No polkit authentication agent running".into())
+    } else {
+        let last = stderr.lines().last().unwrap_or("").trim().to_string();
+        Err(if last.is_empty() { "Failed".into() } else { format!("Failed: {last}") })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

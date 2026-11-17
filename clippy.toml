@@ -1,0 +1,3 @@
+# Cairo draw helpers take position, size, colour and style; grouping them into structs does
+# not make the call sites clearer.
+too-many-arguments-threshold = 14

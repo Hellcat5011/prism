@@ -93,10 +93,10 @@ pub fn draw_clock(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Loo
     let spacing = (4.0 * sf).round();
     let family = look.family_for(&p.font_family);
 
-    let date_h = if p.hide_date { 0.0 } else { (ch * 0.18).min(36.0).max(16.0).round() };
+    let date_h = if p.hide_date { 0.0 } else { (ch * 0.18).clamp(16.0, 36.0).round() };
     let time_h = if p.hide_date { ch } else { (ch - date_h - spacing).max(1.0) };
 
-    let hour = if now.hour % 12 == 0 { 12 } else { now.hour % 12 };
+    let hour = if now.hour.is_multiple_of(12) { 12 } else { now.hour % 12 };
     let time = format!("{}:{:02}", hour, now.minute);
     let base_px = (cw * 0.6).min(ch * if p.hide_date { 0.95 } else { 0.8 }).max(24.0);
     let st = TextStyle { family: &family, px: base_px, bold: true, color: look.fg };
@@ -105,7 +105,7 @@ pub fn draw_clock(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Loo
 
     if !p.hide_date {
         let date = now.format("%A, %B %d");
-        let st = TextStyle { family: &family, px: (ch * 0.14).min(24.0).max(10.0).round(), bold: false, color: look.fg };
+        let st = TextStyle { family: &family, px: (ch * 0.14).clamp(10.0, 24.0).round(), bold: false, color: look.fg };
         let px = fit_px(cr, &date, &st, cw, date_h, 9.0);
         draw_in_box(cr, &date, &TextStyle { px, ..st }, cx, cy + time_h + spacing, cw, date_h, Align::Center);
     }
@@ -260,6 +260,7 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
             let cw = (iw - 2.0 * sp) / 3.0;
             let rh = (gh - 3.0 * sp) / 4.0;
             let px = (15.0 * sf).round().max(11.0);
+            #[allow(clippy::needless_range_loop)] // i also gives the grid cell
             for i in 0..12 {
                 let (col, row) = (i % 3, i / 3);
                 let r = Rect { x: ix + col as f64 * (cw + sp), y: gy + row as f64 * (rh + sp), w: cw, h: rh };

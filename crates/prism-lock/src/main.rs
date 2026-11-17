@@ -1141,6 +1141,21 @@ fn check_auth() -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Never lock on a mistyped or unknown flag: only the bare command locks.
+    const USAGE: &str = "usage: prism-lock [--greeter | --check-auth | --help]\n\n  (no flag)     lock the session\n  --greeter     greetd greeter (preview window outside greetd)\n  --check-auth  check your password against PAM from a terminal";
+    for a in &args[1..] {
+        match a.as_str() {
+            "--greeter" | "--check-auth" => {}
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                exit(0);
+            }
+            other => {
+                eprintln!("prism-lock: unknown argument '{other}'\n{USAGE}");
+                exit(2);
+            }
+        }
+    }
     if args.iter().any(|a| a == "--check-auth") {
         check_auth();
     }

@@ -72,6 +72,8 @@ pub enum UiCommand {
     EditMode(String),
     /// Hold (true) or release an idle inhibitor (Caffeinate).
     Caffeinate(bool),
+    /// Screen colour picker: "toggle", "open" or "close".
+    ColorPicker(String),
 }
 
 /// Messages sent to the running notification popup overlay.

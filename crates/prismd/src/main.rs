@@ -11,6 +11,7 @@ use std::time::Duration;
 
 mod bluelight;
 mod config_watch;
+mod depth;
 mod gamma;
 mod idle;
 mod notifd;
@@ -28,6 +29,7 @@ struct DaemonState {
     config: Config,
     theme: Theme,
     bluelight: BlueLight,
+    depth: depth::Depth,
     idle: Option<idle::IdleHandle>,
     apps: Vec<DesktopApp>,
     is_idle: Arc<AtomicBool>,
@@ -343,6 +345,12 @@ fn start_clipboard_pruner(state: Arc<Mutex<DaemonState>>) {
 
 /// Start prism-lock unless one is already running.
 /// A lock is in progress (a supervisor thread owns the prism-lock process).
+/// Screen brightness factor while dimmed before auto-lock.
+const IDLE_DIM: f64 = 0.3;
+
+/// Last `prism-ctl index rebuild`: (status, message); status is idle, running, success or failed.
+static INDEX_STATE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+
 static LOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Lock the session. A supervisor thread runs prism-lock until it exits 0 (unlocked). If it
@@ -403,6 +411,7 @@ fn idle_settings(cfg: &Config) -> idle::IdleSettings {
 /// Push `st.config` to the services that follow it live.
 fn apply_config(st: &DaemonState) {
     st.bluelight.update_config(&st.config);
+    st.depth.update_config(&st.config);
     if let Some(idle) = &st.idle {
         idle.update(idle_settings(&st.config));
     }
@@ -868,17 +877,15 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some(data))
             }
 
-            Ok(IpcCommand::ColorPicker(ColorPickerAction::Pick)) => {
-                match prism_common::colorpicker::pick_color() {
-                    Ok(sample) => {
-                        let mut st = state.lock().unwrap();
-                        st.clipboard.add_text(sample.hex.clone());
-                        IpcResponse::Ok(Some(format!(
-                            "{} (RGB: {},{},{} | HSL: {}°,{}%,{}%) [copied to clipboard]",
-                            sample.hex, sample.rgb.0, sample.rgb.1, sample.rgb.2,
-                            sample.hsl.0, sample.hsl.1, sample.hsl.2
-                        )))
-                    }
+            Ok(IpcCommand::ColorPicker(action)) => {
+                // The picker overlay lives in prism-ui (picker.rs); it copies the colour itself.
+                let what = match action {
+                    ColorPickerAction::Close => "close",
+                    ColorPickerAction::Toggle => "toggle",
+                    ColorPickerAction::Open | ColorPickerAction::Pick => "open",
+                };
+                match send_ui(&prism_common::UiCommand::ColorPicker(what.to_string())) {
+                    Ok(_) => IpcResponse::Ok(Some(format!("colorpicker_{what}"))),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
@@ -1066,6 +1073,34 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some(msg))
             }
 
+            Ok(IpcCommand::Index(action)) => {
+                use prism_common::ipc::IndexAction;
+                let (mut status, message) = INDEX_STATE.lock().unwrap().clone();
+                if status.is_empty() {
+                    status = "idle".into();
+                }
+                match action {
+                    IndexAction::Rebuild if status == "running" => IpcResponse::Error("Index rebuild already running".into()),
+                    IndexAction::Rebuild => {
+                        *INDEX_STATE.lock().unwrap() = ("running".into(), "Rebuilding index".into());
+                        std::thread::spawn(|| {
+                            let r = prism_common::files::rebuild_index(|| {});
+                            *INDEX_STATE.lock().unwrap() = match r {
+                                Ok(()) => ("success".into(), "Index updated".into()),
+                                Err(e) => ("failed".into(), e),
+                            };
+                        });
+                        IpcResponse::Ok(Some("Index rebuild started".into()))
+                    }
+                    IndexAction::Status => IpcResponse::Ok(Some(format!(
+                        "status={status}, last_indexed={}",
+                        prism_common::files::last_indexed().unwrap_or_else(|| "never".into())
+                    ))),
+                    IndexAction::Message => IpcResponse::Ok(Some(message)),
+                    IndexAction::LastIndexed => IpcResponse::Ok(prism_common::files::last_indexed()),
+                    IndexAction::LastError => IpcResponse::Ok(Some(if status == "failed" { message } else { String::new() })),
+                }
+            }
             Ok(IpcCommand::Depth(DepthAction::Status)) => {
                 let st = prism_common::depth::get_depth_status();
                 IpcResponse::Ok(Some(format!(
@@ -1074,13 +1109,15 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 )))
             }
             Ok(IpcCommand::Depth(DepthAction::Generate)) => {
-                if let Some(wp) = prism_common::wallpaper::get_current_wallpaper() {
-                    match prism_common::depth::generate_depth(&wp) {
-                        Ok(msg) => IpcResponse::Ok(Some(msg)),
-                        Err(e) => IpcResponse::Error(e),
-                    }
-                } else {
+                let st = state.lock().unwrap();
+                if !st.config.depth_enabled {
+                    IpcResponse::Error("The depth effect is turned off".to_string())
+                } else if prism_common::wallpaper::get_current_wallpaper().is_none() {
                     IpcResponse::Error("No wallpaper recorded to generate depth for".to_string())
+                } else {
+                    // Slow on a cache miss: the worker publishes the mask when it is ready.
+                    st.depth.generate();
+                    IpcResponse::Ok(Some("Generating depth mask".to_string()))
                 }
             }
             Ok(IpcCommand::Depth(DepthAction::Clear)) => {
@@ -1139,7 +1176,9 @@ fn main() {
     println!("Loaded config (idle timeout: {}m, blur: {})", cfg.idle_timeout, cfg.blur_enabled);
     println!("Loaded theme background: {}", theme.background);
 
-    let bluelight = BlueLight::start(&cfg);
+    let gamma = gamma::start();
+    let bluelight = BlueLight::start(&cfg, gamma.clone());
+    let depth = depth::Depth::start(&cfg);
     let apps = load_all_desktop_apps();
     println!("Loaded {} desktop application entries.", apps.len());
 
@@ -1170,6 +1209,7 @@ fn main() {
         config: cfg,
         theme,
         bluelight,
+        depth,
         idle: None,
         apps,
         is_idle: Arc::clone(&is_idle),
@@ -1188,6 +1228,13 @@ fn main() {
                 if let Err(e) = lock_screen(&mut state.lock().unwrap()) {
                     eprintln!("[prismd/idle] lock failed: {}", e);
                 }
+            }
+        }),
+        // QML dimmed the screens 30 s before the lock; done in the gamma ramp (instant, every
+        // output) instead of DDC brightness writes, which stall the compositor.
+        Box::new(move |dim| {
+            if let Some(g) = &gamma {
+                g.dim(if dim { IDLE_DIM } else { 1.0 });
             }
         }),
     );
