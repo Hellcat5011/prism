@@ -104,6 +104,9 @@ enum Control {
     /// (label, value) options; `fonts` renders each option in its own font.
     Combo { options: fn() -> Vec<(String, String)>, get: fn(&Config) -> String, set: fn(&mut Config, &str), fonts: bool },
     Buttons(&'static [(&'static str, Action, ButtonKind)]),
+    /// Section heading (the row title) grouping the rows after it; not focusable, hidden
+    /// in search results and when its section has no visible rows.
+    Heading,
 }
 
 struct Row {
@@ -137,7 +140,7 @@ impl Control {
             Control::Switch(get, _) => Some(get(c).to_string()),
             Control::Slider { get, .. } => Some(get(c).to_string()),
             Control::Text { get, .. } | Control::Combo { get, .. } => Some(get(c)),
-            Control::Buttons(_) => None,
+            Control::Buttons(_) | Control::Heading => None,
         }
     }
 
@@ -150,13 +153,17 @@ impl Control {
                 set(to, &get(from));
             }
             Control::Combo { get, set, .. } => set(to, &get(from)),
-            Control::Buttons(_) => {}
+            Control::Buttons(_) | Control::Heading => {}
         }
     }
 }
 
 fn always(_: &Config) -> bool {
     true
+}
+
+fn heading(tab: usize, title: &'static str) -> Row {
+    Row { tab, title, subtitle: "", control: Control::Heading, visible: always }
 }
 
 fn opts(list: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -184,10 +191,12 @@ fn rows() -> Vec<Row> {
     let _ = pct;
     vec![
         // ── Wallpaper ──
+        heading(0, "Wallpaper"),
         Row { tab: 0, title: "Wallpaper Directory", subtitle: "The directory containing your wallpaper images (~ is expanded).", visible: always,
             control: Text { get: |c| c.wallpaper_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.wallpaper_dir = v.to_string(); true }, placeholder: "~/Pictures/Wallpapers", browse: true } },
         Row { tab: 0, title: "Wallpaper Daemon", subtitle: "The backend used to set and render your desktop wallpapers.", visible: always,
             control: Combo { options: || opts(&[("awww", "awww"), ("swww", "swww")]), get: |c| c.wallpaper_daemon.clone(), set: |c, v| c.wallpaper_daemon = v.to_string(), fonts: false } },
+        heading(0, "Depth Effect"),
         Row { tab: 0, title: "Wallpaper Depth", subtitle: "Makes desktop widgets pass behind wallpaper foregrounds.", visible: always,
             control: Switch(|c| c.depth_enabled, |c, v| c.depth_enabled = v) },
         Row { tab: 0, title: DEPTH_STATUS_ROW, subtitle: "Status: checking\u{2026}", visible: |c| c.depth_enabled,
@@ -198,6 +207,7 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.depth_auto_generate, |c, v| c.depth_auto_generate = v) },
         Row { tab: 0, title: "Pre-generate wallpapers", subtitle: "Generate masks for every wallpaper in the background.", visible: |c| c.depth_enabled,
             control: Switch(|c| c.depth_pregenerate, |c, v| c.depth_pregenerate = v) },
+        heading(0, "Depth Mask"),
         Row { tab: 0, title: "Foreground Threshold", subtitle: "Lower threshold = more of the scene in front of widgets.", visible: |c| c.depth_enabled,
             control: Slider { min: 0.0, max: 100.0, step: 1.0, get: |c| c.depth_threshold as f64, set: |c, v| c.depth_threshold = v as u32, fmt: |v| format!("{:.0}%", v) } },
         Row { tab: 0, title: "Edge Feather", subtitle: "Smoothness between foreground and background (0-50).", visible: |c| c.depth_enabled,
@@ -213,6 +223,7 @@ fn rows() -> Vec<Row> {
         Row { tab: 2, title: "Remember Last User", subtitle: "Pre-select the last user and session on the next boot (applies after logout).", visible: always,
             control: Switch(|c| c.remember_last_user, |c, v| c.remember_last_user = v) },
         // ── Display ──
+        heading(3, "Appearance"),
         Row { tab: 3, title: "Global font", subtitle: "Font for the shell and desktop widgets.", visible: always,
             control: Combo {
                 options: || {
@@ -224,10 +235,20 @@ fn rows() -> Vec<Row> {
                 set: |c, v| c.global_font = v.to_string(),
                 fonts: true,
             } },
+        Row { tab: 3, title: "Interface Scale", subtitle: "Size of cards and popups. Auto follows the screen resolution (100% at 1440p).", visible: always,
+            control: Combo {
+                options: || opts(&[("Auto", "0"), ("75%", "0.75"), ("90%", "0.9"), ("100%", "1"), ("110%", "1.1"), ("125%", "1.25"), ("150%", "1.5"), ("175%", "1.75"), ("200%", "2")]),
+                get: |c| if c.ui_scale > 0.0 { format!("{}", c.ui_scale) } else { "0".into() },
+                set: |c, v| c.ui_scale = v.parse().unwrap_or(0.0),
+                fonts: false,
+            } },
+        // ── Notifications ──
+        heading(3, "Idle & Lock"),
         Row { tab: 3, title: "Manage idle behavior", subtitle: "Lock the screen automatically when the system is idle.", visible: always,
             control: Switch(|c| c.manage_idle, |c, v| c.manage_idle = v) },
         Row { tab: 3, title: "Lock timeout (minutes)", subtitle: "Minutes of inactivity before the screen locks.", visible: |c| c.manage_idle,
             control: Text { get: |c| c.idle_timeout.to_string(), set: |c, v| match v.trim().parse::<u32>() { Ok(n) if n >= 1 => { c.idle_timeout = n; true } _ => false }, placeholder: "5", browse: false } },
+        heading(3, "Blue Light Filter"),
         Row { tab: 3, title: "Blue Light Filter", subtitle: "Adjust display colour temperature based on time or location.", visible: always,
             control: Switch(|c| c.blue_light_enabled, |c, v| c.blue_light_enabled = v) },
         Row { tab: 3, title: "Turn on now", subtitle: "Force the blue light filter on.", visible: |c| c.blue_light_enabled,
@@ -235,6 +256,7 @@ fn rows() -> Vec<Row> {
         Row { tab: 3, title: "Mode", subtitle: "How day and night are determined.", visible: |c| c.blue_light_enabled,
             control: Combo { options: || opts(&[("Fixed Time", "fixed_time"), ("Sunset/Sunrise", "sunset_sunrise")]),
                 get: |c| if c.blue_light_mode == "time" { "fixed_time".into() } else { c.blue_light_mode.clone() }, set: |c, v| c.blue_light_mode = v.to_string(), fonts: false } },
+        heading(3, "Schedule"),
         Row { tab: 3, title: "Night starts (HH:MM)", subtitle: "Overnight windows like 22:00 to 06:00 are supported.", visible: |c| c.blue_light_enabled && c.blue_light_mode != "sunset_sunrise",
             control: Text { get: |c| c.blue_light_night_start.clone(), set: |c, v| { let v = v.trim(); if !valid_time(v) { return false; } c.blue_light_night_start = v.to_string(); true }, placeholder: "22:00", browse: false } },
         Row { tab: 3, title: "Night ends (HH:MM)", subtitle: "", visible: |c| c.blue_light_enabled && c.blue_light_mode != "sunset_sunrise",
@@ -245,6 +267,7 @@ fn rows() -> Vec<Row> {
             control: Text { get: |c| c.blue_light_latitude.clone(), set: |c, v| match v.trim().parse::<f64>() { Ok(x) if (-90.0..=90.0).contains(&x) => { c.blue_light_latitude = v.trim().to_string(); true } _ => v.trim().is_empty() && { c.blue_light_latitude.clear(); true } }, placeholder: "e.g. 12.97", browse: false } },
         Row { tab: 3, title: "Longitude", subtitle: "", visible: |c| c.blue_light_enabled && c.blue_light_mode == "sunset_sunrise" && !c.blue_light_use_ip_location,
             control: Text { get: |c| c.blue_light_longitude.clone(), set: |c, v| match v.trim().parse::<f64>() { Ok(x) if (-180.0..=180.0).contains(&x) => { c.blue_light_longitude = v.trim().to_string(); true } _ => v.trim().is_empty() && { c.blue_light_longitude.clear(); true } }, placeholder: "e.g. 77.59", browse: false } },
+        heading(3, "Colour Temperature"),
         Row { tab: 3, title: "Transition Duration (minutes)", subtitle: "The transition completes by the scheduled time.", visible: |c| c.blue_light_enabled,
             control: Text { get: |c| c.blue_light_transition_minutes.to_string(), set: |c, v| match v.trim().parse::<u32>() { Ok(n) if n <= 240 => { c.blue_light_transition_minutes = n; true } _ => false }, placeholder: "30", browse: false } },
         Row { tab: 3, title: "Day Temperature", subtitle: "Colour temperature during the day.", visible: |c| c.blue_light_enabled,
@@ -252,8 +275,10 @@ fn rows() -> Vec<Row> {
         Row { tab: 3, title: "Night Temperature", subtitle: "Colour temperature at night.", visible: |c| c.blue_light_enabled,
             control: Slider { min: 1500.0, max: 6500.0, step: 100.0, get: |c| c.blue_light_night_temp as f64, set: |c, v| c.blue_light_night_temp = v as u32, fmt: |v| format!("{:.0} K", v) } },
         // ── Desktop ──
+        heading(4, "Layout"),
         Row { tab: 4, title: "Desktop Edit Mode", subtitle: "Reposition, resize, remove and re-add desktop widgets.", visible: always,
             control: Buttons(&[("Enter desktop edit mode", Action::EditMode, ButtonKind::Primary), ("Reset layout", Action::ResetLayout, ButtonKind::Danger)]) },
+        heading(4, "Widgets"),
         Row { tab: 4, title: "Media Player", subtitle: "Album art, track info and controls.", visible: always,
             control: Switch(|c| c.desktop_layout.mpris.visible, |c, v| c.desktop_layout.mpris.visible = v) },
         Row { tab: 4, title: "System Tray", subtitle: "Status icons of running applications.", visible: always,
@@ -267,20 +292,24 @@ fn rows() -> Vec<Row> {
         Row { tab: 4, title: "Shortcuts", subtitle: "Launcher, notifications, settings and power buttons.", visible: always,
             control: Switch(|c| c.desktop_layout.shortcuts.visible, |c, v| c.desktop_layout.shortcuts.visible = v) },
         // ── UI ──
+        heading(5, "Windows"),
         Row { tab: 5, title: "Window Background Blur", subtitle: "Compositor blur behind Prism cards.", visible: always,
             control: Switch(|c| c.blur_enabled, |c, v| c.blur_enabled = v) },
         Row { tab: 5, title: "Window Background Opacity", subtitle: "Opacity of every card's background.", visible: always,
             control: Slider { min: 0.2, max: 1.0, step: 0.01, get: |c| c.background_opacity as f64, set: |c, v| c.background_opacity = v as f32, fmt: |v| format!("{:.0}%", v * 100.0) } },
         Row { tab: 5, title: "Window Corner Radius", subtitle: "Corner rounding of every card.", visible: always,
             control: Slider { min: 0.0, max: 36.0, step: 1.0, get: |c| c.window_radius as f64, set: |c, v| c.window_radius = v as u32, fmt: |v| format!("{:.0} px", v) } },
+        heading(5, "Motion"),
         Row { tab: 5, title: "Animations", subtitle: "Card open/close and in-card motion, synced to the display refresh.", visible: always,
             control: Switch(|c| c.animations_enabled, |c, v| c.animations_enabled = v) },
         Row { tab: 5, title: "Animation Speed", subtitle: "Multiplier for every animation (1.0 = original timings).", visible: |c| c.animations_enabled,
             control: Slider { min: 0.5, max: 2.0, step: 0.05, get: |c| c.animation_speed as f64, set: |c, v| c.animation_speed = v as f32, fmt: |v| format!("{:.2}x", v) } },
+        heading(5, "Background Dim"),
         Row { tab: 5, title: "Dim Background", subtitle: "Darken the screen behind open cards.", visible: always,
             control: Switch(|c| c.dim_enabled, |c, v| c.dim_enabled = v) },
         Row { tab: 5, title: "Dim Strength", subtitle: "", visible: |c| c.dim_enabled,
             control: Slider { min: 0.0, max: 0.8, step: 0.01, get: |c| c.dim_opacity as f64, set: |c, v| c.dim_opacity = v as f32, fmt: |v| format!("{:.0}%", v * 100.0) } },
+        heading(5, "Colours"),
         Row { tab: 5, title: "Matugen Colour Mode", subtitle: "Light or dark palette generated from the wallpaper.", visible: always,
             control: Combo { options: || opts(&[("Dark", "dark"), ("Light", "light"), ("Smart", "smart")]), get: |c| c.matugen_mode.clone(), set: |c, v| c.matugen_mode = v.to_string(), fonts: false } },
         Row { tab: 5, title: "Palette Scheme", subtitle: "Material You scheme used by matugen.", visible: always,
@@ -290,6 +319,7 @@ fn rows() -> Vec<Row> {
                     ("Neutral", "scheme-neutral"), ("Fidelity", "scheme-fidelity"), ("Content", "scheme-content"), ("Monochrome", "scheme-monochrome")]),
                 get: |c| c.matugen_scheme.clone(), set: |c, v| c.matugen_scheme = v.to_string(), fonts: false } },
         // ── Search ──
+        heading(6, "Sources"),
         Row { tab: 6, title: "Search Section Order", subtitle: "Order of the result sections in Spotlight.", visible: always,
             control: Combo {
                 options: || {
@@ -303,6 +333,7 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.search_enable_folders, |c, v| c.search_enable_folders = v) },
         Row { tab: 6, title: "Search Files", subtitle: "Include files from the file index.", visible: always,
             control: Switch(|c| c.search_enable_files, |c, v| c.search_enable_files = v) },
+        heading(6, "Results"),
         Row { tab: 6, title: "Max Folder Results", subtitle: "", visible: |c| c.search_enable_folders,
             control: Combo { options: || ["5", "10", "15", "20", "30"].iter().map(|s| (s.to_string(), s.to_string())).collect(),
                 get: |c| c.search_max_folder_results.to_string(), set: |c, v| c.search_max_folder_results = v.parse().unwrap_or(10), fonts: false } },
@@ -311,16 +342,9 @@ fn rows() -> Vec<Row> {
                 get: |c| c.search_max_file_results.to_string(), set: |c, v| c.search_max_file_results = v.parse().unwrap_or(20), fonts: false } },
         Row { tab: 6, title: "Include Hidden Files & Folders", subtitle: "Show dot-files and dot-folders in results.", visible: always,
             control: Switch(|c| c.search_include_hidden, |c, v| c.search_include_hidden = v) },
+        heading(6, "File Index"),
         Row { tab: 6, title: "Rebuild File Index", subtitle: "Indexes files system-wide for search (pkexec updatedb). Can take a few minutes.", visible: always,
             control: Buttons(&[("Rebuild index", Action::RebuildIndex, ButtonKind::Primary)]) },
-        Row { tab: 3, title: "Interface Scale", subtitle: "Size of cards and popups. Auto follows the screen resolution (100% at 1440p).", visible: always,
-            control: Combo {
-                options: || opts(&[("Auto", "0"), ("75%", "0.75"), ("90%", "0.9"), ("100%", "1"), ("110%", "1.1"), ("125%", "1.25"), ("150%", "1.5"), ("175%", "1.75"), ("200%", "2")]),
-                get: |c| if c.ui_scale > 0.0 { format!("{}", c.ui_scale) } else { "0".into() },
-                set: |c, v| c.ui_scale = v.parse().unwrap_or(0.0),
-                fonts: false,
-            } },
-        // ── Notifications ──
         Row { tab: 7, title: "Popup Position", subtitle: "Where notification popups appear on screen.", visible: always,
             control: Combo {
                 options: || opts(&[("Top Left", "top-left"), ("Top Center", "top-center"), ("Top Right", "top-right"),
@@ -528,7 +552,10 @@ impl SettingsView {
             .filter(|&i| if q.is_empty() { self.rows[i].tab == self.tab } else { self.row_matches(i, &q) })
             .collect();
         v.sort_by_key(|&i| (self.rows[i].tab, i));
-        v
+        // Headings: not in search results, and only with at least one row of their section.
+        let heading = |i: usize| matches!(self.rows[i].control, Control::Heading);
+        let v: Vec<usize> = v.into_iter().filter(|&i| q.is_empty() || !heading(i)).collect();
+        (0..v.len()).filter(|&k| !heading(v[k]) || v.get(k + 1).is_some_and(|&n| !heading(n))).map(|k| v[k]).collect()
     }
 
     fn tab_matches(&self, tab: usize) -> bool {
@@ -636,11 +663,18 @@ impl SettingsView {
         let searching = !self.query().is_empty();
         // While searching, a tab heading precedes each tab's group of results.
         const GROUP_H: f64 = 30.0;
+        // Section headings inside a tab, and the extra space above all but the first.
+        const HEADING_H: f64 = 46.0;
+        const HEADING_GAP: f64 = 14.0;
         let group_start: Vec<bool> = visible.iter().enumerate().map(|(k, &i)| searching && (k == 0 || self.rows[visible[k - 1]].tab != self.rows[i].tab)).collect();
         // Measure
         let mut heights = Vec::with_capacity(visible.len());
         for (k, &i) in visible.iter().enumerate() {
             let r = &self.rows[i];
+            if matches!(r.control, Control::Heading) {
+                heights.push(if k == 0 { HEADING_H - HEADING_GAP } else { HEADING_H });
+                continue;
+            }
             let sub = row_subtitle(r);
             let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_)) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
@@ -682,10 +716,23 @@ impl SettingsView {
             match self.rows[i].control {
                 Control::Buttons(btns) => self.focus_order.extend((0..btns.len()).map(|b| Hit::Button(i, b))),
                 Control::Text { browse: true, .. } => self.focus_order.extend([Hit::Control(i), Hit::Browse(i)]),
+                Control::Heading => {}
                 _ => self.focus_order.push(Hit::Control(i)),
             }
             let mut h = heights[k];
             if y + h < list.y || y > list.y + list.h {
+                y += h;
+                continue;
+            }
+            if matches!(self.rows[i].control, Control::Heading) {
+                // Accent label with a hairline running to the right edge.
+                let top = if k == 0 { y } else { y + HEADING_GAP };
+                let st = TextStyle { family: &format!("{} Semi-Bold", p.family), px: 12.0, bold: false, color: (p.accent.0, p.accent.1, p.accent.2, 0.95) };
+                let (_, _, tw, _) = draw_in_box(cr, &self.rows[i].title.to_uppercase(), &st, list.x, top + 8.0, list.w, 20.0, Align::Start);
+                let lx = list.x + tw + 12.0;
+                if lx < list.x + list.w {
+                    fill_rounded_rect(cr, lx, top + 18.0, list.x + list.w - lx, 1.0, 0.0, hex_to_rgba(&theme.outline_variant, 0.35));
+                }
                 y += h;
                 continue;
             }
@@ -773,8 +820,10 @@ impl SettingsView {
                         bx += w + 10.0;
                     }
                 }
+                Control::Heading => {}
             }
-            if k + 1 < visible.len() && !group_start.get(k + 1).copied().unwrap_or(false) {
+            let next_heading = visible.get(k + 1).is_some_and(|&n| matches!(self.rows[n].control, Control::Heading));
+            if k + 1 < visible.len() && !next_heading && !group_start.get(k + 1).copied().unwrap_or(false) {
                 fill_rounded_rect(cr, list.x, y + h - 0.5, list.w, 1.0, 0.0, hex_to_rgba(&theme.outline_variant, 0.15));
             }
             y += h;
@@ -972,7 +1021,7 @@ impl SettingsView {
                     }
                 }
                 Control::Combo { .. } => self.combo = Some((i, Dropdown::default())),
-                Control::Buttons(_) => {}
+                Control::Buttons(_) | Control::Heading => {}
             },
         }
         Effect::Redraw
@@ -1226,7 +1275,7 @@ impl SettingsView {
                     let dd = Dropdown { hover: options().iter().position(|(_, v)| *v == cur), ..Dropdown::default() };
                     self.combo = Some((i, dd));
                 }
-                Control::Slider { .. } | Control::Buttons(_) => {}
+                Control::Slider { .. } | Control::Buttons(_) | Control::Heading => {}
             },
             _ => {}
         }
