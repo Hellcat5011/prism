@@ -934,7 +934,7 @@ impl Desk {
                             }
                         });
                     }
-                    Hit::PhoneOpen | Hit::PhoneCard => {
+                    Hit::PhoneCard => {
                         if let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Phone) {
                             crate::ui::set_open_origin(w.rect.x + w.rect.w / 2.0, w.rect.y + w.rect.h / 2.0);
                         }

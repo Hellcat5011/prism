@@ -67,7 +67,6 @@ pub enum Hit {
     MediaNext,
     Tray(usize),
     Shortcut(usize),
-    PhoneOpen,
     PhoneCard,
     PhoneRing,
     PhonePlayPause,
@@ -868,11 +867,24 @@ mod tests {
 // ── Phone ─────────────────────────────────────────────────────────────────
 
 /// Phone widget: battery ring, name and status, what plays on the phone, and buttons for
-/// find-my-phone, play/pause and next. A click elsewhere opens the Phone card.
+/// find-my-phone, play/pause and next, and one that opens the Phone card.
 pub fn draw_phone(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, state: Option<&prism_common::phone::PhoneState>, hovered: Option<Hit>) -> Hits {
     use crate::phone::{draw_battery_ring, media_position, status_line, ICON_NEXT, ICON_OPEN, ICON_PAUSE, ICON_PLAY, ICON_RING};
     let mut hits = Hits::new();
     draw_background(cr, w, h, look, p.transparent_bg);
+    // Round icon buttons from the bottom-right corner leftwards.
+    let b = 28.0;
+    let by = h - b - 10.0;
+    let mut bx = w - 12.0 - b;
+    let mut button = |cr: *mut Cairo, hits: &mut Hits, hit: Hit, icon: &str, filled: bool| {
+        if hovered == Some(hit) {
+            crate::cairo_backend::fill_circle(cr, bx + b / 2.0, by + b / 2.0, b / 2.0, (look.primary.0, look.primary.1, look.primary.2, 0.22));
+        }
+        let i = b * 0.55;
+        crate::svg::draw_path(cr, icon, bx + (b - i) / 2.0, by + (b - i) / 2.0, i, look.fg, if filled { None } else { Some(2.0) });
+        hits.push((hit, Rect { x: bx, y: by, w: b, h: b }));
+        bx -= b + 6.0;
+    };
     let muted = (look.fg.0, look.fg.1, look.fg.2, 0.65);
     let font = |weight: &str, px: f64| format!("{} {weight} {px:.0}px", look.family);
     let Some(d) = state.and_then(|s| s.primary()) else {
@@ -881,7 +893,7 @@ pub fn draw_phone(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Loo
             Some(_) => "No phone paired",
         };
         draw_in_box(cr, msg, &TextStyle { family: &look.family, px: 14.0, bold: true, color: muted }, 0.0, 0.0, w, h, Align::Center);
-        hits.push((Hit::PhoneOpen, Rect { x: 0.0, y: 0.0, w, h }));
+        button(cr, &mut hits, Hit::PhoneCard, ICON_OPEN, false);
         return hits;
     };
     let r = (h * 0.30).clamp(18.0, 44.0);
@@ -900,31 +912,14 @@ pub fn draw_phone(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Loo
         let n = d.notifications.len();
         crate::cairo_backend::draw_pango_text(cr, tx, h * 0.14 + 44.0, &format!("{n} notification{}", if n == 1 { "" } else { "s" }), &font("Regular", 12.0), look.fg, Some(tw as i32));
     }
-    // Buttons, bottom right.
-    let b = 28.0;
-    let by = h - b - 10.0;
-    let mut bx = w - 12.0 - b;
-    let mut buttons: Vec<(Hit, &str, bool)> = Vec::new();
-    if d.reachable {
+    // Buttons, bottom right: always the open-card one; the rest when there is room.
+    button(cr, &mut hits, Hit::PhoneCard, ICON_OPEN, false);
+    if d.reachable && by > h * 0.14 + 60.0 {
+        button(cr, &mut hits, Hit::PhoneRing, ICON_RING, false);
         if let Some(m) = media {
-            buttons.push((Hit::PhonePlayPause, if m.playing { ICON_PAUSE } else { ICON_PLAY }, true));
-            buttons.push((Hit::PhoneNext, ICON_NEXT, true));
-        }
-        buttons.push((Hit::PhoneRing, ICON_RING, false));
-    }
-    // Always there: opens the Phone card.
-    buttons.push((Hit::PhoneCard, ICON_OPEN, false));
-    if by > h * 0.14 + 60.0 {
-        for (hit, icon, filled) in buttons.into_iter().rev() {
-            if hovered == Some(hit) {
-                crate::cairo_backend::fill_circle(cr, bx + b / 2.0, by + b / 2.0, b / 2.0, (look.primary.0, look.primary.1, look.primary.2, 0.22));
-            }
-            let i = b * 0.55;
-            crate::svg::draw_path(cr, icon, bx + (b - i) / 2.0, by + (b - i) / 2.0, i, look.fg, if filled { None } else { Some(2.0) });
-            hits.push((hit, Rect { x: bx, y: by, w: b, h: b }));
-            bx -= b + 6.0;
+            button(cr, &mut hits, Hit::PhoneNext, ICON_NEXT, true);
+            button(cr, &mut hits, Hit::PhonePlayPause, if m.playing { ICON_PAUSE } else { ICON_PLAY }, true);
         }
     }
-    hits.push((Hit::PhoneOpen, Rect { x: 0.0, y: 0.0, w, h }));
     hits
 }
