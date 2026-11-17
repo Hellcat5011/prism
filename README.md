@@ -17,11 +17,25 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 - **Notification center**: notification history grouped by app, quick toggles, Wi-Fi and Bluetooth pages
   (NetworkManager and BlueZ over D-Bus, with pairing), volume and brightness sliders, audio output switching.
 - **Notification server**: `org.freedesktop.Notifications` built into `prismd` (actions, urgency, images,
-  do-not-disturb); popups can sit in any corner or edge.
-- **Desktop widgets**: clock, analog clock, calendar, media player, system tray and shortcuts on the bottom layer,
+  do-not-disturb); popups can sit in any corner or edge. Screenshot notifications show a large preview.
+- **Screenshots and screen recording**: a frozen-screen overlay to capture a region (move and resize handles), a
+  window (searchable list) or the whole screen. Screenshots are saved as PNG and copied to the clipboard, with
+  Open, Show in folder and Delete in the notification. Recordings use FFmpeg (NVENC, else x264) into MKV or MP4,
+  with optional desktop audio and microphone (PipeWire); a small indicator shows the time and a Stop button.
+- **Phone sync**: pairs with the official [KDE Connect](https://kdeconnect.kde.org/) Android app (no
+  `kdeconnectd` needed). Phone battery and status, its media with controls and album art, clipboard sync both
+  ways, phone notifications with reply and dismiss, find my phone, files both ways, and the phone as a remote
+  mouse and keyboard. Shown in a Phone card, a desktop widget and a Settings tab.
+- **Motion**: cards open and close on springs (and shrink back to the button they were opened from), rows fade in
+  one after another, selection highlights glide between rows, lists scroll smoothly (touchpad scrolling follows
+  the fingers and keeps its momentum), and switches and hover states animate. Cards cast a soft drop shadow
+  (can be turned off). Animations can be slowed down, sped up or turned off.
+- **Desktop widgets**: clock, analog clock, calendar, media player, phone, system tray and shortcuts on the bottom layer,
   arranged in an on-screen edit mode. Widgets can be "sent to the background" so the wallpaper's foreground
   (a neural depth mask) passes in front of them.
-- **Lock screen and greeter**: `ext-session-lock-v1` lock with PAM, and the same look as a greetd greeter under `cage`.
+- **System tray**: StatusNotifierItem host with tooltips and dbusmenu context menus (scrollable when long).
+- **Lock screen and greeter**: `ext-session-lock-v1` lock with PAM, and the same look as a greetd greeter under
+  `cage` (the greeter can cycle through the system's users).
 - **Theming**: Material You palette from [matugen](https://github.com/InioX/matugen), applied live everywhere.
 - **Blue light filter**: colour temperature through `wlr-gamma-control`, on a schedule or sunrise/sunset.
 - **Idle handling**: screens dim 30 s before auto-lock; caffeinate (idle inhibitor) from the notification center.
@@ -29,7 +43,7 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   password-like text are never saved.
 - **Colour picker**: frozen-screen magnifier; copies the hex value to the clipboard.
 - **Emoji picker, wallpaper selector, power menu, keybind viewer** (parsed from the MangoWM, Niri or Hyprland config)
-  and a **settings** window with live apply and undo.
+  and a **settings** window (searchable, grouped under section headings) with live apply and undo.
 - **On-screen display** for volume and brightness (`wpctl`, `brightnessctl` or DDC/CI via `ddcutil`).
 
 ---
@@ -71,15 +85,20 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
                                                     │ notifications (D-Bus)           │ every overlay and the
                                                     │ idle, gamma, depth, clipboard   │ desktop widgets
                                                     ▼                                 ▼
-                                             prism-lock (session lock / greetd greeter)
+                         prism-lock (session lock / greetd greeter)
+                         prism-phoned (phone sync, while enabled)
+                         prism-rec (screen recorder, while recording)
 ```
 
 | Crate | Role |
 |---|---|
 | `prismd` | Background daemon (systemd user unit). IPC socket, notification server, idle monitor and dimming, blue light (gamma), clipboard watchers, depth mask worker, lock supervision. Starts and supervises one resident `prism-ui daemon`. |
-| `prism-ui` | All UI in one process: modal cards (launcher, search, settings, ...), notification popups, OSD, colour picker and desktop widgets. Draws with cairo/pango, paced by `wl_surface.frame` callbacks. |
+| `prism-ui` | All UI in one process: modal cards (launcher, search, settings, ...), notification popups, OSD, colour picker, capture overlay and desktop widgets. Draws with cairo/pango, paced by `wl_surface.frame` callbacks. |
 | `prism-ctl` | Command-line client; compositor keybinds call it. |
 | `prism-lock` | Lock screen (`ext-session-lock-v1`) and greetd greeter (`--greeter`, under `cage`). |
+| `prism-phone` (`prism-phoned`) | Phone sync over the KDE Connect protocol (v8), run by `prismd` while phone sync is on. |
+| `prism-capture` | Screen capture core (`ext-image-copy-capture-v1`, screencopy fallback) shared by `prism-ui` and `prism-rec`. |
+| `prism-rec` | Screen recorder (FFmpeg, PipeWire audio), run by `prismd` only while recording. |
 | `prism-common` | Shared library: config, theme, IPC types, app/file search, clipboard store, hardware helpers. |
 
 Apps launched from Prism run in their own systemd scope (`app.slice`), so restarting `prismd` never closes them.
@@ -91,22 +110,24 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 ### Requirements
 
 - **Rust** 1.77 or newer.
-- **Libraries**: wayland-client, xkbcommon, cairo, pango/pangocairo, gdk-pixbuf, GTK 3 (`gdk`), PAM.
+- **Libraries**: wayland-client, xkbcommon, cairo, pango/pangocairo, gdk-pixbuf, GTK 3 (`gdk`), PAM, FFmpeg
+  (libavcodec, libavformat, libavutil, libswscale, libswresample) and PipeWire for the recorder, and libclang at
+  build time (bindings for FFmpeg and PipeWire).
 - **Runtime tools** (each feature needs only its own):
 
 | Tool | Used for |
 |---|---|
-| `wl-clipboard` (`wl-copy`, `wl-paste`) | Clipboard history, colour picker, emoji copy |
+| `wl-clipboard` (`wl-copy`, `wl-paste`) | Clipboard history, colour picker, emoji copy, phone clipboard sync |
 | `wpctl` / `pactl`, `playerctl` | Volume, audio outputs, media keys |
 | `brightnessctl` or `ddcutil` | Brightness (laptop backlight or external monitor) |
 | `matugen` | Palette from the wallpaper |
 | `awww` or `swww` | Wallpaper daemon |
 | `plocate` | File search (`pkexec updatedb` to rebuild the index) |
-| `grim` | Colour picker |
 | `wtype` | Pasting emoji into the focused app |
 | `NetworkManager`, `BlueZ` | Network and Bluetooth pages |
 | `python3` | Keybind parsers; wallpaper depth (installs its own venv) |
 | `greetd`, `cage` | Greeter (optional) |
+| KDE Connect app on the phone | Phone sync (open UDP 1716 and TCP 1714-1764 in the firewall) |
 
 ### Build and install
 
@@ -115,12 +136,14 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 systemctl --user enable --now prismd
 ```
 
-The installer builds the workspace and installs:
-- the binaries to `~/.local/bin/`;
+The installer checks the build dependencies, builds the workspace and installs:
+- the binaries (`prismd`, `prism-ui`, `prism-ctl`, `prism-lock`, `prism-phoned`, `prism-rec`) to `~/.local/bin/`;
 - helper scripts to `~/.local/share/prism/scripts/`;
 - `prismd.service` to `~/.config/systemd/user/`.
 
-`prismd` starts `prism-ui` itself. Do not also start `prismd` from the compositor config.
+Run it again to update: it restarts `prismd` when it is running (apps you opened keep running). It changes
+nothing outside your home directory unless you pass `--greeter` (below). `prismd` starts `prism-ui` itself. Do not
+also start `prismd` from the compositor config.
 
 ### Compositor
 
@@ -146,8 +169,9 @@ sudo install -Dm644 deploy/pam.d/prism /etc/pam.d/prism
 # Check your password works before relying on the lock screen
 prism-lock --check-auth
 
-# Greeter: greetd runs prism-lock under cage
-sudo install -m755 target/release/prism-lock /usr/local/bin/prism-lock
+# Greeter: greetd runs /usr/local/bin/prism-lock under cage (asks for your password through sudo;
+# run it again after updates so the greeter matches your session)
+./deploy/install.sh --greeter
 sudo cp /etc/greetd/config.toml /etc/greetd/config.toml.bak
 sudo install -m644 deploy/greetd/config.toml /etc/greetd/config.toml
 ```
@@ -164,6 +188,7 @@ to write to, e.g. through a shared group).
   reloaded live when the file changes.
 - `~/.config/prism/colors.json`: matugen palette.
 - `~/.cache/prism/`: clipboard history, notifications, current wallpaper (private, `0700`).
+- Screenshots go to `~/Pictures/Screenshots` and recordings to `~/Videos/Recordings` (both set in Settings > Capture).
 
 Logs: `journalctl --user -u prismd -f` (covers `prism-ui` too). `PRISM_PERF=1` logs frame times.
 
@@ -183,6 +208,9 @@ Run `prism-ctl --help` for the full list. The common ones:
 | `prism-ctl clipboard toggle` | Clipboard history |
 | `prism-ctl emoji toggle` | Emoji picker |
 | `prism-ctl colorpicker toggle` | Colour picker |
+| `prism-ctl screenshot toggle` | Capture overlay (`screenshot screen` for the whole screen at once) |
+| `prism-ctl screenshot record` | Start or stop recording (`screenshot stop` to stop) |
+| `prism-ctl phone toggle` | Phone card (`phone pair`, `phone ring`, `phone send <file>...`) |
 | `prism-ctl power toggle` | Power menu |
 | `prism-ctl keybinds toggle` | Keybind viewer |
 | `prism-ctl lock lock` | Lock the session |

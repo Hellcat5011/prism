@@ -1,6 +1,6 @@
 [Unit]
 Description=Prism Desktop Shell Daemon
-Documentation=https://github.com/vic/prism
+Documentation=https://github.com/Hellcat5011/prism
 PartOf=graphical-session.target
 After=graphical-session.target
 

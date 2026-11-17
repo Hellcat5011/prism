@@ -95,7 +95,9 @@ system bus, with a pairing agent and signal-driven refreshes) have their own fie
 the shared `Query` text input. Add new screens as views, not as `UiMode` match arms.
 
 Not overlays: `osd.rs` (UiState view whose layer surface slides by margin), `toasts.rs` (notification popups:
-own event queue, one surface per popup), `caffeinate.rs` (idle inhibitor), `svg.rs` (SVG path icons, the QML
+own event queue, one surface per popup; action buttons sized by `ui::fit_widths`; notifications with
+`preview` (hint `x-prism-preview`, sent by screenshots) show their image large above the actions, here and in the
+NC), `caffeinate.rs` (idle inhibitor), `svg.rs` (SVG path icons, the QML
 NcIcon set).
 
 ### Rendering and motion
@@ -109,6 +111,26 @@ NcIcon set).
 
 * Card content renders into an offscreen cache and is composited with the enter/exit `Pose`; transition-only frames
   must not re-render content (`content_dirty` vs `animating`).
+
+* Motion is springs (`ui.rs`): `Spring`/`SpringValue` (closed form, wall clock, keep velocity when retargeted) under
+  card `Transition`s and every in-card animation. Shared primitives: `Scroller` (every scrollable list: eased wheel
+  steps and keyboard paging, touchpad 1:1 from `wl_pointer.axis_source` with rubber-banded edges and momentum),
+  `Glide` (selection highlights and focus rings that move between rows; text mixes by `ui::coverage`), `Fades`
+  (per-key hover levels and switch knobs), `stagger`/`staggered` (row entrance). Anything drawn while still moving
+  calls `ui::keep_animating()` so the frame loop keeps re-rendering content (`take_anim_pending`); views need no
+  extra `animating()` for these. `uikit` and NC widgets take hover/knob levels (f64), not bools. No fixed-duration
+  tweens in new code.
+
+* `ui::card_surface` draws every modal card's background (tint, top sheen, lit hairline border; `card_edge` alone
+  for cards that paint over their background). `cb::drop_shadow` is for floating elements inside a card
+  (dropdowns, tooltips).
+
+* Card drop shadows (`shadow.rs`, Settings > UI > Window Shadows, `shadows_enabled`): a subsurface of the scrim,
+  so it is unblurred (the `^prism-scrim$` layer rule), sits between the dim and the card and takes no input. Drawn
+  once per card size at 1/4 resolution with the card cut out; `UiState::update_shadow` moves, scales and fades it
+  with the card's `Pose` (subsurface position, viewport, alpha modifier) and the scrim commit applies it. It must
+  use the card rectangle as drawn (the NC surface is wider than the card while sliding). Never grow the card
+  surface to hold a shadow: Mango would blur the whole enlarged surface.
 
 * `ui.rs` `Style` is the single source of colours, radius, opacity, font, blur namespace (`-solid` twin when blur is
   off), animation on/off/speed and dim. Cards use inversePrimary @ background_opacity and onPrimaryContainer text,
