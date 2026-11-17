@@ -25,7 +25,6 @@ pub const CAIRO_FORMAT_ARGB32: i32 = 0;
 #[link(name = "pango-1.0")]
 #[link(name = "gobject-2.0")]
 #[link(name = "gdk_pixbuf-2.0")]
-#[link(name = "gdk-3")]
 extern "C" {
     pub fn cairo_image_surface_create_for_data(
         data: *mut u8,
@@ -59,6 +58,10 @@ extern "C" {
     pub fn cairo_line_to(cr: *mut Cairo, x: f64, y: f64);
 
     pub fn pango_cairo_create_layout(cr: *mut Cairo) -> *mut PangoLayout;
+    fn pango_cairo_font_map_get_default() -> *mut c_void;
+    fn pango_font_map_create_context(fontmap: *mut c_void) -> *mut c_void;
+    fn pango_cairo_update_context(cr: *mut Cairo, context: *mut c_void);
+    fn pango_layout_new(context: *mut c_void) -> *mut PangoLayout;
     pub fn pango_layout_set_text(layout: *mut PangoLayout, text: *const c_char, length: i32);
     pub fn pango_layout_set_width(layout: *mut PangoLayout, width: i32);
     pub fn pango_layout_set_height(layout: *mut PangoLayout, height: i32);
@@ -78,7 +81,6 @@ extern "C" {
         preserve_aspect_ratio: i32,
         error: *mut *mut c_void,
     ) -> *mut GdkPixbuf;
-    pub fn gdk_cairo_set_source_pixbuf(cr: *mut Cairo, pixbuf: *mut GdkPixbuf, pixbuf_x: f64, pixbuf_y: f64);
     pub fn gdk_pixbuf_get_width(pixbuf: *mut GdkPixbuf) -> i32;
     pub fn gdk_pixbuf_get_height(pixbuf: *mut GdkPixbuf) -> i32;
     pub fn cairo_image_surface_create(format: i32, width: i32, height: i32) -> *mut CairoSurface;
@@ -127,10 +129,15 @@ extern "C" {
 // on every draw call, i.e. dozens of synchronous decodes per frame during
 // animations. Images are now decoded once into ready-to-paint cairo image
 // surfaces keyed by (path, mtime, size, aspect mode). Missing/undecodable files
-// are cached as misses too. The cache is bounded and simply cleared when full.
+// are cached as misses too. The cache is bounded by memory: large images (wallpapers, art) are
+// dropped first, so small icons stay decoded.
 // ─────────────────────────────────────────────────────────────────────────
 
-const IMAGE_CACHE_MAX: usize = 96;
+/// Decoded bytes kept before large images are dropped.
+const IMAGE_CACHE_BUDGET: usize = 96 << 20;
+/// Images up to this many pixels (64x64) count as icons: dropped only when the cache is
+/// full of them too.
+const SMALL_IMAGE_PX: i64 = 64 * 64;
 
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct ImageKey {
@@ -159,6 +166,87 @@ thread_local! {
     static ICON_CACHE_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// Pixels decoded off the UI thread (cairo ARGB32, premultiplied), ready for `insert_decoded`.
+pub struct Decoded {
+    key: ImageKey,
+    w: i32,
+    h: i32,
+    data: Vec<u8>,
+}
+
+/// Decode `path` scaled to fit (w, h) with gdk-pixbuf. Touches no cairo or thread-local state,
+/// so it can run on a worker thread (icon preloading). None if the file cannot be read.
+pub fn decode_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option<Decoded> {
+    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    mtime?;
+    let key = ImageKey { path: path.to_string(), mtime, w, h, preserve_aspect };
+    decode_key(key)
+}
+
+fn decode_key(key: ImageKey) -> Option<Decoded> {
+    let c_path = CString::new(key.path.as_str()).ok()?;
+    unsafe {
+        let pixbuf = gdk_pixbuf_new_from_file_at_scale(c_path.as_ptr(), key.w, key.h, if key.preserve_aspect { 1 } else { 0 }, std::ptr::null_mut());
+        if pixbuf.is_null() {
+            return None;
+        }
+        let (pw, ph) = (gdk_pixbuf_get_width(pixbuf).max(1), gdk_pixbuf_get_height(pixbuf).max(1));
+        let (n, rs) = (gdk_pixbuf_get_n_channels(pixbuf) as usize, gdk_pixbuf_get_rowstride(pixbuf) as usize);
+        let src = std::slice::from_raw_parts(gdk_pixbuf_get_pixels(pixbuf), rs * (ph as usize - 1) + pw as usize * n);
+        let mut data = vec![0u8; (pw * ph * 4) as usize];
+        for y in 0..ph as usize {
+            for x in 0..pw as usize {
+                let p = &src[y * rs + x * n..];
+                let a = if n >= 4 { p[3] as u32 } else { 255 };
+                let pm = |c: u8| (c as u32 * a + 127) / 255;
+                // ARGB32 is a native-endian u32 with premultiplied colour.
+                let v = (a << 24) | (pm(p[0]) << 16) | (pm(p[1]) << 8) | pm(p[2]);
+                let o = (y * pw as usize + x) * 4;
+                data[o..o + 4].copy_from_slice(&v.to_ne_bytes());
+            }
+        }
+        g_object_unref(pixbuf as *mut c_void);
+        Some(Decoded { key, w: pw, h: ph, data })
+    }
+}
+
+/// Put pixels from `decode_image` into the image cache (UI thread).
+pub fn insert_decoded(d: Decoded) {
+    let surface = unsafe {
+        let img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, d.w, d.h);
+        let stride = cairo_image_surface_get_stride(img) as usize;
+        let dst = cairo_image_surface_get_data(img);
+        let row = d.w as usize * 4;
+        for y in 0..d.h as usize {
+            std::ptr::copy_nonoverlapping(d.data.as_ptr().add(y * row), dst.add(y * stride), row);
+        }
+        cairo_surface_mark_dirty(img);
+        img
+    };
+    cache_insert(d.key, surface);
+}
+
+fn cache_insert(key: ImageKey, surface: *mut CairoSurface) {
+    IMAGE_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let bytes = |s: &CachedSurface| {
+            if s.0.is_null() {
+                return 0usize;
+            }
+            unsafe { (cairo_image_surface_get_stride(s.0) * cairo_image_surface_get_height(s.0)) as usize }
+        };
+        let total: usize = c.values().map(bytes).sum();
+        if total > IMAGE_CACHE_BUDGET {
+            c.retain(|k, _| (k.w as i64) * (k.h as i64) <= SMALL_IMAGE_PX);
+            let total: usize = c.values().map(bytes).sum();
+            if total > IMAGE_CACHE_BUDGET {
+                c.clear();
+            }
+        }
+        c.insert(key, CachedSurface(surface));
+    });
+}
+
 /// Decode `path` scaled to fit (w, h) once, then reuse. Returns a borrowed surface pointer that
 /// stays valid until the cache is next cleared (callers paint it immediately), or None.
 pub fn cached_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option<*mut CairoSurface> {
@@ -169,57 +257,63 @@ pub fn cached_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option
     if let Some(hit) = IMAGE_CACHE.with(|c| c.borrow().get(&key).map(|s| s.0)) {
         return if hit.is_null() { None } else { Some(hit) };
     }
-
-    let surface = unsafe {
-        match CString::new(path) {
-            Ok(c_path) => {
-                let pixbuf = gdk_pixbuf_new_from_file_at_scale(
-                    c_path.as_ptr(),
-                    w,
-                    h,
-                    if preserve_aspect { 1 } else { 0 },
-                    std::ptr::null_mut(),
-                );
-                if pixbuf.is_null() {
-                    std::ptr::null_mut()
-                } else {
-                    let pw = gdk_pixbuf_get_width(pixbuf);
-                    let ph = gdk_pixbuf_get_height(pixbuf);
-                    let img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw.max(1), ph.max(1));
-                    let icr = cairo_create(img);
-                    gdk_cairo_set_source_pixbuf(icr, pixbuf, 0.0, 0.0);
-                    cairo_paint(icr);
-                    cairo_destroy(icr);
-                    g_object_unref(pixbuf as *mut c_void);
-                    img
-                }
-            }
-            Err(_) => std::ptr::null_mut(),
+    match decode_key(key.clone()) {
+        Some(d) => {
+            insert_decoded(d);
+            IMAGE_CACHE.with(|c| c.borrow().get(&key).map(|s| s.0)).filter(|s| !s.is_null())
         }
-    };
-
-    IMAGE_CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() >= IMAGE_CACHE_MAX {
-            c.clear();
+        None => {
+            cache_insert(key, std::ptr::null_mut()); // remember the miss
+            None
         }
-        c.insert(key, CachedSurface(surface));
-    });
-    if surface.is_null() { None } else { Some(surface) }
+    }
 }
 
 /// Decode `path` scaled to *cover* (w, h) keeping its aspect ratio (QML PreserveAspectCrop);
 /// the result is at least as large as the box and is meant to be drawn centred and clipped.
 pub fn cached_image_cover(path: &str, w: i32, h: i32) -> Option<*mut CairoSurface> {
+    let (dw, dh, keep) = cover_params(path, w, h);
+    cached_image(path, dw, dh, keep)
+}
+
+/// Decode size and aspect flag that `cached_image_cover` uses for (w, h).
+fn cover_params(path: &str, w: i32, h: i32) -> (i32, i32, bool) {
+    let Some((iw, ih)) = image_dims(path) else { return (w, h, false) };
+    let s = (w as f64 / iw as f64).max(h as f64 / ih as f64);
+    (((iw as f64 * s).ceil() as i32).max(1), ((ih as f64 * s).ceil() as i32).max(1), true)
+}
+
+/// Pixel size of the image file at `path`. gdk_pixbuf_get_file_info opens and parses the file,
+/// so sizes are remembered per path and modification time (this runs on every draw of a
+/// cover image). Thread-safe: the worker thread uses it too.
+fn image_dims(path: &str) -> Option<(i32, i32)> {
+    type Dims = std::collections::HashMap<String, (std::time::SystemTime, i32, i32)>;
+    static DIMS: std::sync::Mutex<Option<Dims>> = std::sync::Mutex::new(None);
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    if let Some(&(t, w, h)) = DIMS.lock().ok()?.get_or_insert_with(Default::default).get(path) {
+        if t == mtime {
+            return Some((w, h));
+        }
+    }
     let c = CString::new(path).ok()?;
     let (mut iw, mut ih) = (0i32, 0i32);
     let fmt = unsafe { gdk_pixbuf_get_file_info(c.as_ptr(), &mut iw, &mut ih) };
     if fmt.is_null() || iw <= 0 || ih <= 0 {
-        return cached_image(path, w, h, false);
+        return None;
     }
-    let s = (w as f64 / iw as f64).max(h as f64 / ih as f64);
-    let (dw, dh) = ((iw as f64 * s).ceil() as i32, (ih as f64 * s).ceil() as i32);
-    cached_image(path, dw.max(1), dh.max(1), true)
+    let mut dims = DIMS.lock().ok()?;
+    let map = dims.get_or_insert_with(Default::default);
+    if map.len() >= 512 {
+        map.clear();
+    }
+    map.insert(path.to_string(), (mtime, iw, ih));
+    Some((iw, ih))
+}
+
+/// `decode_image` with the parameters `cached_image_cover` will look up (worker thread).
+pub fn decode_image_cover(path: &str, w: i32, h: i32) -> Option<Decoded> {
+    let (dw, dh, keep) = cover_params(path, w, h);
+    decode_image(path, dw, dh, keep)
 }
 
 /// Draw `path` covering the rectangle (cropped, centred), clipped to a rounded rect.
@@ -262,6 +356,45 @@ thread_local! {
 /// Set the UI font family used by every text draw (from the global `global_font` setting).
 pub fn set_global_font(family: &str) {
     GLOBAL_FONT.with(|f| *f.borrow_mut() = family.to_string());
+}
+
+thread_local! {
+    /// One Pango context per thread, synced to each cairo context before use. Creating a
+    /// context per text draw (pango_cairo_create_layout) re-resolved the fonts every time.
+    static PANGO_CONTEXT: std::cell::Cell<*mut c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+    /// Parsed font descriptions by spec string.
+    static FONT_DESCS: std::cell::RefCell<std::collections::HashMap<String, *mut PangoFontDescription>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// A new layout for drawing on `cr` with the font `spec` (already resolved, see
+/// apply_global_font). The caller unrefs it.
+pub fn new_layout(cr: *mut Cairo, spec: &str) -> *mut PangoLayout {
+    unsafe {
+        let ctx = PANGO_CONTEXT.with(|c| {
+            if c.get().is_null() {
+                c.set(pango_font_map_create_context(pango_cairo_font_map_get_default()));
+            }
+            c.get()
+        });
+        pango_cairo_update_context(cr, ctx);
+        let layout = pango_layout_new(ctx);
+        FONT_DESCS.with(|d| {
+            let mut d = d.borrow_mut();
+            if !d.contains_key(spec) {
+                if d.len() >= 256 {
+                    for (_, desc) in d.drain() {
+                        pango_font_description_free(desc);
+                    }
+                }
+                let Ok(c) = CString::new(spec) else { return };
+                d.insert(spec.to_string(), pango_font_description_from_string(c.as_ptr()));
+            }
+            // The layout keeps its own copy.
+            pango_layout_set_font_description(layout, d[spec]);
+        });
+        layout
+    }
 }
 
 /// Font specs in the code use the default family "Inter, Sans"; swap in the configured one.
@@ -395,14 +528,9 @@ pub fn draw_pango_text(
     max_width: Option<i32>,
 ) {
     unsafe {
-        let layout = pango_cairo_create_layout(cr);
+        let layout = new_layout(cr, &apply_global_font(font_spec));
         if let Ok(c_text) = CString::new(text) {
             pango_layout_set_text(layout, c_text.as_ptr(), -1);
-        }
-        if let Ok(c_font) = CString::new(apply_global_font(font_spec)) {
-            let desc = pango_font_description_from_string(c_font.as_ptr());
-            pango_layout_set_font_description(layout, desc);
-            pango_font_description_free(desc);
         }
         if let Some(mw) = max_width {
             // Pango width in PANGO_SCALE (1024)
@@ -431,14 +559,9 @@ pub fn draw_pango_text_wrapped(
     max_lines: Option<i32>,
 ) -> (i32, i32) {
     unsafe {
-        let layout = pango_cairo_create_layout(cr);
+        let layout = new_layout(cr, &apply_global_font(font_spec));
         if let Ok(c_text) = CString::new(text) {
             pango_layout_set_text(layout, c_text.as_ptr(), -1);
-        }
-        if let Ok(c_font) = CString::new(apply_global_font(font_spec)) {
-            let desc = pango_font_description_from_string(c_font.as_ptr());
-            pango_layout_set_font_description(layout, desc);
-            pango_font_description_free(desc);
         }
         pango_layout_set_width(layout, max_width * 1024);
         pango_layout_set_wrap(layout, 0); // PANGO_WRAP_WORD
@@ -470,14 +593,9 @@ pub fn measure_pango_text(
     max_lines: Option<i32>,
 ) -> (i32, i32) {
     unsafe {
-        let layout = pango_cairo_create_layout(cr);
+        let layout = new_layout(cr, &apply_global_font(font_spec));
         if let Ok(c_text) = CString::new(text) {
             pango_layout_set_text(layout, c_text.as_ptr(), -1);
-        }
-        if let Ok(c_font) = CString::new(apply_global_font(font_spec)) {
-            let desc = pango_font_description_from_string(c_font.as_ptr());
-            pango_layout_set_font_description(layout, desc);
-            pango_font_description_free(desc);
         }
         pango_layout_set_width(layout, max_width * 1024);
         pango_layout_set_wrap(layout, 0);
@@ -495,18 +613,14 @@ pub fn measure_pango_text(
     }
 }
 
-pub fn draw_wallpaper_panel(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64, radius: f64) {
+/// The picture the launcher's wallpaper panel shows: the thumbnail, else the wallpaper.
+pub fn wallpaper_panel_path() -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let thumb_path = format!("{}/.wa-thumb.jpg", home);
-    let full_path = format!("{}/.wa.jpg", home);
+    [format!("{home}/.wa-thumb.jpg"), format!("{home}/.wa.jpg")].into_iter().find(|p| Path::new(p).exists())
+}
 
-    let path_to_use = if Path::new(&thumb_path).exists() {
-        Some(thumb_path)
-    } else if Path::new(&full_path).exists() {
-        Some(full_path)
-    } else {
-        None
-    };
+pub fn draw_wallpaper_panel(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64, radius: f64) {
+    let path_to_use = wallpaper_panel_path();
 
     unsafe {
         cairo_save(cr);
@@ -924,3 +1038,26 @@ pub fn draw_battery_indicator(
     draw_pango_text(cr, x + body_w + nub_w + 5.0, y - 1.0, &pct_text, "Inter, Sans 11", fg_color, None);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_off_thread_and_caches() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/settings-gear.svg");
+        let d = std::thread::spawn(move || decode_image(path, 32, 32, true)).join().unwrap().expect("decode");
+        assert!(d.w <= 32 && d.h <= 32 && d.w > 0);
+        assert_eq!(d.data.len(), (d.w * d.h * 4) as usize);
+        // Premultiplied: no colour channel exceeds alpha.
+        assert!(d.data.chunks_exact(4).all(|p| {
+            let v = u32::from_ne_bytes([p[0], p[1], p[2], p[3]]);
+            let a = v >> 24;
+            (v >> 16 & 255) <= a && (v >> 8 & 255) <= a && (v & 255) <= a
+        }));
+        assert!(d.data.chunks_exact(4).any(|p| u32::from_ne_bytes([p[0], p[1], p[2], p[3]]) >> 24 > 0));
+        insert_decoded(d);
+        let hit = cached_image(path, 32, 32, true).expect("cache hit");
+        assert!(image_size(hit).0 <= 32.0);
+    }
+}

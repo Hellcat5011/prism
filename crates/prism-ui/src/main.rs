@@ -313,13 +313,15 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for UiState {
                     // Card-sized surface: width/height stay the logical screen size. The surface
                     // rectangle is set by draw_frame together with its buffer; a configure can
                     // be for an older size, so it is not adopted here.
+                    // Nothing changed for the content either: a new buffer size re-renders it
+                    // via the cache size check in draw_frame.
                     let _ = (width, height);
                 } else {
                     state.width = if width > 0 { width } else { state.width };
                     state.height = if height > 0 { height } else { state.height };
                     state.surf_rect = (0, 0, state.width as i32, state.height as i32);
+                    state.content_dirty = true;
                 }
-                state.content_dirty = true;
                 // A frame already in flight draws on its callback; never draw twice per refresh
                 // (the OSD reconfigures every frame while it slides).
                 if state.frame_callback.is_none() {
@@ -1043,7 +1045,8 @@ impl UiState {
             self.set_scrim_level(level, qh);
         }
         if std::env::var_os("PRISM_PERF").is_some() {
-            eprintln!("[perf] frame {:.2} ms", perf_t0.elapsed().as_secs_f64() * 1000.0);
+            let content = PERF_CONTENT_MS.with(|c| c.replace(0.0));
+            eprintln!("[perf] frame {:.2} ms (content {:.2} ms)", perf_t0.elapsed().as_secs_f64() * 1000.0, content);
         }
     }
 
@@ -1195,6 +1198,7 @@ impl UiState {
             let mut is_animating = false;
 
             cairo_backend::cairo_save(cr);
+            let content_t0 = std::time::Instant::now();
 
             if redraw_content {
             match &self.mode {
@@ -1248,6 +1252,9 @@ impl UiState {
             }
 
             } // if redraw_content
+            if redraw_content {
+                PERF_CONTENT_MS.with(|c| c.set(content_t0.elapsed().as_secs_f64() * 1000.0));
+            }
 
             cairo_backend::cairo_restore(cr);
             cairo_backend::cairo_destroy(cr);
@@ -1325,6 +1332,11 @@ impl UiState {
 // single overlay and exits when it closes.
 // ─────────────────────────────────────────────────────────────────────────
 
+thread_local! {
+    /// PRISM_PERF: time spent drawing card content in the current frame.
+    static PERF_CONTENT_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
 /// Globals bound once per process and shared by every overlay session.
 pub struct Globals {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -1369,14 +1381,19 @@ globals_ignore!(wl_compositor::WlCompositor, wl_shm::WlShm, ZwlrLayerShellV1, wl
 struct Resources {
     apps: Option<(Vec<DesktopApp>, std::time::Instant)>,
     emojis: Option<Vec<EmojiItem>>,
+    /// Background loader of the app list and icons (daemon only).
+    preload: Option<Preloader>,
 }
 
 impl Resources {
     fn apps(&mut self) -> Vec<DesktopApp> {
-        // .desktop files rarely change; refresh in the background of a later opening.
+        // .desktop files rarely change: a stale list is shown while a fresh one loads in the
+        // background. Only the very first opening, before any preload finished, scans inline.
         let stale = self.apps.as_ref().map(|(_, t)| t.elapsed().as_secs() > 300).unwrap_or(true);
-        if stale {
-            self.apps = Some((load_all_desktop_apps(), std::time::Instant::now()));
+        match (&mut self.preload, &self.apps) {
+            (Some(p), Some(_)) if stale => p.start(),
+            (_, None) => self.apps = Some((load_all_desktop_apps(), std::time::Instant::now())),
+            _ => {}
         }
         self.apps.as_ref().map(|(a, _)| a.clone()).unwrap_or_default()
     }
@@ -1384,7 +1401,104 @@ impl Resources {
     fn emojis(&mut self) -> Vec<EmojiItem> {
         self.emojis.get_or_insert_with(load_emojis).clone()
     }
+
+    /// Take finished preload results: decoded icons into the image cache, the app list here.
+    fn take_preloaded(&mut self) {
+        let Some(p) = &mut self.preload else { return };
+        let mut apps = None;
+        for item in p.rx.try_iter() {
+            match item {
+                Preloaded::Image(d) => cairo_backend::insert_decoded(d),
+                Preloaded::Apps(a) => apps = Some(a),
+            }
+        }
+        if let Some(a) = apps {
+            p.running = false;
+            self.apps = Some((a, std::time::Instant::now()));
+        }
+        // A new icon theme or wallpaper means other pictures: decode them again. The
+        // wallpaper is checked at most every 2 s (one stat).
+        let gen = icons::generation();
+        if gen != p.icon_gen {
+            p.icon_gen = gen;
+            p.start();
+        }
+        if p.wallpaper_checked.elapsed().as_secs() >= 2 {
+            p.wallpaper_checked = std::time::Instant::now();
+            let mtime = cairo_backend::wallpaper_panel_path().and_then(|f| std::fs::metadata(f).ok()?.modified().ok());
+            if mtime != p.wallpaper_mtime {
+                p.wallpaper_mtime = mtime;
+                p.start();
+            }
+        }
+    }
 }
+
+enum Preloaded {
+    Image(cairo_backend::Decoded),
+    Apps(Vec<DesktopApp>),
+}
+
+/// Scans .desktop files and decodes the launcher and spotlight icons on a worker thread, so
+/// the first opening of either does not stall the UI (it took ~60 ms inline).
+struct Preloader {
+    tx: std::sync::mpsc::Sender<Preloaded>,
+    rx: std::sync::mpsc::Receiver<Preloaded>,
+    waker: Waker,
+    running: bool,
+    icon_gen: u64,
+    wallpaper_mtime: Option<std::time::SystemTime>,
+    wallpaper_checked: std::time::Instant,
+}
+
+/// Icon sizes (design px) of the app rows in launcher.rs and spotlight.rs.
+const APP_ICON_SIZES: [u32; 2] = [32, 28];
+
+impl Preloader {
+    fn new(waker: Waker) -> Preloader {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wallpaper_mtime = cairo_backend::wallpaper_panel_path().and_then(|f| std::fs::metadata(f).ok()?.modified().ok());
+        Preloader { tx, rx, waker, running: false, icon_gen: icons::generation(), wallpaper_mtime, wallpaper_checked: std::time::Instant::now() }
+    }
+
+    fn start(&mut self) {
+        if self.running {
+            return;
+        }
+        self.running = true;
+        let (tx, waker) = (self.tx.clone(), self.waker.clone());
+        let spawned = std::thread::Builder::new().name("prism-preload".into()).spawn(move || {
+            let apps = load_all_desktop_apps();
+            let mut seen = std::collections::HashSet::new();
+            for app in &apps {
+                let name = app.icon.as_deref().unwrap_or("");
+                for px in APP_ICON_SIZES {
+                    let path = [name, "application-x-executable"].iter().filter(|n| !n.is_empty()).find_map(|n| icons::lookup(n, px));
+                    let Some(path) = path else { continue };
+                    if !seen.insert((path.clone(), px)) {
+                        continue;
+                    }
+                    if let Some(d) = cairo_backend::decode_image(&path.to_string_lossy(), px as i32, px as i32, true) {
+                        let _ = tx.send(Preloaded::Image(d));
+                    }
+                }
+            }
+            // The launcher's wallpaper panel, at the size it is drawn (design px).
+            if let Some(path) = cairo_backend::wallpaper_panel_path() {
+                let (w, h) = (launcher::panel_w(launcher::CARD_W), launcher::CARD_H);
+                if let Some(d) = cairo_backend::decode_image_cover(&path, w.round() as i32, h.round() as i32) {
+                    let _ = tx.send(Preloaded::Image(d));
+                }
+            }
+            let _ = tx.send(Preloaded::Apps(apps));
+            waker.wake();
+        });
+        if spawned.is_err() {
+            self.running = false;
+        }
+    }
+}
+
 
 fn parse_mode(args: &[String]) -> UiMode {
     match args.first().map(|s| s.as_str()) {
@@ -1918,10 +2032,16 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut toasts = toasts::Toasts::new(&conn, &globals);
     let mut caffeinate = caffeinate::Caffeinate::new(&conn);
     let mut picker: Option<picker::Picker> = None;
+    if daemon {
+        let mut p = Preloader::new(waker.clone());
+        p.start();
+        res.preload = Some(p);
+    }
     if let (Some(t), Some(msg)) = (toasts.as_mut(), toast) {
         t.handle(msg);
     }
     loop {
+        res.take_preloaded();
         // 1. Commands
         for cmd in cmd_rx.try_iter() {
             if let prism_common::UiCommand::Caffeinate(on) = cmd {

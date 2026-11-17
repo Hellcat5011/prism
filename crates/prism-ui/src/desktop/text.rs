@@ -29,16 +29,11 @@ const PANGO_ELLIPSIZE_END: i32 = 3;
 
 fn make_layout(cr: *mut Cairo, text: &str, st: &TextStyle, max_w: Option<f64>) -> *mut PangoLayout {
     unsafe {
-        let layout = pango_cairo_create_layout(cr);
         // Never ask for a weight the first-choice font does not have: Pango would synthesize it by
         // smearing the glyphs (blocky display fonts like Fast Hand then look squashed).
         let bold = st.bold && has_bold_face(st.family.split(',').next().unwrap_or("").trim());
         let spec = format!("{} {} {}px", st.family, if bold { "Bold" } else { "" }, st.px.max(1.0).round() as i32);
-        if let Ok(c) = CString::new(spec) {
-            let desc = pango_font_description_from_string(c.as_ptr());
-            pango_layout_set_font_description(layout, desc);
-            pango_font_description_free(desc);
-        }
+        let layout = crate::cairo_backend::new_layout(cr, &spec);
         if let Ok(c) = CString::new(text) {
             pango_layout_set_text(layout, c.as_ptr(), -1);
         }

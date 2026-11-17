@@ -22,7 +22,12 @@ use crate::ui::{Rgba, Style};
 
 pub const CARD_W: f64 = 960.0;
 pub const CARD_H: f64 = 620.0;
-const IMAGE_W: f64 = 576.0;
+pub const IMAGE_W: f64 = 576.0;
+
+/// Width of the wallpaper panel on a card of width `card_w`.
+pub fn panel_w(card_w: f64) -> f64 {
+    IMAGE_W.min(card_w * 0.6)
+}
 const ROW_H: f64 = 54.0;
 const ROW_GAP: f64 = 4.0;
 const RADIUS: f64 = 12.0;
@@ -264,7 +269,7 @@ impl LauncherView {
             cb::cairo_clip(cr);
         }
         cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, r, style.card_bg);
-        cb::draw_wallpaper_panel(cr, card.x, card.y, IMAGE_W.min(card.w * 0.6), card.h, 0.0);
+        cb::draw_wallpaper_panel(cr, card.x, card.y, panel_w(card.w), card.h, 0.0);
         unsafe { cb::cairo_restore(cr) };
 
         let x = card.x + IMAGE_W.min(card.w * 0.6) + 20.0;
