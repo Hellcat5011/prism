@@ -81,8 +81,7 @@ pub struct PhoneView {
     pointer: (f64, f64),
     /// Notification id being replied to, and the text.
     reply: Option<(String, Query)>,
-    scroll: f64,
-    scroll_max: f64,
+    scroll: crate::ui::Scroller,
 }
 
 /// Unix milliseconds now.
@@ -170,7 +169,7 @@ impl PhoneView {
         phone_client::start(waker.clone());
         phone_client::clear_error();
         let (seen, state) = phone_client::snapshot();
-        PhoneView { waker, seen, state, page: Page::Main, hits: Vec::new(), hover: None, pointer: (0.0, 0.0), reply: None, scroll: 0.0, scroll_max: 0.0 }
+        PhoneView { waker, seen, state, page: Page::Main, hits: Vec::new(), hover: None, pointer: (0.0, 0.0), reply: None, scroll: crate::ui::Scroller::default() }
     }
 
     fn cmd(&self, c: PhoneCommand) {
@@ -383,7 +382,8 @@ impl PhoneView {
             cb::cairo_rectangle(cr, c.x, top, c.w, bottom - top);
             cb::cairo_clip(cr);
         }
-        let mut y = top - self.scroll;
+        let scroll = self.scroll.pos();
+        let mut y = top - scroll;
         let start_y = y;
         for n in d.notifications.iter() {
             let replying = self.reply.as_ref().is_some_and(|(id, _)| *id == n.id);
@@ -427,7 +427,7 @@ impl PhoneView {
             }
             y += h + 10.0;
         }
-        self.scroll_max = (y - start_y - (bottom - top)).max(0.0);
+        self.scroll.set_max(y - start_y - (bottom - top), style);
         unsafe { cb::cairo_restore(cr) };
         self.footer(cr, c, style);
     }
@@ -512,7 +512,7 @@ impl PhoneView {
             }
             Act::NotifPage => {
                 self.page = Page::Notifications;
-                self.scroll = 0.0;
+                self.scroll.reset(0.0);
             }
             Act::Back => {
                 self.page = Page::Main;
@@ -568,7 +568,7 @@ impl PhoneView {
 
 impl CardView for PhoneView {
     fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, _theme: &Theme) {
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, style.radius, style.card_bg);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
         self.hits.clear();
         match self.state.clone() {
             None => self.draw_off(cr, card, style),
@@ -600,10 +600,7 @@ impl CardView for PhoneView {
         if self.page != Page::Notifications {
             return false;
         }
-        let s = (self.scroll + delta * 40.0).clamp(0.0, self.scroll_max);
-        let changed = s != self.scroll;
-        self.scroll = s;
-        changed
+        self.scroll.by(delta)
     }
 
     fn key(&mut self, special: u32, typed: Option<char>, _shift: bool, ctrl: bool) -> Effect {

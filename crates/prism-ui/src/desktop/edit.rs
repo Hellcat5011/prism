@@ -492,7 +492,7 @@ impl Edit {
             let combo = Rect { x: x + 64.0, y: cy + 5.0, w: POP_W - 78.0, h: 30.0 };
             let open = self.font_dd.as_ref().map(|(w, _)| *w == id).unwrap_or(false);
             let font = if p.font_family.is_empty() { None } else { Some(p.font_family.as_str()) };
-            crate::uikit::combo(cr, combo, &name, open, self.hover == Some(Action::Font(id)), &self.palette(), font);
+            crate::uikit::combo(cr, combo, &name, open, if self.hover == Some(Action::Font(id)) { 1.0 } else { 0.0 }, &self.palette(), font);
             self.font_anchor = combo;
             self.actions.push((Action::Font(id), combo));
         }

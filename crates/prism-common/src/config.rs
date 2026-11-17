@@ -22,6 +22,10 @@ pub struct Config {
     #[serde(default = "default_blur_strength")]
     pub blur_strength: f32,
 
+    /// Soft drop shadow under modal cards (drawn on an unblurred surface below the card).
+    #[serde(default = "default_true")]
+    pub shadows_enabled: bool,
+
     #[serde(default)]
     pub blue_light_enabled: bool,
 
@@ -509,6 +513,7 @@ impl Default for Config {
             background_opacity: default_bg_opacity(),
             blur_enabled: default_true(),
             blur_strength: default_blur_strength(),
+            shadows_enabled: default_true(),
             blue_light_enabled: false,
             blue_light_mode: default_blue_light_mode(),
             blue_light_night_start: default_night_start(),

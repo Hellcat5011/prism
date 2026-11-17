@@ -28,22 +28,33 @@ fn with_alpha(c: Rgba, a: f64) -> Rgba {
     (c.0, c.1, c.2, a)
 }
 
-/// PillSwitch.qml: 50x28 track, knob inset 4 px.
-pub fn switch(cr: *mut Cairo, r: Rect, on: bool, hover: bool, p: &Palette) {
-    let track = if on { p.accent } else { with_alpha(p.fg, if hover { 0.25 } else { 0.18 }) };
-    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, track);
+/// Linear mix of two colours.
+fn mix(a: Rgba, b: Rgba, t: f64) -> Rgba {
+    crate::ui::mix(a, b, t)
+}
+
+/// PillSwitch.qml: 50x28 track, knob inset 4 px. `on`: knob position 0 (off) .. 1 (on), may
+/// overshoot slightly while it springs; `hover`: hover level 0..1 (see `ui::Fades`).
+pub fn switch(cr: *mut Cairo, r: Rect, on: f64, hover: f64, p: &Palette) {
+    let t = on.clamp(0.0, 1.0);
+    let off_track = with_alpha(p.fg, 0.18 + 0.07 * hover);
+    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, mix(off_track, p.accent, t));
     let d = r.h - 8.0;
-    let kx = if on { r.x + r.w - d - 4.0 } else { r.x + 4.0 };
-    fill_rounded_rect(cr, kx, r.y + 4.0, d, d, d / 2.0, if on { p.on_accent } else { p.fg });
+    // The knob stretches a little while it travels (wider mid-way), like a drop of liquid.
+    let stretch = 1.0 + 0.25 * (1.0 - (2.0 * t - 1.0).powi(2));
+    let kw = d * stretch;
+    let kx = r.x + 4.0 + (r.w - 8.0 - kw) * on.clamp(-0.05, 1.05);
+    fill_rounded_rect(cr, kx, r.y + 4.0, kw, d, d / 2.0, mix(p.fg, p.on_accent, t));
 }
 
 /// Horizontal slider; `t` in 0..1.
-pub fn slider(cr: *mut Cairo, r: Rect, t: f64, hover: bool, p: &Palette) {
+/// `hover`: hover (or drag) level 0..1; the knob grows with it.
+pub fn slider(cr: *mut Cairo, r: Rect, t: f64, hover: f64, p: &Palette) {
     let t = t.clamp(0.0, 1.0);
     let cy = r.y + r.h / 2.0;
     fill_rounded_rect(cr, r.x, cy - 3.0, r.w, 6.0, 3.0, with_alpha(p.fg, 0.18));
     fill_rounded_rect(cr, r.x, cy - 3.0, (r.w * t).max(6.0), 6.0, 3.0, p.accent);
-    let k = if hover { 10.0 } else { 9.0 };
+    let k = 9.0 + 1.5 * hover;
     fill_rounded_rect(cr, r.x + r.w * t - k, cy - k, 2.0 * k, 2.0 * k, k, p.accent);
     fill_rounded_rect(cr, r.x + r.w * t - k + 3.0, cy - k + 3.0, 2.0 * k - 6.0, 2.0 * k - 6.0, k - 3.0, p.on_accent);
 }
@@ -54,12 +65,15 @@ pub fn slider_value(r: Rect, x: f64) -> f64 {
 }
 
 /// Single-line text field. `editing` shows the caret and the focus ring.
-pub fn text_field(cr: *mut Cairo, r: Rect, text: &str, placeholder: &str, editing: bool, hover: bool, invalid: bool, p: &Palette) {
-    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, with_alpha(p.accent, if editing { 0.16 } else { 0.10 }));
+/// `hover`: hover level 0..1.
+pub fn text_field(cr: *mut Cairo, r: Rect, text: &str, placeholder: &str, editing: bool, hover: f64, invalid: bool, p: &Palette) {
+    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, with_alpha(p.accent, if editing { 0.16 } else { 0.10 + 0.03 * hover }));
     let ring = if invalid {
         Some(p.error)
-    } else if editing || hover {
-        Some(with_alpha(p.accent, if editing { 1.0 } else { 0.5 }))
+    } else if editing {
+        Some(p.accent)
+    } else if hover > 0.0 {
+        Some(with_alpha(p.accent, 0.5 * hover))
     } else {
         None
     };
@@ -101,16 +115,18 @@ pub enum ButtonKind {
     Danger,
 }
 
-pub fn button(cr: *mut Cairo, r: Rect, label: &str, kind: ButtonKind, hover: bool, enabled: bool, p: &Palette) {
+/// `hover`: hover level 0..1 (0 while disabled).
+pub fn button(cr: *mut Cairo, r: Rect, label: &str, kind: ButtonKind, hover: f64, enabled: bool, p: &Palette) {
     let a = if enabled { 1.0 } else { 0.4 };
+    let hover = if enabled { hover.clamp(0.0, 1.0) } else { 0.0 };
     let tint = match kind {
-        ButtonKind::Danger if hover => p.error,
-        ButtonKind::Danger | ButtonKind::Outline => p.fg,
+        ButtonKind::Danger => mix(p.fg, p.error, hover),
+        ButtonKind::Outline => p.fg,
         ButtonKind::Primary => p.accent,
     };
     let fill = match kind {
-        ButtonKind::Primary => if hover { 0.40 } else { 0.20 },
-        _ => if hover { 0.16 } else { 0.0 },
+        ButtonKind::Primary => 0.20 + 0.20 * hover,
+        _ => 0.16 * hover,
     };
     fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, with_alpha(tint, fill * a));
     let border = if kind == ButtonKind::Primary { with_alpha(p.accent, a) } else { with_alpha(p.outline, a) };
@@ -120,10 +136,12 @@ pub fn button(cr: *mut Cairo, r: Rect, label: &str, kind: ButtonKind, hover: boo
 }
 
 /// The closed state of a combo box: current label and a chevron.
-pub fn combo(cr: *mut Cairo, r: Rect, label: &str, open: bool, hover: bool, p: &Palette, font: Option<&str>) {
-    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, with_alpha(p.accent, if open || hover { 0.16 } else { 0.10 }));
-    if open || hover {
-        stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, r.h / 2.0, with_alpha(p.accent, 0.6), 1.0);
+/// `hover`: hover level 0..1.
+pub fn combo(cr: *mut Cairo, r: Rect, label: &str, open: bool, hover: f64, p: &Palette, font: Option<&str>) {
+    let h = if open { 1.0 } else { hover.clamp(0.0, 1.0) };
+    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, with_alpha(p.accent, 0.10 + 0.06 * h));
+    if h > 0.0 {
+        stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, r.h / 2.0, with_alpha(p.accent, 0.6 * h), 1.0);
     }
     let fam = font.map(|f| format!("{}, {}", f, p.family)).unwrap_or_else(|| p.family.clone());
     draw_in_box(cr, label, &TextStyle { family: &fam, px: 13.0, bold: false, color: p.fg }, r.x + 14.0, r.y, r.w - 40.0, r.h, Align::Start);
@@ -168,12 +186,13 @@ impl Dropdown {
         self.rect = Rect { x, y, w, h };
 
         let bg = (p.card.0, p.card.1, p.card.2, 0.98);
+        drop_shadow(cr, x, y, w, h, 12.0, 14.0, 4.0, 0.45);
         fill_rounded_rect(cr, x, y, w, h, 12.0, bg);
         stroke_rounded_rect(cr, x + 0.5, y + 0.5, w - 1.0, h - 1.0, 12.0, with_alpha(p.outline, 1.0), 1.0);
 
         if searchable {
             let f = Rect { x: x + 8.0, y: y + 6.0, w: w - 16.0, h: 30.0 };
-            text_field(cr, f, &self.filter, "Type to search…", true, false, false, p);
+            text_field(cr, f, &self.filter, "Type to search…", true, 0.0, false, p);
         }
 
         let list = Rect { x, y: y + 6.0 + header, w, h: rows_visible as f64 * DROPDOWN_ROW };

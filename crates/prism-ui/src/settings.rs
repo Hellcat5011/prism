@@ -302,6 +302,8 @@ fn rows() -> Vec<Row> {
         Row { tab: 5, title: "Blur Strength", subtitle: "Blur passes and offset used by the compositor (level 1 to 5).",
             visible: |c| c.blur_enabled && prism_common::blur::compositor().is_some(),
             control: Slider { min: 1.0, max: 5.0, step: 1.0, get: |c| prism_common::blur::level(c.blur_strength) as f64, set: |c, v| c.blur_strength = v.round() as f32, fmt: |v| format!("Level {:.0}", v) } },
+        Row { tab: 5, title: "Window Shadows", subtitle: "Soft drop shadow under cards.", visible: always,
+            control: Switch(|c| c.shadows_enabled, |c, v| c.shadows_enabled = v) },
         Row { tab: 5, title: "Window Background Opacity", subtitle: "Opacity of every card's background.", visible: always,
             control: Slider { min: 0.2, max: 1.0, step: 0.01, get: |c| c.background_opacity as f64, set: |c, v| c.background_opacity = v as f32, fmt: |v| format!("{:.0}%", v * 100.0) } },
         Row { tab: 5, title: "Window Corner Radius", subtitle: "Corner rounding of every card.", visible: always,
@@ -425,7 +427,7 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Hit {
     Search,
     Tab(usize),
@@ -456,7 +458,17 @@ pub struct SettingsView {
     /// Config before the slider drag in progress.
     drag_start: Option<Config>,
     tab: usize,
-    scroll: f64,
+    scroll: crate::ui::Scroller,
+    /// Hover fades of every hit target, switch knob positions (per row), the gliding tab pill,
+    /// the gliding keyboard focus ring (x/w and content y/h) and the tab-change entrance.
+    hover_fade: crate::ui::Fades<Hit>,
+    knobs: crate::ui::Fades<usize>,
+    tab_glide: crate::ui::Glide,
+    focus_glide: (crate::ui::Glide, crate::ui::Glide),
+    tab_in: crate::ui::SpringValue,
+    time_scale: Option<f64>,
+    /// Where the selected tab was drawn last frame (target of `tab_glide`).
+    last_tab_rect: Option<Rect>,
     content_h: f64,
     search: String,
     search_focus: bool,
@@ -509,7 +521,14 @@ impl SettingsView {
             redo: Vec::new(),
             drag_start: None,
             tab: 0,
-            scroll: 0.0,
+            scroll: crate::ui::Scroller::default(),
+            hover_fade: crate::ui::Fades::default(),
+            knobs: crate::ui::Fades::default(),
+            tab_glide: crate::ui::Glide::default(),
+            focus_glide: Default::default(),
+            tab_in: crate::ui::SpringValue::new(1.0),
+            time_scale: Some(1.0),
+            last_tab_rect: None,
             content_h: 0.0,
             search: String::new(),
             search_focus: false,
@@ -631,12 +650,12 @@ impl SettingsView {
 
     pub fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, theme: &Theme) {
         let p = Self::palette(style, theme);
+        self.time_scale = style.time_scale();
         self.card = card;
         self.hits.clear();
         self.control_rects.clear();
 
-        fill_rounded_rect(cr, card.x, card.y, card.w, card.h, style.radius, style.card_bg);
-        stroke_rounded_rect(cr, card.x + 0.5, card.y + 0.5, card.w - 1.0, card.h - 1.0, style.radius, style.card_border, 1.0);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
 
         // ── Sidebar: search + tabs ──
         let sx = card.x + MARGIN;
@@ -656,6 +675,18 @@ impl SettingsView {
         self.hits.push((Hit::Search, search));
 
         let mut ty = sy + 36.0 + 16.0;
+        // The selected tab's pill glides between tabs (drawn first, under the labels). Its
+        // target is where the selected tab was last frame (the tab list rarely changes).
+        let mut tab_rect = None;
+        let tab_pill = if self.query().is_empty() {
+            let (ry, rh) = self.last_tab_rect.map_or((ty + 38.0 * self.tab as f64, 38.0), |r| (r.y, r.h));
+            let (py, ph) = self.tab_glide.to(ry, rh, style);
+            fill_rounded_rect(cr, sx + 4.0, py, SIDEBAR_W - 8.0, ph, 8.0, (p.fg.0, p.fg.1, p.fg.2, 0.85));
+            Some((py, ph))
+        } else {
+            self.tab_glide.reset();
+            None
+        };
         for (i, name) in TABS.iter().enumerate() {
             if !self.tab_matches(i) {
                 continue;
@@ -663,15 +694,22 @@ impl SettingsView {
             let r = Rect { x: sx + 4.0, y: ty, w: SIDEBAR_W - 8.0, h: 38.0 };
             let sel = i == self.tab && self.query().is_empty();
             if sel {
-                fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 8.0, (p.fg.0, p.fg.1, p.fg.2, 0.85));
-            } else if self.hover == Some(Hit::Tab(i)) {
-                fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 8.0, (p.fg.0, p.fg.1, p.fg.2, 0.15));
+                tab_rect = Some(r);
             }
-            let color = if sel { hex_to_rgba(&theme.inverse_primary, 1.0) } else { p.fg };
+            let hv = self.hover_fade.level(Hit::Tab(i), self.hover == Some(Hit::Tab(i)) && !sel, style);
+            if hv > 0.0 {
+                fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 8.0, (p.fg.0, p.fg.1, p.fg.2, 0.15 * hv));
+            }
+            let on = tab_pill.map_or(0.0, |(py, ph)| crate::ui::coverage(py, ph, r.y, r.h));
+            let color = crate::ui::mix(p.fg, hex_to_rgba(&theme.inverse_primary, 1.0), on);
             let fam = if sel { format!("{} Semi-Bold", p.family) } else { p.family.clone() };
             draw_in_box(cr, name, &TextStyle { family: &fam, px: 14.0, bold: false, color }, r.x + 12.0, r.y, r.w - 24.0, r.h, Align::Start);
             self.hits.push((Hit::Tab(i), r));
             ty += 38.0;
+        }
+        if tab_rect != self.last_tab_rect {
+            self.last_tab_rect = tab_rect;
+            crate::ui::keep_animating();
         }
 
         // ── Content pane ──
@@ -687,12 +725,12 @@ impl SettingsView {
         let title = if self.query().is_empty() { format!("\u{2699}  {} Settings", TABS[self.tab]) } else { format!("\u{2315}  Results for \u{201C}{}\u{201D}", self.search.trim()) };
         draw_in_box(cr, &title, &TextStyle { family: &format!("{} Semi-Bold", p.family), px: 20.0, bold: false, color: p.fg }, ix, hy, iw - 40.0, 32.0, Align::Start);
         let close = Rect { x: ix + iw - 32.0, y: hy, w: 32.0, h: 32.0 };
-        let ch = self.hover == Some(Hit::Close);
-        fill_rounded_rect(cr, close.x, close.y, 32.0, 32.0, 16.0, if ch { (p.error.0, p.error.1, p.error.2, 0.8) } else { (0.0, 0.0, 0.0, 0.0) });
-        if !ch {
-            stroke_rounded_rect(cr, close.x + 0.5, close.y + 0.5, 31.0, 31.0, 16.0, p.outline, 1.0);
+        let ch = self.hover_fade.level(Hit::Close, self.hover == Some(Hit::Close), style);
+        fill_rounded_rect(cr, close.x, close.y, 32.0, 32.0, 16.0, (p.error.0, p.error.1, p.error.2, 0.8 * ch));
+        if ch < 1.0 {
+            stroke_rounded_rect(cr, close.x + 0.5, close.y + 0.5, 31.0, 31.0, 16.0, (p.outline.0, p.outline.1, p.outline.2, p.outline.3 * (1.0 - ch)), 1.0);
         }
-        draw_in_box(cr, "\u{2715}", &TextStyle { family: &p.family, px: 14.0, bold: false, color: if ch { (1.0, 1.0, 1.0, 1.0) } else { p.fg } }, close.x, close.y, 32.0, 32.0, Align::Center);
+        draw_in_box(cr, "\u{2715}", &TextStyle { family: &p.family, px: 14.0, bold: false, color: crate::ui::mix(p.fg, (1.0, 1.0, 1.0, 1.0), ch) }, close.x, close.y, 32.0, 32.0, Align::Center);
         self.hits.push((Hit::Close, close));
         let sep_y = hy + 32.0 + 16.0;
         fill_rounded_rect(cr, ix, sep_y, iw, 1.0, 0.0, hex_to_rgba(&theme.outline_variant, 0.3));
@@ -702,8 +740,9 @@ impl SettingsView {
         fill_rounded_rect(cr, ix, footer_y - 17.0, iw, 1.0, 0.0, hex_to_rgba(&theme.outline_variant, 0.3));
         let redo = Rect { x: ix + iw - 110.0, y: footer_y, w: 110.0, h: 36.0 };
         let undo = Rect { x: redo.x - 120.0, y: footer_y, w: 110.0, h: 36.0 };
-        uikit::button(cr, undo, "Undo", ButtonKind::Outline, self.hover == Some(Hit::Undo), !self.undo.is_empty(), &p);
-        uikit::button(cr, redo, "Redo", ButtonKind::Outline, self.hover == Some(Hit::Redo), !self.redo.is_empty(), &p);
+        let (hu, hr) = (self.hover_fade.level(Hit::Undo, self.hover == Some(Hit::Undo), style), self.hover_fade.level(Hit::Redo, self.hover == Some(Hit::Redo), style));
+        uikit::button(cr, undo, "Undo", ButtonKind::Outline, hu, !self.undo.is_empty(), &p);
+        uikit::button(cr, redo, "Redo", ButtonKind::Outline, hr, !self.redo.is_empty(), &p);
         self.hits.push((Hit::Undo, undo));
         self.hits.push((Hit::Redo, redo));
         let msg = match &self.message {
@@ -753,21 +792,27 @@ impl SettingsView {
             };
             if let Some(k) = focused_row.and_then(|f| visible.iter().position(|&i| i == f)) {
                 let top: f64 = heights[..k].iter().sum();
-                let bottom = top + heights[k];
-                if top < self.scroll {
-                    self.scroll = top;
-                } else if bottom > self.scroll + list.h {
-                    self.scroll = bottom - list.h;
-                }
+                self.scroll.set_max(self.content_h - list.h, style);
+                self.scroll.ensure_visible(top, heights[k], list.h);
             }
         }
-        self.scroll = self.scroll.clamp(0.0, (self.content_h - list.h).max(0.0));
+        self.scroll.set_max(self.content_h - list.h, style);
+        let scroll = self.scroll.pos();
         unsafe {
             cairo_save(cr);
             cairo_rectangle(cr, list.x - 4.0, list.y, list.w + 8.0, list.h);
             cairo_clip(cr);
         }
-        let mut y = list.y - self.scroll;
+        // Tab change: the rows fade in and rise into place.
+        let tab_in = self.tab_in.animated(0.002);
+        let entering = tab_in < 0.999;
+        if entering {
+            unsafe {
+                cairo_push_group(cr);
+                cairo_translate(cr, 0.0, 14.0 * (1.0 - tab_in));
+            }
+        }
+        let mut y = list.y - scroll;
         let mut open_combo_anchor = None;
         self.focus_order.clear();
         if visible.is_empty() {
@@ -812,11 +857,11 @@ impl SettingsView {
                 // Changed-this-session marker after the title, and a revert button.
                 fill_rounded_rect(cr, list.x + tw.min(text_w - 6.0) + 8.0, ry + 7.0, 6.0, 6.0, 3.0, p.accent);
                 let rr = Rect { x: list.x + list.w - CONTROL_W - 36.0, y: y + h / 2.0 - 14.0, w: 28.0, h: 28.0 };
-                let rh = self.hover == Some(Hit::Reset(i));
-                if rh {
-                    fill_rounded_rect(cr, rr.x, rr.y, rr.w, rr.h, 14.0, (p.fg.0, p.fg.1, p.fg.2, 0.15));
+                let rh = self.hover_fade.level(Hit::Reset(i), self.hover == Some(Hit::Reset(i)), style);
+                if rh > 0.0 {
+                    fill_rounded_rect(cr, rr.x, rr.y, rr.w, rr.h, 14.0, (p.fg.0, p.fg.1, p.fg.2, 0.15 * rh));
                 }
-                let a = if rh { 1.0 } else { 0.55 };
+                let a = 0.55 + 0.45 * rh;
                 draw_in_box(cr, "\u{21BA}", &TextStyle { family: &p.family, px: 16.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, a) }, rr.x, rr.y, rr.w, rr.h, Align::Center);
                 self.hits.push((Hit::Reset(i), rr));
             }
@@ -827,11 +872,12 @@ impl SettingsView {
             }
             let cx = list.x + list.w - CONTROL_W;
             let mid = y + h / 2.0;
-            let hov = self.hover == Some(Hit::Control(i));
+            let hov = self.hover_fade.level(Hit::Control(i), self.hover == Some(Hit::Control(i)) || self.drag == Some(i), style);
             match &r.control {
                 Control::Switch(get, _) => {
                     let sr = Rect { x: list.x + list.w - 50.0, y: mid - 14.0, w: 50.0, h: 28.0 };
-                    uikit::switch(cr, sr, get(&draft), hov, &p);
+                    let knob = self.knobs.settled_level(i, get(&draft), crate::ui::SPRING_KNOB, style);
+                    uikit::switch(cr, sr, knob, hov, &p);
                     self.control_rects.push((i, sr));
                 }
                 Control::Slider { min, max, get, fmt, .. } => {
@@ -839,7 +885,7 @@ impl SettingsView {
                     let label = fmt(v);
                     draw_in_box(cr, &label, &TextStyle { family: &p.family, px: 12.0, bold: true, color: p.fg }, cx, mid - 9.0, 60.0, 18.0, Align::Start);
                     let sr = Rect { x: cx + 66.0, y: mid - 12.0, w: CONTROL_W - 76.0, h: 24.0 };
-                    uikit::slider(cr, sr, (v - min) / (max - min), hov || self.drag == Some(i), &p);
+                    uikit::slider(cr, sr, (v - min) / (max - min), hov, &p);
                     self.control_rects.push((i, sr));
                 }
                 Control::Text { get, placeholder, browse, .. } => {
@@ -848,7 +894,8 @@ impl SettingsView {
                     if *browse {
                         let br = Rect { x: cx + fw + 8.0, y: mid - 18.0, w: 38.0, h: 36.0 };
                         let busy = self.picking.is_some();
-                        uikit::button(cr, br, "\u{2026}", ButtonKind::Outline, self.hover == Some(Hit::Browse(i)), !busy, &p);
+                        let bh = self.hover_fade.level(Hit::Browse(i), self.hover == Some(Hit::Browse(i)), style);
+                        uikit::button(cr, br, "\u{2026}", ButtonKind::Outline, bh, !busy, &p);
                         self.hits.push((Hit::Browse(i), br));
                     }
                     let (text, editing) = match &self.editing {
@@ -877,7 +924,8 @@ impl SettingsView {
                     for (b, (label, _, kind)) in btns.iter().enumerate() {
                         let w = (crate::desktop::text::measure(cr, label, &TextStyle { family: &p.family, px: 13.0, bold: true, color: p.fg }).0 + 40.0).max(120.0);
                         let br = Rect { x: bx, y: by, w, h: 34.0 };
-                        uikit::button(cr, br, label, *kind, self.hover == Some(Hit::Button(i, b)), true, &p);
+                        let bh = self.hover_fade.level(Hit::Button(i, b), self.hover == Some(Hit::Button(i, b)), style);
+                        uikit::button(cr, br, label, *kind, bh, true, &p);
                         self.hits.push((Hit::Button(i, b), br));
                         bx += w + 10.0;
                     }
@@ -896,14 +944,27 @@ impl SettingsView {
                 h => self.hits.iter().find(|(k, _)| *k == h).map(|(_, r)| *r),
             };
             if let Some(r) = rect {
+                // The ring glides between controls (in content coordinates, so it scrolls along).
+                let (gx, gw) = self.focus_glide.0.to(r.x, r.w, style);
+                let (gy, gh) = self.focus_glide.1.to(r.y + scroll, r.h, style);
+                let r = Rect { x: gx, y: gy - scroll, w: gw, h: gh };
                 let rad = if matches!(f, Hit::Control(i) if matches!(self.rows[i].control, Control::Switch(..) | Control::Slider { .. })) { (r.h + 6.0) / 2.0 } else { 20.0 };
-                stroke_rounded_rect(cr, r.x - 3.0, r.y - 3.0, r.w + 6.0, r.h + 6.0, rad, p.accent, 2.0);
+                stroke_rounded_rect(cr, r.x - 3.0, r.y - 3.0, r.w + 6.0, r.h + 6.0, rad.min((r.h + 6.0) / 2.0), p.accent, 2.0);
             }
+        } else {
+            self.focus_glide.0.reset();
+            self.focus_glide.1.reset();
         }
-        unsafe { cairo_restore(cr) };
+        unsafe {
+            if entering {
+                cairo_pop_group_to_source(cr);
+                cairo_paint_with_alpha(cr, tab_in.clamp(0.0, 1.0));
+            }
+            cairo_restore(cr);
+        }
         if self.content_h > list.h {
             let thumb_h = (list.h * list.h / self.content_h).max(30.0);
-            let tyy = list.y + (list.h - thumb_h) * (self.scroll / (self.content_h - list.h));
+            let tyy = list.y + (list.h - thumb_h) * (scroll / (self.content_h - list.h)).clamp(0.0, 1.0);
             fill_rounded_rect(cr, pane.x + pane.w - 9.0, tyy, 3.0, thumb_h, 1.5, (p.fg.0, p.fg.1, p.fg.2, 0.3));
         }
         // Clip control hit rects to the visible list.
@@ -921,6 +982,12 @@ impl SettingsView {
             }
         }
 
+    }
+
+    /// Start the rows' entrance after a tab change.
+    fn tab_entrance(&mut self) {
+        self.tab_in.snap(0.0);
+        self.tab_in.set_scaled(1.0, (0.32, 0.9), self.time_scale);
     }
 
     // ── Input ─────────────────────────────────────────────────────────
@@ -975,9 +1042,8 @@ impl SettingsView {
             }
         }
         if self.pane.contains(x, y) {
-            self.scroll = (self.scroll + delta).clamp(0.0, (self.content_h - 1.0).max(0.0));
             self.combo = None;
-            return true;
+            return self.scroll.by(delta);
         }
         false
     }
@@ -1041,9 +1107,12 @@ impl SettingsView {
         match hit {
             Hit::Search => self.search_focus = true,
             Hit::Tab(t) => {
+                if t != self.tab {
+                    self.tab_entrance();
+                }
                 self.tab = t;
                 self.search.clear();
-                self.scroll = 0.0;
+                self.scroll.reset(0.0);
                 self.focus = None;
             }
             Hit::Close => return self.request_close(),
@@ -1124,7 +1193,7 @@ impl SettingsView {
             if self.combo.is_none() && self.editing.is_none() && !self.search.is_empty() {
                 self.search.clear();
                 self.search_focus = false;
-                self.scroll = 0.0;
+                self.scroll.reset(0.0);
                 return Effect::Redraw;
             }
             return self.request_close();
@@ -1169,7 +1238,8 @@ impl SettingsView {
             self.combo = None;
             self.search.clear();
             self.tab = if special == PGDN { (self.tab + 1) % TABS.len() } else { (self.tab + TABS.len() - 1) % TABS.len() };
-            self.scroll = 0.0;
+            self.tab_entrance();
+            self.scroll.reset(0.0);
             self.focus = None;
             return Effect::Redraw;
         }
@@ -1221,11 +1291,11 @@ impl SettingsView {
                 }
                 (BACKSPACE, _) => {
                     self.search.pop();
-                    self.scroll = 0.0;
+                    self.scroll.reset(0.0);
                 }
                 (_, Some(c)) => {
                     self.search.push(c);
-                    self.scroll = 0.0;
+                    self.scroll.reset(0.0);
                 }
                 _ => return Effect::None,
             }
@@ -1271,7 +1341,7 @@ impl SettingsView {
             (ENTER, _) | (_, Some(' ')) if self.focus.is_some() => return self.activate(),
             (PGUP | PGDN, _) => {
                 let page = (self.pane.h - 160.0).max(100.0);
-                self.scroll = (self.scroll + if special == PGDN { page } else { -page }).max(0.0);
+                self.scroll.to(self.scroll.target() + if special == PGDN { page } else { -page });
             }
             (HOME, _) => {
                 self.focus = None;
@@ -1290,7 +1360,7 @@ impl SettingsView {
                 self.search_focus = true;
                 self.focus_visible = false;
                 self.search.push(c);
-                self.scroll = 0.0;
+                self.scroll.reset(0.0);
             }
             _ => return Effect::None,
         }

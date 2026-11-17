@@ -23,6 +23,7 @@ mod rec_indicator;
 mod power;
 mod portal;
 mod settings;
+mod shadow;
 mod spotlight;
 mod toasts;
 mod status;
@@ -59,7 +60,7 @@ use prism_common::emoji::{load_emojis, EmojiItem};
 use prism_common::{Config, Theme};
 use wayland_client::protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm,
-    wl_shm_pool, wl_surface,
+    wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -105,6 +106,8 @@ struct UiState {
     exit_requested: bool,
     apps: Vec<DesktopApp>,
     pointer_x: i32,
+    /// The scroll deltas being delivered come from a touchpad (wl_pointer.axis_source).
+    scroll_finger: bool,
     pointer_y: i32,
     pointer_down: bool,
     card_bounds: (i32, i32, i32, i32),
@@ -130,6 +133,10 @@ struct UiState {
     /// surface fades the compositor's blur behind it too; fading only the pixels left the blur
     /// rectangle behind until the surface was destroyed.
     alpha_surface: Option<WpAlphaModifierSurfaceV1>,
+    /// Drop shadow under the card (subsurface of the scrim, see shadow.rs).
+    shadow: Option<shadow::Shadow>,
+    /// Card pose to apply to the shadow after this frame.
+    shadow_pending: Option<Pose>,
     alpha_multiplier: u32,
     /// Collapse to origin: the card's layer surface is scaled toward `origin` (screen px; the
     /// card centre if None) during the scale transitions, its buffer stretched by this viewport.
@@ -270,6 +277,10 @@ impl Dispatch<WpSinglePixelBufferManagerV1, ()> for UiState {
 }
 impl Dispatch<WpAlphaModifierSurfaceV1, ()> for UiState {
     fn event(_: &mut Self, _: &WpAlphaModifierSurfaceV1, _: <WpAlphaModifierSurfaceV1 as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<wl_subsurface::WlSubsurface, ()> for UiState {
+    fn event(_: &mut Self, _: &wl_subsurface::WlSubsurface, _: <wl_subsurface::WlSubsurface as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<WpViewporter, ()> for UiState {
@@ -577,8 +588,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                     _ => {}
                 }
             }
-            wl_pointer::Event::Axis { value, .. } => {
-                let delta = value * 2.5;
+            wl_pointer::Event::AxisSource { axis_source } => {
+                // Sent before the deltas of each frame: touchpad scrolling follows the fingers.
+                let finger = matches!(axis_source, WEnum::Value(wl_pointer::AxisSource::Finger | wl_pointer::AxisSource::Continuous));
+                ui::set_scroll_finger(finger);
+                state.scroll_finger = finger;
+            }
+            wl_pointer::Event::Axis { axis: WEnum::Value(wl_pointer::Axis::VerticalScroll), value, .. } => {
+                // Finger deltas are surface px (1:1 with the content); wheel steps are stretched.
+                let delta = if state.scroll_finger { value / state.style.scale } else { value * 2.5 };
                 let (dx, dy) = state.design_point(state.pointer_x as f64, state.pointer_y as f64);
                 if let Some(sv) = state.settings.as_mut() {
                     if sv.scroll(dx, dy, delta) {
@@ -938,19 +956,20 @@ impl UiState {
         // Start hidden when a transition will fade it in.
         let level = if self.transition.is_some() { self.scrim_shown.max(0.0) } else { 1.0 };
         self.scrim_shown = -1.0;
-        self.set_scrim_level(level, qh);
+        let _ = self.set_scrim_level(level, qh);
     }
 
     /// Set the dim to `level` (0..1) of the configured dim opacity by attaching a new 1x1
     /// buffer. The compositor just composites a solid rectangle; nothing is redrawn.
-    fn set_scrim_level(&mut self, level: f64, qh: &QueueHandle<Self>) {
+    /// True when the scrim was committed.
+    fn set_scrim_level(&mut self, level: f64, qh: &QueueHandle<Self>) -> bool {
         let level = level.clamp(0.0, 1.0);
         if (level - self.scrim_shown).abs() < 0.004 {
-            return;
+            return false;
         }
-        let Some(surface) = self.scrim_surface.clone() else { return };
+        let Some(surface) = self.scrim_surface.clone() else { return false };
         if self.scrim_viewport.is_none() {
-            return; // not configured yet
+            return false; // not configured yet
         }
         self.scrim_shown = level;
         let dim = if self.style.dim_enabled { self.style.dim_opacity } else { 0.0 };
@@ -975,6 +994,42 @@ impl UiState {
             if let Some(old) = self.scrim_buffer.replace(buf) {
                 old.destroy();
             }
+            return true;
+        }
+        false
+    }
+
+    /// Move, scale and fade the drop shadow with the card's `pose`. True when the scrim must
+    /// commit to apply it.
+    fn update_shadow(&mut self, pose: &Pose, qh: &QueueHandle<Self>) -> bool {
+        let Some(shm) = self.shm.clone() else { return false };
+        let s = self.style.scale;
+        // The card at rest, in screen px. The NC surface (and so design_card) is wider than the
+        // card while it slides; the shadow must follow the card itself, as drawn in draw_frame.
+        let rest = match self.mode {
+            UiMode::NotificationCenter => {
+                let c = nc::card_rect(&self.config.notification_center_position, self.width as f64 / s, self.height as f64 / s);
+                ((c.x * s).round() as i32, (c.y * s).round() as i32, (c.w * s).round() as i32, (c.h * s).round() as i32)
+            }
+            _ => self.desired_card_rect(),
+        };
+        let (x, y, w, h) = (rest.0 as f64, rest.1 as f64, rest.2 as f64, rest.3 as f64);
+        // Where the card is drawn now: the surface itself scales toward the origin (collapse),
+        // or the pixels inside the surface move and scale about its centre.
+        let visible = if self.collapse() {
+            let g = self.geometry_for(pose);
+            (g.0 as f64, g.1 as f64, g.2 as f64, g.3 as f64)
+        } else {
+            let (sx, sy, sw, sh) = self.surf_rect;
+            let (cx, cy) = (sx as f64 + sw as f64 / 2.0, sy as f64 + sh as f64 / 2.0);
+            let k = pose.scale;
+            (cx + (x + pose.tx * s - cx) * k, cy + (y + pose.ty * s - cy) * k, w * k, h * k)
+        };
+        let enabled = self.style.shadows && !self.settings_hidden();
+        let (radius, alpha) = (self.style.radius, pose.alpha);
+        match self.shadow.as_mut() {
+            Some(sh) => sh.update(&shm, qh, rest, radius, s, visible, alpha, enabled),
+            None => false,
         }
     }
 
@@ -1097,6 +1152,8 @@ impl UiState {
         if pose.done && !self.closing {
             self.transition = None;
         }
+        // The shadow follows the card; applied after drawing with the scrim (its parent).
+        self.shadow_pending = Some(*pose);
         // Fade the scrim with the card; applied after drawing (see draw_frame).
         self.scrim_pending = Some(if self.settings_hidden() { 0.0 } else { pose.shown.clamp(0.0, 1.0) });
         if self.closing && pose.done {
@@ -1127,8 +1184,17 @@ impl UiState {
     fn draw_frame(&mut self, qh: &QueueHandle<Self>) {
         let perf_t0 = std::time::Instant::now();
         self.draw_frame_inner(qh);
-        if let Some(level) = self.scrim_pending.take() {
-            self.set_scrim_level(level, qh);
+        // The shadow is a synchronized subsurface of the scrim: its new state shows with the
+        // scrim's next commit.
+        let shadow_moved = self.shadow_pending.take().is_some_and(|pose| self.update_shadow(&pose, qh));
+        let scrim_committed = match self.scrim_pending.take() {
+            Some(level) => self.set_scrim_level(level, qh),
+            None => false,
+        };
+        if shadow_moved && !scrim_committed {
+            if let Some(s) = &self.scrim_surface {
+                s.commit();
+            }
         }
         if std::env::var_os("PRISM_PERF").is_some() {
             let content = PERF_CONTENT_MS.with(|c| c.replace(0.0));
@@ -1301,7 +1367,7 @@ impl UiState {
 
             cairo_backend::cairo_save(cr);
             let content_t0 = std::time::Instant::now();
-            ui::take_stagger_pending(); // only rows drawn in this frame count
+            ui::take_anim_pending(); // only what is drawn in this frame counts
 
             if redraw_content {
             match &self.mode {
@@ -1357,8 +1423,8 @@ impl UiState {
             } // if redraw_content
             if redraw_content {
                 PERF_CONTENT_MS.with(|c| c.set(content_t0.elapsed().as_secs_f64() * 1000.0));
-                // Rows still fading in: keep rendering the content.
-                is_animating |= ui::take_stagger_pending();
+                // Rows fading in, scrolling, gliding highlights, fades: keep rendering.
+                is_animating |= ui::take_anim_pending();
             }
 
             cairo_backend::cairo_restore(cr);
@@ -1457,6 +1523,7 @@ pub struct Globals {
     viewporter: Option<WpViewporter>,
     idle_inhibit: Option<ZwpIdleInhibitManagerV1>,
     alpha_modifier: Option<WpAlphaModifierV1>,
+    subcompositor: Option<wl_subcompositor::WlSubcompositor>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
@@ -1472,6 +1539,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
                 "wp_viewporter" => g.viewporter = Some(reg.bind(name, 1, qh, ())),
                 "zwp_idle_inhibit_manager_v1" => g.idle_inhibit = Some(reg.bind(name, 1, qh, ())),
                 "wp_alpha_modifier_v1" => g.alpha_modifier = Some(reg.bind(name, 1, qh, ())),
+                "wl_subcompositor" => g.subcompositor = Some(reg.bind(name, 1, qh, ())),
                 _ => {}
             }
         }
@@ -1485,7 +1553,7 @@ macro_rules! globals_ignore {
         }
     )*};
 }
-globals_ignore!(wl_compositor::WlCompositor, wl_shm::WlShm, ZwlrLayerShellV1, wl_seat::WlSeat, WpCursorShapeManagerV1, WpSinglePixelBufferManagerV1, WpViewporter, ZwpIdleInhibitManagerV1, WpAlphaModifierV1);
+globals_ignore!(wl_compositor::WlCompositor, wl_shm::WlShm, ZwlrLayerShellV1, wl_seat::WlSeat, WpCursorShapeManagerV1, WpSinglePixelBufferManagerV1, WpViewporter, ZwpIdleInhibitManagerV1, WpAlphaModifierV1, wl_subcompositor::WlSubcompositor);
 
 /// Data that is expensive to load, kept between overlay openings.
 #[derive(Default)]
@@ -1746,6 +1814,7 @@ impl Overlay {
             exit_requested: false,
             apps,
             pointer_x: 0,
+            scroll_finger: false,
             pointer_y: 0,
             pointer_down: false,
             card_bounds: (0, 0, 0, 0),
@@ -1759,6 +1828,8 @@ impl Overlay {
             buffer_pool: Vec::new(),
             single_pixel_mgr: g.single_pixel_mgr.clone(),
             viewporter: g.viewporter.clone(),
+            shadow: None,
+            shadow_pending: None,
             scrim_surface: None,
             scrim_layer: None,
             scrim_viewport: None,
@@ -1840,6 +1911,12 @@ impl Overlay {
             state.scrim_layer = Some(scrim_layer);
             while !state.scrim_configured && !state.exit_requested {
                 event_queue.blocking_dispatch(&mut state).map_err(|e| e.to_string())?;
+            }
+            // Drop shadow between the dim and the card (not for the full-width wallpaper strip).
+            if !matches!(state.mode, UiMode::Wallpaper) {
+                if let Some(scrim) = &state.scrim_surface {
+                    state.shadow = shadow::Shadow::new(&comp, g.subcompositor.as_ref(), g.viewporter.as_ref(), g.alpha_modifier.as_ref(), scrim, &qh);
+                }
             }
         }
 
@@ -2033,6 +2110,9 @@ impl Overlay {
         if let Some(sf) = s.surface.take() {
             sf.destroy();
         }
+        if let Some(sh) = s.shadow.take() {
+            sh.destroy();
+        }
         if let Some(v) = s.scrim_viewport.take() {
             v.destroy();
         }
@@ -2089,6 +2169,7 @@ fn main() {
             urgency: 1,
             actions: Vec::new(),
             desktop_entry: String::new(),
+            preview: false,
         }),
         _ => None,
     };
@@ -2120,6 +2201,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         viewporter: None,
         idle_inhibit: None,
         alpha_modifier: None,
+        subcompositor: None,
     };
     let _registry = conn.display().get_registry(&gq.handle(), ());
     if gq.roundtrip(&mut globals).is_err() {

@@ -166,7 +166,14 @@ pub struct EmojiView {
     query: Query,
     list: Vec<usize>,
     selected: usize,
-    scroll: f64,
+    scroll: crate::ui::Scroller,
+    /// Selection highlight, gliding across the grid (x/width and y/height).
+    glide_x: crate::ui::Glide,
+    glide_y: crate::ui::Glide,
+    /// Active category pill (rail), and hover fades of the rail tabs.
+    tab_glide: crate::ui::Glide,
+    tab_hover: crate::ui::Fades<usize>,
+    clear_hover: crate::ui::Fades<()>,
     cols: usize,
     grid: Rect,
     tabs: Vec<Rect>,
@@ -189,7 +196,12 @@ impl EmojiView {
             query: Query::default(),
             list: Vec::new(),
             selected: 0,
-            scroll: 0.0,
+            scroll: crate::ui::Scroller::default(),
+            glide_x: crate::ui::Glide::default(),
+            glide_y: crate::ui::Glide::default(),
+            tab_glide: crate::ui::Glide::default(),
+            tab_hover: crate::ui::Fades::default(),
+            clear_hover: crate::ui::Fades::default(),
             cols: 1,
             grid: Rect::default(),
             tabs: Vec::new(),
@@ -238,7 +250,9 @@ impl EmojiView {
         self.query = Query::default();
         self.tab = t % CATEGORIES.len();
         self.selected = 0;
-        self.scroll = 0.0;
+        self.scroll.reset(0.0);
+        self.glide_x.reset();
+        self.glide_y.reset();
         self.refresh();
     }
 
@@ -248,11 +262,7 @@ impl EmojiView {
         }
         self.selected = (self.selected as i32 + delta).clamp(0, self.list.len() as i32 - 1) as usize;
         let top = (self.selected / self.cols) as f64 * CELL_H;
-        if top < self.scroll {
-            self.scroll = top;
-        } else if top + CELL_H > self.scroll + self.grid.h {
-            self.scroll = top + CELL_H - self.grid.h;
-        }
+        self.scroll.ensure_visible(top, CELL_H, self.grid.h);
     }
 
     fn select(&mut self, i: usize, paste: bool) -> Effect {
@@ -273,7 +283,7 @@ impl EmojiView {
         }
         let cw = ((self.grid.w) / self.cols as f64).floor();
         let col = ((x - self.grid.x) / cw) as usize;
-        let row = ((y - self.grid.y + self.scroll) / CELL_H) as usize;
+        let row = ((y - self.grid.y + self.scroll.current()) / CELL_H) as usize;
         let i = row * self.cols + col.min(self.cols - 1);
         (i < self.list.len()).then_some(i)
     }
@@ -296,7 +306,7 @@ impl CardView for EmojiView {
         let on_surface = cb::hex_to_rgba(&theme.on_surface, 1.0);
         let outline = cb::hex_to_rgba(&theme.outline_variant, 1.0);
         let a = |c: Rgba, v: f64| (c.0, c.1, c.2, v);
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, style.radius, style.card_bg);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
         let searching = !self.query.text.trim().is_empty();
 
         // Category rail (clipped by the card's rounded corners).
@@ -310,19 +320,17 @@ impl CardView for EmojiView {
         unsafe { cb::cairo_restore(cr) };
         self.tabs.clear();
         let hovered_tab = self.tab_at(self.pointer.0, self.pointer.1);
+        // Active category: one pill gliding along the rail.
+        let tab_x = card.x + (RAIL_W - 44.0) / 2.0;
+        let (ty, th) = self.tab_glide.to(card.y + 12.0 + self.tab as f64 * 44.0, 40.0, style);
+        cb::fill_rounded_rect(cr, tab_x, ty, 44.0, th, 12.0, if searching { a(primary, 0.25) } else { primary });
         for (i, (_, _, icon)) in CATEGORIES.iter().enumerate() {
-            let r = Rect { x: card.x + (RAIL_W - 44.0) / 2.0, y: card.y + 12.0 + i as f64 * 44.0, w: 44.0, h: 40.0 };
+            let r = Rect { x: tab_x, y: card.y + 12.0 + i as f64 * 44.0, w: 44.0, h: 40.0 };
             self.tabs.push(r);
             let active = i == self.tab;
-            let bg = if active {
-                Some(if searching { a(primary, 0.25) } else { primary })
-            } else if hovered_tab == Some(i) {
-                Some(a(primary, 0.15))
-            } else {
-                None
-            };
-            if let Some(bg) = bg {
-                cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 12.0, bg);
+            let hover = self.tab_hover.level(i, hovered_tab == Some(i) && !active, style);
+            if hover > 0.0 {
+                cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 12.0, a(primary, 0.15 * hover));
             }
             let op = if active { if searching { 0.6 } else { 1.0 } } else { 0.85 };
             unsafe { cb::cairo_push_group(cr) };
@@ -347,8 +355,9 @@ impl CardView for EmojiView {
         self.clear_btn = Rect::default();
         if !self.query.text.is_empty() {
             self.clear_btn = Rect { x: x + w - 10.0 - 26.0, y: y + 10.0, w: 26.0, h: 26.0 };
-            if self.clear_btn.contains(self.pointer.0, self.pointer.1) {
-                cb::fill_circle(cr, self.clear_btn.x + 13.0, self.clear_btn.y + 13.0, 13.0, cb::hex_to_rgba(&theme.surface, 1.0));
+            let hot = self.clear_hover.level((), self.clear_btn.contains(self.pointer.0, self.pointer.1), style);
+            if hot > 0.0 {
+                cb::fill_circle(cr, self.clear_btn.x + 13.0, self.clear_btn.y + 13.0, 13.0, cb::hex_to_rgba(&theme.surface, hot));
             }
             centered_text(cr, "✕", "Inter, Sans 12px", self.clear_btn.x + 13.0, self.clear_btn.y + 13.0, sv_text);
             qw -= 26.0 + 8.0;
@@ -366,7 +375,8 @@ impl CardView for EmojiView {
         let rows = self.list.len().div_ceil(self.cols);
         let content = rows as f64 * CELL_H;
         let max = (content - area.h).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, max);
+        self.scroll.set_max(max, style);
+        let scroll = self.scroll.pos();
         if self.list.is_empty() {
             let (icon, title, sub) = if searching {
                 ("🔍", "No emojis found", "Try searching with broader terms or synonyms.")
@@ -388,10 +398,16 @@ impl CardView for EmojiView {
                 cb::cairo_rectangle(cr, area.x, area.y, area.w, area.h);
                 cb::cairo_clip(cr);
             }
-            let first_row = (self.scroll / CELL_H) as usize;
+            let first_row = (scroll.max(0.0) / CELL_H) as usize;
             let font = format!("{EMOJI_FONT} 24px");
+            // Selection: one rounded cell gliding across the grid.
+            let (sx, sw) = self.glide_x.to((self.selected % self.cols) as f64 * cw, cw, style);
+            let (sy, sh) = self.glide_y.to((self.selected / self.cols) as f64 * CELL_H, CELL_H, style);
+            let (sx, sy) = (area.x + sx, area.y + sy - scroll);
+            cb::fill_rounded_rect(cr, sx + 2.0, sy + 2.0, sw - 4.0, sh - 4.0, 12.0, a(primary, 0.3));
+            cb::stroke_rounded_rect(cr, sx + 2.5, sy + 2.5, sw - 5.0, sh - 5.0, 12.0, primary, 1.0);
             for row in first_row..rows {
-                let ry = area.y + row as f64 * CELL_H - self.scroll;
+                let ry = area.y + row as f64 * CELL_H - scroll;
                 if ry > area.y + area.h {
                     break;
                 }
@@ -399,10 +415,6 @@ impl CardView for EmojiView {
                     let i = row * self.cols + col;
                     let Some(&k) = self.list.get(i) else { break };
                     let cx = area.x + col as f64 * cw;
-                    if i == self.selected {
-                        cb::fill_rounded_rect(cr, cx + 2.0, ry + 2.0, cw - 4.0, CELL_H - 4.0, 12.0, a(primary, 0.3));
-                        cb::stroke_rounded_rect(cr, cx + 2.5, ry + 2.5, cw - 5.0, CELL_H - 5.0, 12.0, primary, 1.0);
-                    }
                     centered_text(cr, &self.all[k].emoji, &font, cx + cw / 2.0, ry + CELL_H / 2.0, (1.0, 1.0, 1.0, 1.0));
                 }
             }
@@ -410,7 +422,7 @@ impl CardView for EmojiView {
             if max > 0.0 {
                 let track_h = area.h;
                 let th = (track_h * area.h / content).max(24.0);
-                let ty = area.y + (self.scroll / max) * (track_h - th);
+                let ty = area.y + (scroll / max).clamp(0.0, 1.0) * (track_h - th);
                 cb::fill_rounded_rect(cr, area.x + area.w - 6.0, ty, 4.0, th, 2.0, a(style.fg, 0.35));
             }
         }
@@ -500,8 +512,7 @@ impl CardView for EmojiView {
     }
 
     fn scroll(&mut self, delta: f64) -> bool {
-        self.scroll = (self.scroll + delta).max(0.0);
-        true
+        self.scroll.by(delta)
     }
 
     fn key(&mut self, special: u32, typed: Option<char>, shift: bool, ctrl: bool) -> Effect {
@@ -527,7 +538,9 @@ impl CardView for EmojiView {
             _ => match self.query.key(special, typed, ctrl) {
                 Some(true) => {
                     self.selected = 0;
-                    self.scroll = 0.0;
+                    self.scroll.reset(0.0);
+                    self.glide_x.reset();
+                    self.glide_y.reset();
                     self.refresh();
                 }
                 Some(false) => {}

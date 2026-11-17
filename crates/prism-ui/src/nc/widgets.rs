@@ -2,12 +2,11 @@
 //! NcRefreshButton, NcBatteryIndicator, the footer's FlatSlider). Each draws at a rectangle and
 //! the caller records the rectangle as a hit region.
 
-use std::time::Instant;
 
 use crate::cairo_backend::{self as cb, Cairo};
 use crate::desktop::layout::Rect;
 use crate::svg;
-use crate::ui::{out_cubic, Rgba};
+use crate::ui::{Rgba, SpringValue};
 
 /// Theme.radiusSmall.
 pub const RADIUS: f64 = 12.0;
@@ -49,56 +48,57 @@ pub fn text_v(cr: *mut Cairo, x: f64, y: f64, h: f64, text: &str, font: &str, co
     max_w.map(|m| w.min(m)).unwrap_or(w)
 }
 
-/// A simple wall-clock tween (QML Behavior with OutCubic).
+/// A wall-clock animated value (QML Behavior): a critically damped spring whose settling time
+/// matches the nominal duration, so it keeps its speed when retargeted mid-flight.
 #[derive(Clone, Copy, Debug)]
 pub struct Tween {
-    from: f64,
-    to: f64,
-    start: Instant,
-    ms: f64,
+    v: SpringValue,
 }
 
 impl Tween {
     pub fn new(v: f64) -> Self {
-        Self { from: v, to: v, start: Instant::now(), ms: 0.0 }
+        Self { v: SpringValue::new(v) }
     }
 
     pub fn value(&self) -> f64 {
-        if self.ms <= 0.0 {
-            return self.to;
-        }
-        let t = (self.start.elapsed().as_secs_f64() * 1000.0 / self.ms).clamp(0.0, 1.0);
-        self.from + (self.to - self.from) * out_cubic(t)
+        if self.v.settled(1e-3) { self.v.target() } else { self.v.value() }
     }
 
     pub fn target(&self) -> f64 {
-        self.to
+        self.v.target()
     }
 
-    /// Animate to `to` over `ms` (0 = jump). No-op when already heading there.
+    /// Animate to `to` in about `ms` (0 = jump). No-op when already heading there.
     pub fn set(&mut self, to: f64, ms: f64) {
-        if (to - self.to).abs() < 1e-9 {
+        // A critically damped spring is within 1% after about one response time.
+        self.set_spring(to, (ms / 1000.0, 1.0), (ms > 0.0).then_some(1.0));
+    }
+
+    /// Animate to `to` on `spring` (response s, damping) at `time_scale` (None jumps).
+    pub fn set_spring(&mut self, to: f64, spring: (f64, f64), time_scale: Option<f64>) {
+        if (to - self.v.target()).abs() < 1e-9 {
             return;
         }
-        self.from = self.value();
-        self.to = to;
-        self.start = Instant::now();
-        self.ms = ms;
+        match time_scale {
+            Some(_) => self.v.set_scaled(to, spring, time_scale),
+            None => self.v.snap(to),
+        }
     }
 
     pub fn running(&self) -> bool {
-        self.ms > 0.0 && self.start.elapsed().as_secs_f64() * 1000.0 < self.ms
+        !self.v.settled(1e-3)
     }
 }
 
 /// NcStateFill-style layers of a button / tile background.
-fn state_fill(cr: *mut Cairo, r: Rect, radius: f64, p: &Pal, hovered: bool, active: bool) {
+/// `hovered`: hover level 0..1 (see `ui::Fades`).
+fn state_fill(cr: *mut Cairo, r: Rect, radius: f64, p: &Pal, hovered: f64, active: bool) {
     cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, radius, alpha(p.fg, 0.2));
-    if hovered && !active {
-        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, radius, alpha(p.fg, 0.14));
+    if hovered > 0.0 && !active {
+        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, radius, alpha(p.fg, 0.14 * hovered));
     }
     if active {
-        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, radius, alpha(p.fg, if hovered { 1.0 } else { 0.85 }));
+        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, radius, alpha(p.fg, 0.85 + 0.15 * hovered));
     }
 }
 
@@ -119,15 +119,16 @@ pub fn button_size(cr: *mut Cairo, text: &str, icon: &str, compact: bool) -> (f6
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn button(cr: *mut Cairo, r: Rect, text: &str, icon: &str, compact: bool, active: bool, enabled: bool, hovered: bool, p: &Pal) {
+/// `hovered`: hover level 0..1 (see `ui::Fades`).
+pub fn button(cr: *mut Cairo, r: Rect, text: &str, icon: &str, compact: bool, active: bool, enabled: bool, hovered: f64, p: &Pal) {
     let a = if enabled { 1.0 } else { 0.45 };
-    let hovered = hovered && enabled;
+    let hovered = if enabled { hovered } else { 0.0 };
     cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, RADIUS, alpha(p.fg, 0.2 * a));
-    if hovered && !active {
-        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, RADIUS, alpha(p.fg, 0.14));
+    if hovered > 0.0 && !active {
+        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, RADIUS, alpha(p.fg, 0.14 * hovered));
     }
     if active {
-        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, RADIUS, alpha(p.fg, (if hovered { 1.0 } else { 0.85 }) * a));
+        cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, RADIUS, alpha(p.fg, (0.85 + 0.15 * hovered) * a));
     }
     let tint = alpha(if active { p.inv } else { p.fg }, a);
     let (glyph, fpx) = if compact { (14.0, 12.0) } else { (16.0, 13.0) };
@@ -160,9 +161,9 @@ pub fn switch(cr: *mut Cairo, x: f64, y: f64, knob: f64, enabled: bool, p: &Pal)
 }
 
 /// NcRefreshButton (30x30); `angle` in degrees while spinning.
-pub fn refresh_button(cr: *mut Cairo, x: f64, y: f64, angle: f64, hovered: bool, p: &Pal) {
-    if hovered {
-        cb::fill_circle(cr, x + 15.0, y + 15.0, 15.0, alpha(p.fg, 0.2));
+pub fn refresh_button(cr: *mut Cairo, x: f64, y: f64, angle: f64, hovered: f64, p: &Pal) {
+    if hovered > 0.0 {
+        cb::fill_circle(cr, x + 15.0, y + 15.0, 15.0, alpha(p.fg, 0.2 * hovered));
     }
     svg::icon_rotated(cr, "refresh", x + 7.0, y + 7.0, 16.0, p.fg, angle);
 }
@@ -181,7 +182,8 @@ pub struct TileSpec<'a> {
 }
 
 /// NcTile (44 high, width animated by the caller).
-pub fn tile(cr: *mut Cairo, r: Rect, t: &TileSpec, hovered: bool, p: &Pal) {
+/// `hovered`: hover level 0..1.
+pub fn tile(cr: *mut Cairo, r: Rect, t: &TileSpec, hovered: f64, p: &Pal) {
     let filled = t.selected || t.on;
     unsafe {
         cb::cairo_save(cr);

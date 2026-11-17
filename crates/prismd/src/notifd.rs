@@ -31,6 +31,8 @@ pub struct Incoming {
     pub urgency: u8,
     pub desktop_entry: String,
     pub image: Option<String>,
+    /// Show the image as a large preview (Prism's private hint "x-prism-preview").
+    pub preview: bool,
     pub transient: bool,
     /// Popup duration in ms; 0 = stays until dismissed (critical).
     pub timeout_ms: u32,
@@ -182,6 +184,7 @@ fn normalise(
         actions,
         urgency,
         desktop_entry,
+        preview: image.is_some() && bool_hint("x-prism-preview"),
         image,
         transient: bool_hint("transient"),
         timeout_ms: popup_timeout(expire_timeout, urgency),

@@ -262,6 +262,7 @@ fn popup_for(n: &Notification) -> prism_common::NotifOverlayMessage {
         urgency: n.urgency,
         actions: n.actions.clone(),
         desktop_entry: n.desktop_entry.clone(),
+        preview: n.preview,
     }
 }
 
@@ -275,6 +276,7 @@ impl notifd::Handler for NotifHandler {
         n.actions = i.actions;
         n.desktop_entry = i.desktop_entry;
         n.image = i.image;
+        n.preview = i.preview;
         let (popup, silent) = {
             let mut st = state.lock().unwrap();
             if i.transient {

@@ -16,7 +16,7 @@ use prism_common::{Config, Theme};
 use crate::cairo_backend::{self as cb, Cairo};
 use crate::desktop::layout::Rect;
 use crate::launcher::{draw_icon, draw_query, search_icon, Effect, Query, DOWN, ENTER, ESC, MOUSE_READY, PGDN, PGUP, UP};
-use crate::ui::{out_cubic, Style};
+use crate::ui::{Glide, Scroller, SpringValue, Style};
 use crate::waker::Waker;
 
 pub const CARD_W: f64 = 680.0;
@@ -29,7 +29,8 @@ const MAX_H: f64 = 480.0;
 const MAX_APPS: usize = 5;
 const DEBOUNCE: Duration = Duration::from_millis(150);
 /// Theme.animFast: the card's height Behavior.
-const HEIGHT_MS: f64 = 53.0;
+/// Card height spring (response s, damping): quick, no overshoot (the surface resizes with it).
+const SPRING_HEIGHT: (f64, f64) = (0.18, 1.0);
 
 #[derive(Clone, Debug, PartialEq)]
 enum Kind {
@@ -75,7 +76,9 @@ pub struct SpotlightView {
     files: Vec<FileResult>,
     results: Vec<Item>,
     selected: usize,
-    scroll: f64,
+    scroll: Scroller,
+    /// Selection highlight (content y), glides between rows.
+    glide: Glide,
     generation: u64,
     searching: bool,
     jobs: Sender<Job>,
@@ -86,9 +89,9 @@ pub struct SpotlightView {
     rows: Vec<(usize, Rect)>,
     list: Rect,
     /// Animated card height.
-    h_from: f64,
-    h_to: f64,
-    h_start: Instant,
+    h: SpringValue,
+    /// Animation time scale from the last draw (None: animations off).
+    time_scale: Option<f64>,
     /// Height while file search last started (the card does not shrink during a search).
     last_h: f64,
     shift: bool,
@@ -111,7 +114,8 @@ impl SpotlightView {
             files: Vec::new(),
             results: Vec::new(),
             selected: 0,
-            scroll: 0.0,
+            scroll: Scroller::default(),
+            glide: Glide::default(),
             generation: 0,
             searching: false,
             jobs,
@@ -121,9 +125,8 @@ impl SpotlightView {
             pointer: (-1.0, -1.0),
             rows: Vec::new(),
             list: Rect::default(),
-            h_from: HEADER_H,
-            h_to: HEADER_H,
-            h_start: Instant::now(),
+            h: SpringValue::new(HEADER_H),
+            time_scale: Some(1.0),
             last_h: HEADER_H,
             shift: false,
         }
@@ -131,21 +134,18 @@ impl SpotlightView {
 
     /// Current (animated) card height.
     pub fn height(&self) -> f64 {
-        let t = (self.h_start.elapsed().as_secs_f64() * 1000.0 / HEIGHT_MS).clamp(0.0, 1.0);
-        (self.h_from + (self.h_to - self.h_from) * out_cubic(t)).round()
+        if self.h.settled(0.5) { self.h.target() } else { self.h.value() }.round()
     }
 
     pub fn animating(&self) -> bool {
-        self.h_start.elapsed().as_secs_f64() * 1000.0 < HEIGHT_MS
+        !self.h.settled(0.5)
     }
 
     fn set_height(&mut self, h: f64) {
-        if (h - self.h_to).abs() < 0.5 {
+        if (h - self.h.target()).abs() < 0.5 {
             return;
         }
-        self.h_from = self.height();
-        self.h_to = h;
-        self.h_start = Instant::now();
+        self.h.set_scaled(h, SPRING_HEIGHT, self.time_scale);
     }
 
     /// Take file-search results. True when something changed.
@@ -191,7 +191,7 @@ impl SpotlightView {
         };
         if (c.search_enable_files || c.search_enable_folders) && q.chars().count() >= 2 {
             if !self.searching {
-                self.last_h = self.h_to;
+                self.last_h = self.h.target();
             }
             self.searching = true;
             let _ = self.jobs.send(Job { generation: self.generation, query: q, include_hidden: c.search_include_hidden });
@@ -240,7 +240,8 @@ impl SpotlightView {
         }
         .min(self.results.len().saturating_sub(1));
         if reset {
-            self.scroll = 0.0;
+            self.scroll.reset(0.0);
+            self.glide.reset();
         }
         self.update_height();
     }
@@ -305,20 +306,21 @@ impl SpotlightView {
             return;
         }
         self.selected = (self.selected as i32 + delta).clamp(0, self.results.len() as i32 - 1) as usize;
-        // Position of the selected row in content coordinates.
+        let y = self.item_y(self.selected);
+        self.scroll.ensure_visible(y, ROW_H, self.list.h);
+    }
+
+    /// Top of result `sel` in content coordinates.
+    fn item_y(&self, sel: usize) -> f64 {
         let mut y = 0.0;
         for l in self.lines() {
             match l {
                 Line::Header(_) => y += SECTION_H + ROW_GAP,
-                Line::Item(i) if i == self.selected => break,
+                Line::Item(i) if i == sel => break,
                 Line::Item(_) => y += ROW_H + ROW_GAP,
             }
         }
-        if y < self.scroll {
-            self.scroll = y;
-        } else if y + ROW_H > self.scroll + self.list.h {
-            self.scroll = y + ROW_H - self.list.h;
-        }
+        y
     }
 
     pub fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, theme: &Theme) {
@@ -327,8 +329,8 @@ impl SpotlightView {
         let sv_text = cb::hex_to_rgba(&theme.on_surface_variant, 1.0);
         let primary = cb::hex_to_rgba(&theme.primary, 1.0);
         let r = style.radius;
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, r, style.card_bg);
-        cb::stroke_rounded_rect(cr, card.x + 0.5, card.y + 0.5, card.w - 1.0, card.h - 1.0, r, style.card_border, 1.0);
+        self.time_scale = style.time_scale();
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
         unsafe {
             cb::cairo_save(cr);
             cb::rounded_rect_path(cr, card.x, card.y, card.w, card.h, r);
@@ -374,14 +376,22 @@ impl SpotlightView {
             } else {
                 self.list = Rect { x: area.x + 6.0, y: area.y + 6.0, w: area.w - 12.0, h: area.h - 12.0 };
                 let max = (self.content_height() - self.list.h).max(0.0);
-                self.scroll = self.scroll.clamp(0.0, max);
+                self.scroll.set_max(max, style);
+                let scroll = self.scroll.pos();
                 unsafe {
                     cb::cairo_save(cr);
                     cb::cairo_rectangle(cr, self.list.x, self.list.y, self.list.w, self.list.h);
                     cb::cairo_clip(cr);
                 }
-                let hovered = self.hovered();
-                let mut y = self.list.y - self.scroll;
+                // Selection highlight: one pill gliding between rows, under their content.
+                let (hy, hh) = self.glide.to(self.item_y(self.selected), ROW_H, style);
+                let hl = (self.list.y + hy - scroll, hh);
+                {
+                    let (a, dy) = crate::ui::stagger(0);
+                    let a = if self.stale(self.selected) { 0.45 * a } else { a };
+                    cb::fill_rounded_rect(cr, self.list.x + 1.0, hl.0 + dy + 1.0, self.list.w - 2.0, hh - 2.0, 12.0, (fg.0, fg.1, fg.2, 0.85 * a));
+                }
+                let mut y = self.list.y - scroll;
                 let mut vis = 0usize;
                 for line in self.lines() {
                     if y > self.list.y + self.list.h {
@@ -402,7 +412,7 @@ impl SpotlightView {
                             let row = Rect { x: self.list.x, y, w: self.list.w, h: ROW_H };
                             if row.y + row.h >= self.list.y {
                                 self.rows.push((i, row));
-                                crate::ui::staggered(cr, vis, row, || self.draw_row(cr, row, i, hovered == Some(i), fg, inv, sv_text));
+                                crate::ui::staggered(cr, vis, row, || self.draw_row(cr, row, i, hl, fg, inv, sv_text));
                                 vis += 1;
                             }
                             y += ROW_H + ROW_GAP;
@@ -416,14 +426,12 @@ impl SpotlightView {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_row(&self, cr: *mut Cairo, row: Rect, i: usize, hovered: bool, fg: crate::ui::Rgba, inv: crate::ui::Rgba, sv_text: crate::ui::Rgba) {
+    /// `hl`: screen y and height of the gliding selection highlight (text under it inverts).
+    fn draw_row(&self, cr: *mut Cairo, row: Rect, i: usize, hl: (f64, f64), fg: crate::ui::Rgba, inv: crate::ui::Rgba, sv_text: crate::ui::Rgba) {
         let item = &self.results[i];
         let stale = self.stale(i);
-        let on = i == self.selected || hovered;
+        let on = crate::ui::coverage(hl.0, hl.1, row.y, row.h);
         unsafe { cb::cairo_push_group(cr) };
-        if on {
-            cb::fill_rounded_rect(cr, row.x + 1.0, row.y + 1.0, row.w - 2.0, row.h - 2.0, 12.0, (fg.0, fg.1, fg.2, 0.85));
-        }
         let fallback = match item.kind {
             Kind::Folder(_) => "inode-directory",
             Kind::File(_) => "text-x-generic",
@@ -445,7 +453,7 @@ impl SpotlightView {
             let hf = "Inter, Sans 10px";
             let (hw, hh) = cb::measure_pango_text(cr, hint, hf, 1000, Some(1));
             right -= hw as f64;
-            let c = if on { (inv.0, inv.1, inv.2, 0.6) } else { sv_text };
+            let c = crate::ui::mix(sv_text, (inv.0, inv.1, inv.2, 0.6), on);
             cb::draw_pango_text(cr, right, row.y + ((ROW_H - hh as f64) / 2.0).round(), hint, hf, c, None);
             right -= 12.0;
         }
@@ -456,9 +464,9 @@ impl SpotlightView {
         let (_, sh) = if item.subtitle.is_empty() { (0, 0) } else { cb::measure_pango_text(cr, "Ag", sf, 1000, Some(1)) };
         let total = th as f64 + if sh > 0 { 1.0 + sh as f64 } else { 0.0 };
         let ty = row.y + ((ROW_H - total) / 2.0).round();
-        cb::draw_pango_text(cr, tx, ty, &item.title, tf, if on { inv } else { fg }, Some(w as i32));
+        cb::draw_pango_text(cr, tx, ty, &item.title, tf, crate::ui::mix(fg, inv, on), Some(w as i32));
         if sh > 0 {
-            let c = if on { (inv.0, inv.1, inv.2, 0.7) } else { sv_text };
+            let c = crate::ui::mix(sv_text, (inv.0, inv.1, inv.2, 0.7), on);
             cb::draw_pango_text(cr, tx, ty + th as f64 + 1.0, &item.subtitle, sf, c, Some(w as i32));
         }
         unsafe {
@@ -512,8 +520,7 @@ impl SpotlightView {
     }
 
     pub fn scroll(&mut self, delta: f64) -> bool {
-        self.scroll = (self.scroll + delta).max(0.0);
-        true
+        self.scroll.by(delta)
     }
 
     pub fn key(&mut self, special: u32, typed: Option<char>, shift: bool, ctrl: bool) -> Effect {

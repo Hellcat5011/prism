@@ -92,7 +92,9 @@ fn split_point(binds: &[KeybindEntry]) -> usize {
 pub struct KeybindsView {
     binds: Option<Vec<KeybindEntry>>,
     rx: Receiver<Vec<KeybindEntry>>,
-    scroll: f64,
+    scroll: crate::ui::Scroller,
+    /// Hover fade of the scrollbar thumb.
+    thumb_hover: crate::ui::Fades<()>,
     view_h: f64,
     pointer: (f64, f64),
 }
@@ -104,7 +106,7 @@ impl KeybindsView {
             let _ = tx.send(prism_common::keybinds::load_keybinds());
             waker.wake();
         });
-        Self { binds: None, rx, scroll: 0.0, view_h: 0.0, pointer: (-1.0, -1.0) }
+        Self { binds: None, rx, scroll: crate::ui::Scroller::default(), thumb_hover: crate::ui::Fades::default(), view_h: 0.0, pointer: (-1.0, -1.0) }
     }
 
     /// Height of one column's content.
@@ -162,7 +164,7 @@ impl CardView for KeybindsView {
         let fg = style.fg;
         let primary = cb::hex_to_rgba(&theme.primary, 1.0);
         let outline = cb::hex_to_rgba(&theme.outline_variant, 1.0);
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, style.radius, style.card_bg);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
         let x = card.x + 28.0;
         let w = card.w - 56.0;
         let mut y = card.y + 28.0;
@@ -211,14 +213,15 @@ impl CardView for KeybindsView {
         self.view_h = view.h;
         let content = Self::column_height(left).max(Self::column_height(right)) + 24.0;
         let max = (content - view.h).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, max);
+        self.scroll.set_max(max, style);
+        let scroll = self.scroll.pos();
         let col_w = (view.w - 1.0 - 24.0) / 2.0;
         unsafe {
             cb::cairo_save(cr);
             cb::cairo_rectangle(cr, view.x, view.y, view.w, view.h);
             cb::cairo_clip(cr);
         }
-        let top = view.y + 12.0 - self.scroll;
+        let top = view.y + 12.0 - scroll;
         self.draw_column(cr, left, view.x, top, col_w, view, style, primary);
         let div_h = Self::column_height(left).max(Self::column_height(right));
         cb::fill_rounded_rect(cr, view.x + col_w, top, 1.0, div_h, 0.0, (outline.0, outline.1, outline.2, 0.35));
@@ -229,9 +232,9 @@ impl CardView for KeybindsView {
             let track = Rect { x: area.x + area.w - 8.0, y: area.y + 4.0, w: 4.0, h: area.h - 8.0 };
             cb::fill_rounded_rect(cr, track.x, track.y, track.w, track.h, 2.0, (outline.0, outline.1, outline.2, 0.15));
             let th = (track.h * view.h / content).max(30.0);
-            let ty = track.y + (self.scroll / max) * (track.h - th);
-            let hot = track.contains(self.pointer.0 + 2.0, self.pointer.1);
-            cb::fill_rounded_rect(cr, track.x, ty, track.w, th, 2.0, (primary.0, primary.1, primary.2, if hot { 0.7 } else { 0.35 }));
+            let ty = track.y + (scroll / max).clamp(0.0, 1.0) * (track.h - th);
+            let hot = self.thumb_hover.level((), track.contains(self.pointer.0 + 2.0, self.pointer.1), style);
+            cb::fill_rounded_rect(cr, track.x, ty, track.w, th, 2.0, (primary.0, primary.1, primary.2, 0.35 + 0.35 * hot));
         }
     }
 
@@ -245,20 +248,19 @@ impl CardView for KeybindsView {
     }
 
     fn scroll(&mut self, delta: f64) -> bool {
-        self.scroll = (self.scroll + delta).max(0.0);
-        true
+        self.scroll.by(delta)
     }
 
     fn key(&mut self, special: u32, _typed: Option<char>, _shift: bool, _ctrl: bool) -> Effect {
         let page = (self.view_h - 40.0).max(40.0);
         match special {
             ESC => return Effect::Close,
-            DOWN => self.scroll += ROW_H,
-            UP => self.scroll = (self.scroll - ROW_H).max(0.0),
-            PGDN => self.scroll += page,
-            PGUP => self.scroll = (self.scroll - page).max(0.0),
-            HOME => self.scroll = 0.0,
-            END => self.scroll = f64::MAX / 4.0,
+            DOWN => self.scroll.to(self.scroll.target() + ROW_H),
+            UP => self.scroll.to(self.scroll.target() - ROW_H),
+            PGDN => self.scroll.to(self.scroll.target() + page),
+            PGUP => self.scroll.to(self.scroll.target() - page),
+            HOME => self.scroll.to(0.0),
+            END => self.scroll.to(f64::MAX / 4.0),
             _ => return Effect::None,
         }
         Effect::Redraw

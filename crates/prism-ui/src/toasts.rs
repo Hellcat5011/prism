@@ -63,6 +63,8 @@ struct Popup {
     critical: bool,
     icon: Option<String>,
     image: Option<String>,
+    /// Show `image` as a large preview below the text instead of as the icon.
+    preview: bool,
     desktop_entry: String,
     /// (key, label), at most 3 shown.
     actions: Vec<(String, String)>,
@@ -203,8 +205,24 @@ fn text_w() -> f64 {
 const ACTION_H: f64 = 28.0;
 const MAX_ACTIONS: usize = 3;
 
-/// Card height for this content (QML: content.implicitHeight + 24; the action row adds 10 + 28).
-fn measure(summary: &str, body: &str, actions: usize) -> f64 {
+/// Largest preview picture height (design px); wider pictures fill the card width.
+const PREVIEW_MAX_H: f64 = 190.0;
+
+/// The image to show as a preview, if the notification asks for one and it exists.
+fn preview_path(image: Option<&str>, preview: bool) -> Option<&str> {
+    image.filter(|p| preview && std::path::Path::new(p).exists())
+}
+
+/// Height of the preview picture for `path` at width `w`: its own aspect ratio, capped (taller
+/// pictures are cover-cropped), 0 without a picture.
+pub fn preview_height(path: Option<&str>, w: f64) -> f64 {
+    let Some((iw, ih)) = path.and_then(cb::image_dims) else { return 0.0 };
+    (w * ih as f64 / iw.max(1) as f64).clamp(48.0, PREVIEW_MAX_H).round()
+}
+
+/// Card height for this content (QML: content.implicitHeight + 24; the action row adds 10 + 28,
+/// a preview picture 10 + its height).
+fn measure(summary: &str, body: &str, actions: usize, preview: Option<&str>) -> f64 {
     unsafe {
         let img = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, 1, 1);
         let cr = cb::cairo_create(img);
@@ -215,7 +233,9 @@ fn measure(summary: &str, body: &str, actions: usize) -> f64 {
         cb::cairo_surface_destroy(img);
         let text_h = CLOSE + 2.0 + sh as f64 + if bh > 0 { 2.0 + bh as f64 } else { 0.0 };
         let row = if actions > 0 { 10.0 + ACTION_H } else { 0.0 };
-        (text_h.max(ICON) + row + 2.0 * PAD).ceil()
+        let ph = preview_height(preview, CARD_W - 2.0 * PAD);
+        let pic = if ph > 0.0 { 10.0 + ph } else { 0.0 };
+        (text_h.max(ICON) + pic + row + 2.0 * PAD).ceil()
     }
 }
 
@@ -290,7 +310,7 @@ impl Toasts {
         let qh = self.queue.handle();
         let st = &mut self.st;
         match msg {
-            NotifOverlayMessage::Add { id, app_name, summary, body, timeout_ms, icon, image, urgency, actions, desktop_entry } => {
+            NotifOverlayMessage::Add { id, app_name, summary, body, timeout_ms, icon, image, urgency, actions, desktop_entry, preview } => {
                 if st.popups.is_empty() {
                     // Pick up theme / config changes made since the last popup.
                     let config = Config::load();
@@ -298,7 +318,7 @@ impl Toasts {
                     st.style = Style::new(&config, &st.theme);
                     st.place = Placement::parse(&config.notification_popup_position);
                 }
-                let extra = Extra { icon, image, critical: urgency >= 2, actions, desktop_entry };
+                let extra = Extra { icon, image, critical: urgency >= 2, actions, desktop_entry, preview };
                 st.add(id, app_name, summary, strip_markup(&body), timeout_ms, extra, &qh);
             }
             NotifOverlayMessage::Dismiss { id } => {
@@ -364,6 +384,8 @@ struct Extra {
     critical: bool,
     actions: Vec<(String, String)>,
     desktop_entry: String,
+    /// Show `image` as a large preview, not as the icon.
+    preview: bool,
 }
 
 impl Stack {
@@ -374,20 +396,21 @@ impl Stack {
         extra.actions.truncate(MAX_ACTIONS);
         if let Some(p) = self.popups.iter_mut().find(|p| p.nid == nid && p.phase != Phase::Leaving) {
             p.app_name = app_name;
-            p.card_h = measure(&summary, &body, extra.actions.len());
+            p.card_h = measure(&summary, &body, extra.actions.len(), preview_path(extra.image.as_deref(), extra.preview));
             p.summary = summary;
             p.body = body;
             p.timeout = timeout;
             p.critical = extra.critical;
             p.icon = extra.icon;
             p.image = extra.image;
+            p.preview = extra.preview;
             p.desktop_entry = extra.desktop_entry;
             p.actions = extra.actions;
             p.dirty = true;
             arm_timer(p, now);
             return;
         }
-        let card_h = measure(&summary, &body, extra.actions.len());
+        let card_h = measure(&summary, &body, extra.actions.len(), preview_path(extra.image.as_deref(), extra.preview));
         let uid = self.next_uid;
         self.next_uid = self.next_uid.wrapping_add(1).max(1);
         let g = &self.globals;
@@ -415,6 +438,7 @@ impl Stack {
             critical: extra.critical,
             icon: extra.icon,
             image: extra.image,
+            preview: extra.preview,
             desktop_entry: extra.desktop_entry,
             actions: extra.actions,
             action_hover: None,
@@ -550,7 +574,7 @@ impl Stack {
         let (x, y) = (self.ptr_pos.0 / self.style.scale, self.ptr_pos.1 / self.style.scale);
         let Some(p) = self.popup_mut(uid) else { return };
         let over_close = in_close(x, y);
-        let over_action = action_at(p.actions.len(), p.card_h, x, y);
+        let over_action = action_at(&p.actions, p.card_h, x, y);
         if over_action != p.action_hover {
             p.action_hover = over_action;
             p.dirty = true;
@@ -588,7 +612,7 @@ impl Stack {
         let (x, y) = (self.ptr_pos.0 / self.style.scale, self.ptr_pos.1 / self.style.scale);
         let style = self.style.clone();
         if let Some(p) = self.popup_mut(uid) {
-            if let Some(i) = action_at(p.actions.len(), p.card_h, x, y) {
+            if let Some(i) = action_at(&p.actions, p.card_h, x, y) {
                 invoke_action(p.nid, p.actions[i].0.clone());
             }
             start_leave(p, &style, Instant::now());
@@ -597,18 +621,38 @@ impl Stack {
 }
 
 /// Rectangles of the action buttons (equal widths across the card, bottom row).
-fn action_rects(n: usize, card_h: f64) -> Vec<(f64, f64, f64, f64)> {
-    if n == 0 {
+const FONT_ACTION: &str = "Inter, Sans Medium 12px";
+
+/// Action buttons along the bottom of the card, each as wide as its label needs plus an equal
+/// share of the spare room.
+fn action_rects(actions: &[(String, String)], card_h: f64) -> Vec<(f64, f64, f64, f64)> {
+    if actions.is_empty() {
         return Vec::new();
     }
     let gap = 8.0;
-    let w = (CARD_W - 2.0 * PAD - gap * (n as f64 - 1.0)) / n as f64;
+    let natural: Vec<f64> = unsafe {
+        let img = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, 1, 1);
+        let cr = cb::cairo_create(img);
+        let w = actions.iter().map(|(_, l)| cb::measure_pango_text(cr, l, FONT_ACTION, 4000, Some(1)).0 as f64 + 24.0).collect();
+        cb::cairo_destroy(cr);
+        cb::cairo_surface_destroy(img);
+        w
+    };
+    let widths = crate::ui::fit_widths(&natural, CARD_W - 2.0 * PAD, gap);
     let y = card_h - PAD - ACTION_H;
-    (0..n).map(|i| (PAD + i as f64 * (w + gap), y, w, ACTION_H)).collect()
+    let mut x = PAD;
+    widths
+        .into_iter()
+        .map(|w| {
+            let r = (x, y, w, ACTION_H);
+            x += w + gap;
+            r
+        })
+        .collect()
 }
 
-fn action_at(n: usize, card_h: f64, x: f64, y: f64) -> Option<usize> {
-    action_rects(n, card_h).iter().position(|r| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3)
+fn action_at(actions: &[(String, String)], card_h: f64, x: f64, y: f64) -> Option<usize> {
+    action_rects(actions, card_h).iter().position(|r| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3)
 }
 
 /// Send the chosen action to the app (through prismd, which owns the D-Bus name).
@@ -728,6 +772,7 @@ struct Content<'a> {
     h: f64,
     icon: Option<&'a str>,
     image: Option<&'a str>,
+    preview: bool,
     desktop_entry: &'a str,
     actions: &'a [(String, String)],
     action_hover: Option<usize>,
@@ -743,6 +788,7 @@ fn p_content(p: &Popup) -> Content<'_> {
         h: p.card_h,
         icon: p.icon.as_deref(),
         image: p.image.as_deref(),
+        preview: p.preview,
         desktop_entry: &p.desktop_entry,
         actions: &p.actions,
         action_hover: p.action_hover,
@@ -764,7 +810,10 @@ fn draw_card(cr: *mut Cairo, c: Content, opacity: f64, style: &Style, theme: &Th
     };
     cb::stroke_rounded_rect(cr, bw / 2.0, bw / 2.0, CARD_W - bw, c.h - bw, r, with_alpha(bc, a), bw);
 
-    draw_notif_icon(cr, PAD, PAD, ICON, c.app_name, c.icon, c.image, c.desktop_entry, fg, a);
+    // A preview picture is shown large below the text, so the icon is the app's.
+    let preview = preview_path(c.image, c.preview);
+    let icon_image = if preview.is_some() { None } else { c.image };
+    draw_notif_icon(cr, PAD, PAD, ICON, c.app_name, c.icon, icon_image, c.desktop_entry, fg, a);
 
     // Text column.
     let tx = PAD + ICON + 12.0;
@@ -785,15 +834,29 @@ fn draw_card(cr: *mut Cairo, c: Content, opacity: f64, style: &Style, theme: &Th
         cb::draw_pango_text_wrapped(cr, tx, sy + sh as f64 + 2.0, c.body, FONT_BODY, with_alpha(fg, 0.9 * a), tw as i32, Some(3));
     }
 
+    // Preview picture across the card, above the actions.
+    if let Some(path) = preview {
+        let pw = CARD_W - 2.0 * PAD;
+        let ph = preview_height(Some(path), pw);
+        let row = if c.actions.is_empty() { 0.0 } else { 10.0 + ACTION_H };
+        let py = c.h - PAD - row - ph;
+        unsafe { cb::cairo_push_group(cr) };
+        cb::draw_image_cover(cr, path, PAD, py, pw, ph, 10.0);
+        cb::stroke_rounded_rect(cr, PAD + 0.5, py + 0.5, pw - 1.0, ph - 1.0, 10.0, with_alpha(fg, 0.12), 1.0);
+        unsafe {
+            cb::cairo_pop_group_to_source(cr);
+            cb::cairo_paint_with_alpha(cr, a);
+        }
+    }
+
     // Action buttons (QML NcButton compact).
     let inv = cb::hex_to_rgba(&theme.inverse_primary, 1.0);
-    for (i, (r, (_, label))) in action_rects(c.actions.len(), c.h).into_iter().zip(c.actions.iter()).enumerate() {
+    for (i, (r, (_, label))) in action_rects(c.actions, c.h).into_iter().zip(c.actions.iter()).enumerate() {
         let hov = c.action_hover == Some(i);
         cb::fill_rounded_rect(cr, r.0, r.1, r.2, r.3, 12.0, with_alpha(fg, if hov { 0.85 } else { 0.2 } * a));
-        let f = "Inter, Sans Medium 12px";
-        let (lw, lh) = cb::measure_pango_text(cr, label, f, (r.2 - 12.0) as i32, Some(1));
+        let (lw, lh) = cb::measure_pango_text(cr, label, FONT_ACTION, (r.2 - 12.0) as i32, Some(1));
         let col = if hov { with_alpha(inv, a) } else { with_alpha(fg, a) };
-        cb::draw_pango_text(cr, r.0 + ((r.2 - lw as f64) / 2.0).max(6.0), r.1 + (r.3 - lh as f64) / 2.0, label, f, col, Some((r.2 - 12.0) as i32));
+        cb::draw_pango_text(cr, r.0 + ((r.2 - lw as f64) / 2.0).max(6.0), r.1 + (r.3 - lh as f64) / 2.0, label, FONT_ACTION, col, Some((r.2 - 12.0) as i32));
     }
 }
 
@@ -908,9 +971,9 @@ mod tests {
 
     #[test]
     fn card_fits_icon_when_text_is_short() {
-        assert!(measure("Hi", "", 0) >= ICON + 2.0 * PAD);
-        assert!(measure("Hi", "line one\nline two\nline three", 0) > measure("Hi", "", 0));
-        assert!(measure("Hi", "", 2) > measure("Hi", "", 0));
+        assert!(measure("Hi", "", 0, None) >= ICON + 2.0 * PAD);
+        assert!(measure("Hi", "line one\nline two\nline three", 0, None) > measure("Hi", "", 0, None));
+        assert!(measure("Hi", "", 2, None) > measure("Hi", "", 0, None));
     }
 }
 

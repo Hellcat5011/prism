@@ -99,6 +99,9 @@ pub enum NotifOverlayMessage {
         actions: Vec<(String, String)>,
         #[serde(default)]
         desktop_entry: String,
+        /// Show `image` as a large preview (see Notification::preview).
+        #[serde(default)]
+        preview: bool,
     },
     Dismiss {
         id: u32,

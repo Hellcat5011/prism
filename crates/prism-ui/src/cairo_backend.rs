@@ -288,7 +288,7 @@ fn cover_params(path: &str, w: i32, h: i32) -> (i32, i32, bool) {
 /// Pixel size of the image file at `path`. gdk_pixbuf_get_file_info opens and parses the file,
 /// so sizes are remembered per path and modification time (this runs on every draw of a
 /// cover image). Thread-safe: the worker thread uses it too.
-fn image_dims(path: &str) -> Option<(i32, i32)> {
+pub fn image_dims(path: &str) -> Option<(i32, i32)> {
     type Dims = std::collections::HashMap<String, (std::time::SystemTime, i32, i32)>;
     static DIMS: std::sync::Mutex<Option<Dims>> = std::sync::Mutex::new(None);
     let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
@@ -461,6 +461,50 @@ pub fn fill_rounded_rect(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64, r: f64,
         rounded_rect_path(cr, x, y, w, h, r);
         cairo_set_source_rgba(cr, color.0, color.1, color.2, color.3);
         cairo_fill(cr);
+    }
+}
+
+/// Fill a rounded rect with a vertical gradient from `top` to `bottom` (offsets 0..1 of `h`
+/// given by `from`/`to`; outside them the end colours continue).
+#[allow(clippy::too_many_arguments)]
+pub fn fill_rounded_rect_gradient(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64, r: f64, top: (f64, f64, f64, f64), bottom: (f64, f64, f64, f64), from: f64, to: f64) {
+    unsafe {
+        let pat = cairo_pattern_create_linear(0.0, y + h * from, 0.0, y + h * to);
+        cairo_pattern_add_color_stop_rgba(pat, 0.0, top.0, top.1, top.2, top.3);
+        cairo_pattern_add_color_stop_rgba(pat, 1.0, bottom.0, bottom.1, bottom.2, bottom.3);
+        rounded_rect_path(cr, x, y, w, h, r);
+        cairo_set_source(cr, pat);
+        cairo_fill(cr);
+        cairo_pattern_destroy(pat);
+    }
+}
+
+/// Stroke a rounded rect with a vertical gradient (`top` colour at the top edge).
+#[allow(clippy::too_many_arguments)]
+pub fn stroke_rounded_rect_gradient(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64, r: f64, top: (f64, f64, f64, f64), bottom: (f64, f64, f64, f64), line_width: f64) {
+    unsafe {
+        let pat = cairo_pattern_create_linear(0.0, y, 0.0, y + h);
+        cairo_pattern_add_color_stop_rgba(pat, 0.0, top.0, top.1, top.2, top.3);
+        cairo_pattern_add_color_stop_rgba(pat, 1.0, bottom.0, bottom.1, bottom.2, bottom.3);
+        rounded_rect_path(cr, x, y, w, h, r);
+        cairo_set_source(cr, pat);
+        cairo_set_line_width(cr, line_width);
+        cairo_stroke(cr);
+        cairo_pattern_destroy(pat);
+    }
+}
+
+/// Soft drop shadow under a floating rounded rect (dropdowns, tooltips): stacked rounded rects
+/// growing outwards with falling alpha approximate a gaussian blur of `spread` px, offset down
+/// by `dy`. Draw it before the element itself.
+pub fn drop_shadow(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64, r: f64, spread: f64, dy: f64, alpha: f64) {
+    const STEPS: usize = 8;
+    for i in (0..STEPS).rev() {
+        let t = (i as f64 + 1.0) / STEPS as f64;
+        let g = spread * t;
+        // Each layer adds a little: the sum falls off smoothly towards the outer edge.
+        let a = alpha * (1.0 - t).powi(2) / STEPS as f64 * 3.0;
+        fill_rounded_rect(cr, x - g, y - g + dy, w + 2.0 * g, h + 2.0 * g, r + g, (0.0, 0.0, 0.0, a));
     }
 }
 

@@ -67,7 +67,61 @@ pub enum Effect {
     OpenSettings,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// The picture an entry shows as a large preview (screenshots), if any.
+fn entry_preview(n: &Notification) -> Option<&str> {
+    n.image.as_deref().filter(|p| wants_preview(n) && std::path::Path::new(p).exists())
+}
+
+/// Screenshots stored before the preview flag existed are recognised by their sender.
+fn wants_preview(n: &Notification) -> bool {
+    n.preview || n.desktop_entry == "prism-capture"
+}
+
+/// Action row(s) of an entry whose text column starts at `tx` (width `tw`), from `top`:
+/// (copy, close, app action rects, height of the rows). App actions are as wide as their
+/// labels need plus a share of the spare room, followed by copy and close (40 px each); if
+/// the labels do not fit next to those, the actions get a row of their own. Without app
+/// actions, copy and close share the row (QML).
+fn entry_actions(cr: *mut Cairo, tx: f64, top: f64, tw: f64, n: &Notification) -> (Rect, Rect, Vec<Rect>, f64) {
+    const H: f64 = 28.0;
+    let gap = 6.0;
+    let acts: Vec<&str> = n.actions.iter().take(3).map(|(_, l)| l.as_str()).collect();
+    if acts.is_empty() {
+        let bw = (tw - gap) / 2.0;
+        return (Rect { x: tx, y: top, w: bw, h: H }, Rect { x: tx + bw + gap, y: top, w: bw, h: H }, Vec::new(), H);
+    }
+    let small = 40.0;
+    let natural: Vec<f64> = acts.iter().map(|l| widgets::button_size(cr, l, "", true).1).collect();
+    let beside = tw - 2.0 * (small + gap);
+    let (widths, icons_y, rows_h) = if crate::ui::widths_fit(&natural, beside, gap) {
+        (crate::ui::fit_widths(&natural, beside, gap), top, H)
+    } else {
+        (crate::ui::fit_widths(&natural, tw, gap), top + H + gap, 2.0 * H + gap)
+    };
+    let mut x = tx;
+    let rects = widths
+        .into_iter()
+        .map(|w| {
+            let r = Rect { x, y: top, w, h: H };
+            x += w + gap;
+            r
+        })
+        .collect();
+    let cx0 = tx + tw - 2.0 * small - gap;
+    (Rect { x: cx0, y: icons_y, w: small, h: H }, Rect { x: cx0 + small + gap, y: icons_y, w: small, h: H }, rects, rows_h)
+}
+
+/// Hover level 0..1 of `hit` (fades in and out), for widgets drawn with a hover state.
+macro_rules! hv {
+    ($v:expr, $hit:expr) => {{
+        let hit = $hit;
+        let on = $v.hover == Some(hit);
+        let ts = $v.time_scale;
+        $v.hover_fade.level_scaled(hit, on, ts)
+    }};
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Hit {
     Gear,
     Tile(usize),
@@ -122,11 +176,15 @@ pub struct NcView {
     tile_w: [Tween; 4],
     hits: Vec<(Hit, Rect)>,
     hover: Option<Hit>,
+    /// Hover fades of the hit targets (see `hv!`).
+    hover_fade: crate::ui::Fades<Hit>,
     pointer: (f64, f64),
     pressed: Option<Hit>,
     drag: Option<Drag>,
     swipe_dx: f64,
-    scroll: [f64; 3],
+    scroll: [crate::ui::Scroller; 3],
+    /// Animation time scale from the last draw (None: animations off).
+    time_scale: Option<f64>,
     expanded: Option<String>,
     expand: HashMap<String, Tween>,
     /// Entries sliding out after a dismiss: nid -> start.
@@ -159,11 +217,13 @@ impl NcView {
             tile_w: [Tween::new(44.0), Tween::new(44.0), Tween::new(0.0), Tween::new(44.0)],
             hits: Vec::new(),
             hover: None,
+            hover_fade: crate::ui::Fades::default(),
             pointer: (-1.0, -1.0),
             pressed: None,
             drag: None,
             swipe_dx: 0.0,
-            scroll: [0.0; 3],
+            scroll: Default::default(),
+            time_scale: Some(1.0),
             expanded: None,
             expand: HashMap::new(),
             dismissing: Vec::new(),
@@ -286,6 +346,7 @@ impl NcView {
     // ── Drawing ──────────────────────────────────────────────────────────
 
     pub fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, theme: &Theme) {
+        self.time_scale = style.time_scale();
         self.hits.clear();
         self.detail_values.clear();
         let p = Pal {
@@ -297,8 +358,7 @@ impl NcView {
             on_surface: cb::hex_to_rgba(&theme.on_surface, 1.0),
             on_surface_variant: cb::hex_to_rgba(&theme.on_surface_variant, 1.0),
         };
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, style.radius, style.card_bg);
-        cb::stroke_rounded_rect(cr, card.x + 0.5, card.y + 0.5, card.w - 1.0, card.h - 1.0, style.radius, style.card_border, 1.0);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
 
         let x = card.x + PAD;
         let w = card.w - 2.0 * PAD;
@@ -450,7 +510,7 @@ impl NcView {
         for (slot, spec) in specs.iter().enumerate() {
             let tab = [1, 2, 0, 3][slot];
             let r = Rect { x: tx, y, w: self.tile_w[tab].value(), h: 44.0 };
-            widgets::tile(cr, r, spec, self.hover == Some(Hit::Tile(tab)), p);
+            widgets::tile(cr, r, spec, hv!(self, Hit::Tile(tab)), p);
             hits.push((Hit::Tile(tab), r));
             tx += r.w + gap;
         }
@@ -476,7 +536,8 @@ impl NcView {
             cb::cairo_clip(cr);
         }
         let before = self.hits.len();
-        let content_h = f(self, r.y - self.scroll[tab]);
+        let scroll = self.scroll[tab].pos();
+        let content_h = f(self, r.y - scroll);
         unsafe { cb::cairo_restore(cr) };
         // Hits outside the viewport are not clickable.
         let mut i = before;
@@ -489,8 +550,8 @@ impl NcView {
                 i += 1;
             }
         }
-        let max = (content_h - r.h).max(0.0);
-        self.scroll[tab] = self.scroll[tab].clamp(0.0, max);
+        let ts = self.time_scale;
+        self.scroll[tab].set_max_scaled(content_h - r.h, ts);
     }
 
     // ── Notifications page ───────────────────────────────────────────────
@@ -511,8 +572,8 @@ impl NcView {
         let clear = Rect { x: r.x + r.w - clw, y: row_y, w: clw, h: row_h };
         let sil = Rect { x: clear.x - 8.0 - sw, y: row_y, w: sw, h: row_h };
         text_v(cr, r.x, row_y, row_h, &label, &font(14.0, ""), p.fg, Some(sil.x - r.x - 8.0));
-        widgets::button(cr, sil, "Silent", "bell", false, silent, true, self.hover == Some(Hit::Silent), p);
-        widgets::button(cr, clear, "Clear", "close", false, false, count > 0, self.hover == Some(Hit::ClearAll), p);
+        widgets::button(cr, sil, "Silent", "bell", false, silent, true, hv!(self, Hit::Silent), p);
+        widgets::button(cr, clear, "Clear", "close", false, false, count > 0, hv!(self, Hit::ClearAll), p);
         self.hits.push((Hit::Silent, sil));
         if count > 0 {
             self.hits.push((Hit::ClearAll, clear));
@@ -578,7 +639,9 @@ impl NcView {
         }
         let head = Rect { x: r.x + 12.0, y: r.y + 12.0, w: r.w - 24.0, h: head_h };
         self.hits.push((Hit::GroupHead(gi), head));
-        crate::toasts::draw_notif_icon(cr, head.x, head.y, 46.0, &latest.app_name, latest.icon.as_deref(), latest.image.as_deref(), &latest.desktop_entry, p.fg, 1.0);
+        // Preview pictures show inside the entries; the group shows the app's icon.
+        let head_image = if wants_preview(latest) { None } else { latest.image.as_deref() };
+        crate::toasts::draw_notif_icon(cr, head.x, head.y, 46.0, &latest.app_name, latest.icon.as_deref(), head_image, &latest.desktop_entry, p.fg, 1.0);
 
         // Pill row: app name · time · [count ⌄]
         let small = font(11.0, "");
@@ -653,7 +716,10 @@ impl NcView {
         let body = plain(&n.body);
         let bh = if body.is_empty() { 0.0 } else { cb::measure_pango_text(cr, &body, &font(13.0, ""), cw as i32, Some(8)).1 as f64 };
         let text = sh + if bh > 0.0 { 3.0 + bh } else { 0.0 };
-        10.0 + text + 8.0 + 28.0 + 10.0
+        let ph = crate::toasts::preview_height(entry_preview(n), cw);
+        let pic = if ph > 0.0 { 8.0 + ph } else { 0.0 };
+        let (_, _, _, rows_h) = entry_actions(cr, 0.0, 0.0, cw, n);
+        10.0 + text + pic + 8.0 + rows_h + 10.0
     }
 
     fn entries_height(&self, cr: *mut Cairo, w: f64, items: &[Notification]) -> f64 {
@@ -723,26 +789,20 @@ impl NcView {
                     let (_, bh) = cb::draw_pango_text_wrapped(cr, tx, by + 3.0, &body, &font(13.0, ""), alpha(p.fg, 0.85), tw as i32, Some(8));
                     by += 3.0 + bh as f64;
                 }
-                // QML: app actions fill the row, then copy and close (40 px each); without actions
-                // copy and close share the row.
-                let gap = 6.0;
-                let acts: Vec<(String, String)> = n.actions.iter().take(3).cloned().collect();
-                let (copy, close, action_rects) = if acts.is_empty() {
-                    let bw = (tw - gap) / 2.0;
-                    (Rect { x: tx, y: by + 8.0, w: bw, h: 28.0 }, Rect { x: tx + bw + gap, y: by + 8.0, w: bw, h: 28.0 }, Vec::new())
-                } else {
-                    let small = 40.0;
-                    let room = tw - 2.0 * (small + gap);
-                    let aw = (room - gap * (acts.len() as f64 - 1.0)) / acts.len() as f64;
-                    let rects: Vec<Rect> = (0..acts.len()).map(|i| Rect { x: tx + i as f64 * (aw + gap), y: by + 8.0, w: aw, h: 28.0 }).collect();
-                    let cx0 = tx + tw - 2.0 * small - gap;
-                    (Rect { x: cx0, y: by + 8.0, w: small, h: 28.0 }, Rect { x: cx0 + small + gap, y: by + 8.0, w: small, h: 28.0 }, rects)
-                };
-                for (i, (r, (_, label))) in action_rects.iter().zip(acts.iter()).enumerate() {
-                    widgets::button(cr, *r, label, "", true, false, true, self.hover == Some(Hit::EntryAction(n.id, i)), p);
+                // Screenshot-style preview picture across the entry.
+                if let Some(path) = entry_preview(n) {
+                    let ph = crate::toasts::preview_height(Some(path), tw);
+                    cb::draw_image_cover(cr, path, tx, by + 8.0, tw, ph, 10.0);
+                    cb::stroke_rounded_rect(cr, tx + 0.5, by + 8.5, tw - 1.0, ph - 1.0, 10.0, alpha(p.fg, 0.12), 1.0);
+                    by += 8.0 + ph;
                 }
-                widgets::button(cr, copy, "", "copy", true, false, true, self.hover == Some(Hit::EntryCopy(n.id)), p);
-                widgets::button(cr, close, "", "close", true, false, true, self.hover == Some(Hit::EntryClose(n.id)), p);
+                let acts: Vec<(String, String)> = n.actions.iter().take(3).cloned().collect();
+                let (copy, close, action_rects, _) = entry_actions(cr, tx, by + 8.0, tw, n);
+                for (i, (r, (_, label))) in action_rects.iter().zip(acts.iter()).enumerate() {
+                    widgets::button(cr, *r, label, "", true, false, true, hv!(self, Hit::EntryAction(n.id, i)), p);
+                }
+                widgets::button(cr, copy, "", "copy", true, false, true, hv!(self, Hit::EntryCopy(n.id)), p);
+                widgets::button(cr, close, "", "close", true, false, true, hv!(self, Hit::EntryClose(n.id)), p);
                 unsafe {
                     cb::cairo_pop_group_to_source(cr);
                     cb::cairo_paint_with_alpha(cr, a);
@@ -763,7 +823,7 @@ impl NcView {
             let label = format!("Clear {}", items.len());
             let (bh, bw) = widgets::button_size(cr, &label, "", true);
             let r = Rect { x: x + w - bw, y, w: bw, h: bh };
-            widgets::button(cr, r, &label, "", true, false, true, self.hover == Some(Hit::GroupClear(gi)), p);
+            widgets::button(cr, r, &label, "", true, false, true, hv!(self, Hit::GroupClear(gi)), p);
             self.hits.push((Hit::GroupClear(gi), r));
         }
     }
@@ -842,7 +902,7 @@ impl NcView {
             "Not connected".into()
         };
         cb::draw_pango_text(cr, fx, y + 21.0, &status, &font(12.0, ""), alpha(p.fg, 0.65), Some(220));
-        self.knobs[0].set(if net.wifi_enabled { 1.0 } else { 0.0 }, ANIM_FAST_MS);
+        self.knobs[0].set_spring(if net.wifi_enabled { 1.0 } else { 0.0 }, crate::ui::SPRING_KNOB, self.time_scale);
         let sw = Rect { x: r.x + r.w - 42.0, y: y + 8.0, w: 42.0, h: 24.0 };
         widgets::switch(cr, sw.x, sw.y, self.knobs[0].value(), true, p);
         self.hits.push((Hit::WifiSwitch, sw));
@@ -852,7 +912,7 @@ impl NcView {
             text_v(cr, r.x, y, 30.0, "Networks", &font(13.0, "Bold"), alpha(p.fg, 0.8), None);
             let rb = Rect { x: r.x + r.w - 30.0, y, w: 30.0, h: 30.0 };
             let angle = if net.scanning { self.spin_start.elapsed().as_secs_f64() * 400.0 % 360.0 } else { 0.0 };
-            widgets::refresh_button(cr, rb.x, rb.y, angle, self.hover == Some(Hit::WifiRefresh), p);
+            widgets::refresh_button(cr, rb.x, rb.y, angle, hv!(self, Hit::WifiRefresh), p);
             self.hits.push((Hit::WifiRefresh, rb));
             y + 30.0 + 10.0
         } else {
@@ -916,7 +976,7 @@ impl NcView {
         let (bh, bw) = widgets::button_size(cr, label, "", true);
         bx -= bw;
         let cb_r = Rect { x: bx, y: r.y + (52.0 - bh) / 2.0, w: bw, h: bh };
-        widgets::button(cr, cb_r, label, "", true, n.active, net.connecting.is_none(), self.hover == Some(Hit::NetConnect(i)), p);
+        widgets::button(cr, cb_r, label, "", true, n.active, net.connecting.is_none(), hv!(self, Hit::NetConnect(i)), p);
         if net.connecting.is_none() {
             self.hits.push((Hit::NetConnect(i), cb_r));
         }
@@ -924,7 +984,7 @@ impl NcView {
             let (fh, fw) = widgets::button_size(cr, "Forget", "", true);
             bx -= 12.0 + fw;
             let fr = Rect { x: bx, y: r.y + (52.0 - fh) / 2.0, w: fw, h: fh };
-            widgets::button(cr, fr, "Forget", "", true, false, true, self.hover == Some(Hit::NetForget(i)), p);
+            widgets::button(cr, fr, "Forget", "", true, false, true, hv!(self, Hit::NetForget(i)), p);
             self.hits.push((Hit::NetForget(i), fr));
         }
         if n.active {
@@ -961,7 +1021,7 @@ impl NcView {
                 cb::stroke_rounded_rect(cr, field.x + 1.0, field.y + 1.0, field.w - 2.0, field.h - 2.0, RADIUS, p.primary, 2.0);
                 let (jh, jw) = widgets::button_size(cr, "Join", "", true);
                 let join = Rect { x: field.x + field.w - 8.0 - jw, y: field.y + (44.0 - jh) / 2.0, w: jw, h: jh };
-                widgets::button(cr, join, "Join", "", true, false, true, self.hover == Some(Hit::PwJoin), p);
+                widgets::button(cr, join, "Join", "", true, false, true, hv!(self, Hit::PwJoin), p);
                 self.hits.push((Hit::PwField, field));
                 self.hits.push((Hit::PwJoin, join));
                 let f = font(14.0, "");
@@ -1034,7 +1094,7 @@ impl NcView {
             "Turned off"
         };
         cb::draw_pango_text(cr, r.x, y + 21.0, status, &font(12.0, ""), alpha(p.fg, 0.65), None);
-        self.knobs[1].set(if bt.powered { 1.0 } else { 0.0 }, ANIM_FAST_MS);
+        self.knobs[1].set_spring(if bt.powered { 1.0 } else { 0.0 }, crate::ui::SPRING_KNOB, self.time_scale);
         let sw = Rect { x: r.x + r.w - 42.0, y: y + 8.0, w: 42.0, h: 24.0 };
         widgets::switch(cr, sw.x, sw.y, self.knobs[1].value(), bt.adapter, p);
         if bt.adapter {
@@ -1047,7 +1107,7 @@ impl NcView {
             cb::draw_pango_text(cr, r.x + 12.0, y + 8.0, "Discoverable", &font(14.0, ""), p.fg, None);
             let sub = if bt.discoverable { format!("Visible as “{}”", bt.name) } else { "Hidden from other devices".into() };
             cb::draw_pango_text(cr, r.x + 12.0, y + 28.0, &sub, &font(11.0, ""), alpha(p.fg, 0.65), Some((r.w - 24.0 - 52.0) as i32));
-            self.knobs[2].set(if bt.discoverable { 1.0 } else { 0.0 }, ANIM_FAST_MS);
+            self.knobs[2].set_spring(if bt.discoverable { 1.0 } else { 0.0 }, crate::ui::SPRING_KNOB, self.time_scale);
             let ds = Rect { x: r.x + r.w - 12.0 - 42.0, y: y + 14.0, w: 42.0, h: 24.0 };
             widgets::switch(cr, ds.x, ds.y, self.knobs[2].value(), true, p);
             self.hits.push((Hit::Discoverable, ds));
@@ -1057,7 +1117,7 @@ impl NcView {
             text_v(cr, r.x, y, 30.0, title, &font(13.0, "Bold"), alpha(p.fg, 0.8), None);
             let rb = Rect { x: r.x + r.w - 30.0, y, w: 30.0, h: 30.0 };
             let angle = if bt.discovering { self.spin_start.elapsed().as_secs_f64() * 400.0 % 360.0 } else { 0.0 };
-            widgets::refresh_button(cr, rb.x, rb.y, angle, self.hover == Some(Hit::BtRefresh), p);
+            widgets::refresh_button(cr, rb.x, rb.y, angle, hv!(self, Hit::BtRefresh), p);
             self.hits.push((Hit::BtRefresh, rb));
             y += 30.0 + 10.0;
         }
@@ -1103,7 +1163,7 @@ impl NcView {
                 let bl = if show_unnamed { "Hide" } else { "Show" };
                 let (bh, bw) = widgets::button_size(cr, bl, "", true);
                 let br = Rect { x: list.x + list.w - bw, y: y + (40.0 - bh) / 2.0, w: bw, h: bh };
-                widgets::button(cr, br, bl, "", true, false, true, v.hover == Some(Hit::Unnamed), &p);
+                widgets::button(cr, br, bl, "", true, false, true, hv!(v, Hit::Unnamed), &p);
                 v.hits.push((Hit::Unnamed, br));
                 y += 40.0 + 4.0;
                 if show_unnamed {
@@ -1144,7 +1204,7 @@ impl NcView {
         let (bh, bw) = widgets::button_size(cr, label, "", true);
         bx -= bw;
         let ar = Rect { x: bx, y: r.y + (r.h - bh) / 2.0, w: bw, h: bh };
-        widgets::button(cr, ar, label, "", true, d.connected, !connecting, self.hover == Some(Hit::BtAction(i)), p);
+        widgets::button(cr, ar, label, "", true, d.connected, !connecting, hv!(self, Hit::BtAction(i)), p);
         if !connecting {
             self.hits.push((Hit::BtAction(i), ar));
         }
@@ -1152,7 +1212,7 @@ impl NcView {
             let (fh, fw) = widgets::button_size(cr, "Forget", "", true);
             bx -= 12.0 + fw;
             let fr = Rect { x: bx, y: r.y + (r.h - fh) / 2.0, w: fw, h: fh };
-            widgets::button(cr, fr, "Forget", "", true, false, true, self.hover == Some(Hit::BtForget(i)), p);
+            widgets::button(cr, fr, "Forget", "", true, false, true, hv!(self, Hit::BtForget(i)), p);
             self.hits.push((Hit::BtForget(i), fr));
         }
         let nf = font(14.0, if d.connected { "Bold" } else { "" });
@@ -1505,10 +1565,7 @@ impl NcView {
     pub fn scroll(&mut self, x: f64, y: f64, delta: f64) -> bool {
         // Scroll the page under the pointer (the footer does not scroll).
         let _ = (x, y);
-        let before = self.scroll[self.tab];
-        self.scroll[self.tab] = (before + delta).max(0.0);
-        // Clamped on the next draw.
-        true
+        self.scroll[self.tab].by(delta)
     }
 
     pub fn key(&mut self, special: u32, typed: Option<char>) -> Effect {

@@ -187,18 +187,6 @@ pub fn draw_icon(cr: *mut Cairo, name: &str, fallback: &str, x: f64, y: f64, siz
     }
 }
 
-/// Keep `sel` (row top `sel * pitch`, height `row_h`) inside a viewport of `view_h`.
-pub fn scroll_to(scroll: f64, sel: usize, pitch: f64, row_h: f64, view_h: f64) -> f64 {
-    let top = sel as f64 * pitch;
-    if top < scroll {
-        top
-    } else if top + row_h > scroll + view_h {
-        top + row_h - view_h
-    } else {
-        scroll
-    }
-}
-
 // ── Launcher ─────────────────────────────────────────────────────────────
 
 pub struct LauncherView {
@@ -206,7 +194,9 @@ pub struct LauncherView {
     results: Vec<DesktopApp>,
     query: Query,
     selected: usize,
-    scroll: f64,
+    scroll: crate::ui::Scroller,
+    /// Selection highlight (content y), glides between rows.
+    glide: crate::ui::Glide,
     opened: Instant,
     mouse_active: bool,
     pointer: (f64, f64),
@@ -223,7 +213,8 @@ impl LauncherView {
             results,
             query: Query::default(),
             selected: 0,
-            scroll: 0.0,
+            scroll: crate::ui::Scroller::default(),
+            glide: crate::ui::Glide::default(),
             opened: Instant::now(),
             mouse_active: false,
             pointer: (-1.0, -1.0),
@@ -235,7 +226,8 @@ impl LauncherView {
     fn apply_filter(&mut self) {
         self.results = search_apps(&self.apps, &self.query.text);
         self.selected = 0;
-        self.scroll = 0.0;
+        self.scroll.reset(0.0);
+        self.glide.reset();
     }
 
     fn launch(&self, i: usize) -> Effect {
@@ -254,7 +246,7 @@ impl LauncherView {
             return;
         }
         self.selected = (self.selected as i32 + delta).clamp(0, self.results.len() as i32 - 1) as usize;
-        self.scroll = scroll_to(self.scroll, self.selected, ROW_H + ROW_GAP, ROW_H, self.list.h);
+        self.scroll.ensure_visible(self.selected as f64 * (ROW_H + ROW_GAP), ROW_H, self.list.h);
     }
 
     pub fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, theme: &Theme) {
@@ -268,9 +260,10 @@ impl LauncherView {
             cb::rounded_rect_path(cr, card.x, card.y, card.w, card.h, r);
             cb::cairo_clip(cr);
         }
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, r, style.card_bg);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
         cb::draw_wallpaper_panel(cr, card.x, card.y, panel_w(card.w), card.h, 0.0);
         unsafe { cb::cairo_restore(cr) };
+        crate::ui::card_edge(cr, card.x, card.y, card.w, card.h, style);
 
         let x = card.x + IMAGE_W.min(card.w * 0.6) + 20.0;
         let w = card.x + card.w - 20.0 - x;
@@ -293,17 +286,24 @@ impl LauncherView {
         self.list = Rect { x, y, w, h: card.y + card.h - 20.0 - y };
         let pitch = ROW_H + ROW_GAP;
         let max = (self.results.len() as f64 * pitch - ROW_GAP - self.list.h).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, max);
+        self.scroll.set_max(max, style);
+        let scroll = self.scroll.pos();
         self.rows.clear();
         unsafe {
             cb::cairo_save(cr);
             cb::cairo_rectangle(cr, self.list.x, self.list.y, self.list.w, self.list.h);
             cb::cairo_clip(cr);
         }
-        let first = (self.scroll / pitch).floor() as usize;
-        let hovered = self.hovered();
+        let first = (scroll.max(0.0) / pitch).floor() as usize;
+        // Selection highlight: one pill that glides between rows (under the rows' content).
+        let (hy, hh) = self.glide.to(self.selected as f64 * pitch, ROW_H, style);
+        let hy = self.list.y + hy - scroll;
+        if !self.results.is_empty() {
+            let (a, dy) = crate::ui::stagger(self.selected.saturating_sub(first));
+            cb::fill_rounded_rect(cr, x + 2.0, hy + dy + 2.0, w - 4.0, hh - 4.0, RADIUS, (fg.0, fg.1, fg.2, 0.85 * a));
+        }
         for i in first..self.results.len() {
-            let ry = self.list.y + i as f64 * pitch - self.scroll;
+            let ry = self.list.y + i as f64 * pitch - scroll;
             if ry > self.list.y + self.list.h {
                 break;
             }
@@ -311,10 +311,7 @@ impl LauncherView {
             self.rows.push((i, row));
             crate::ui::staggered(cr, i - first, row, || {
                 let app = &self.results[i];
-                let on = i == self.selected || hovered == Some(i);
-                if on {
-                    cb::fill_rounded_rect(cr, row.x + 2.0, row.y + 2.0, row.w - 4.0, row.h - 4.0, RADIUS, (fg.0, fg.1, fg.2, 0.85));
-                }
+                let on = crate::ui::coverage(hy, hh, row.y, row.h);
                 draw_icon(cr, app.icon.as_deref().unwrap_or(""), "application-x-executable", row.x + 12.0, row.y + 11.0, 32.0);
                 let tx = row.x + 12.0 + 32.0 + 12.0;
                 let right = row.x + row.w - 12.0;
@@ -324,22 +321,15 @@ impl LauncherView {
                 let title_w = right - tx - if sub_w > 0.0 { sub_w + 12.0 } else { 0.0 };
                 let title_font = "Inter, Sans 15px";
                 let (_, th) = cb::measure_pango_text(cr, "Ag", title_font, 4000, Some(1));
-                cb::draw_pango_text(cr, tx, row.y + ((ROW_H - th as f64) / 2.0).round(), &app.name, title_font, if on { inv } else { fg }, Some(title_w as i32));
+                cb::draw_pango_text(cr, tx, row.y + ((ROW_H - th as f64) / 2.0).round(), &app.name, title_font, crate::ui::mix(fg, inv, on), Some(title_w as i32));
                 if sub_w > 0.0 {
                     let (_, sh) = cb::measure_pango_text(cr, "Ag", sub_font, 4000, Some(1));
-                    let c = if on { (inv.0, inv.1, inv.2, 0.7) } else { sv_text };
+                    let c = crate::ui::mix(sv_text, (inv.0, inv.1, inv.2, 0.7), on);
                     cb::draw_pango_text(cr, right - sub_w, row.y + ((ROW_H - sh as f64) / 2.0).round(), &sub, sub_font, c, Some(sub_w.ceil() as i32));
                 }
             });
         }
         unsafe { cb::cairo_restore(cr) };
-    }
-
-    fn hovered(&self) -> Option<usize> {
-        if !self.mouse_active {
-            return None;
-        }
-        self.row_at(self.pointer.0, self.pointer.1)
     }
 
     fn row_at(&self, x: f64, y: f64) -> Option<usize> {
@@ -379,8 +369,7 @@ impl LauncherView {
     }
 
     pub fn scroll(&mut self, delta: f64) -> bool {
-        self.scroll = (self.scroll + delta).max(0.0);
-        true
+        self.scroll.by(delta)
     }
 
     pub fn key(&mut self, special: u32, typed: Option<char>, ctrl: bool) -> Effect {
@@ -421,13 +410,6 @@ mod tests {
         assert_eq!(q.text, "elloX ");
         assert_eq!(q.key(0, Some('u'), true), Some(true));
         assert!(q.text.is_empty());
-    }
-
-    #[test]
-    fn scrolling_keeps_selection_visible() {
-        assert_eq!(scroll_to(0.0, 0, 58.0, 54.0, 200.0), 0.0);
-        assert_eq!(scroll_to(0.0, 5, 58.0, 54.0, 200.0), 5.0 * 58.0 + 54.0 - 200.0);
-        assert_eq!(scroll_to(300.0, 1, 58.0, 54.0, 200.0), 58.0);
     }
 }
 

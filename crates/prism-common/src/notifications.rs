@@ -26,6 +26,10 @@ pub struct Notification {
     /// Picture to show instead of the icon (hint "image-path", or "image-data" saved as PNG).
     #[serde(default)]
     pub image: Option<String>,
+    /// Show `image` as a large preview inside the notification, not as its icon (Prism's
+    /// private hint "x-prism-preview", sent by the screenshot notification).
+    #[serde(default)]
+    pub preview: bool,
 }
 
 impl Notification {
@@ -47,6 +51,7 @@ impl Notification {
             actions: Vec::new(),
             desktop_entry: String::new(),
             image: None,
+            preview: false,
         }
     }
 }

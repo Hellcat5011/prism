@@ -24,12 +24,13 @@ use std::time::Instant;
 
 use crate::cairo_backend::*;
 use crate::desktop::text::{draw_in_box, Align, TextStyle};
-use crate::ui::{out_cubic, Style};
+use crate::ui::{SpringValue, Style};
 use crate::waker::Waker;
 
 pub const PANEL_H: f64 = 618.0;
 const SKEW: f64 = -0.25;
-const MOVE_MS: f64 = 250.0;
+/// Carousel motion (response s, damping): settles with a hint of overshoot.
+const SPRING_MOVE: (f64, f64) = (0.36, 0.88);
 
 struct Entry {
     original: PathBuf,
@@ -56,8 +57,8 @@ pub struct WallpaperView {
     order: Vec<usize>,
     current: usize,
     /// Animated carousel position (index units).
-    pos: f64,
-    anim: Option<(f64, f64, Instant)>,
+    /// Carousel position (unwrapped index; draw() wraps it).
+    pos: SpringValue,
     images: HashMap<PathBuf, (*mut CairoSurface, Instant)>,
     requested: std::collections::HashSet<PathBuf>,
     decode_tx: Sender<PathBuf>,
@@ -110,8 +111,7 @@ impl WallpaperView {
             entries,
             order,
             current: 0,
-            pos: 0.0,
-            anim: None,
+            pos: SpringValue::new(0.0),
             images: HashMap::new(),
             requested: Default::default(),
             decode_tx,
@@ -153,7 +153,7 @@ impl WallpaperView {
     }
 
     pub fn animating(&self) -> bool {
-        self.anim.is_some() || self.images.values().any(|(_, t)| t.elapsed().as_secs_f64() * 1000.0 < crate::ui::ANIM_MED_MS)
+        !self.pos.settled(0.002) || self.images.values().any(|(_, t)| t.elapsed().as_secs_f64() * 1000.0 < crate::ui::ANIM_MED_MS)
     }
 
     fn step(&mut self, delta: i64, style: &Style) {
@@ -163,29 +163,19 @@ impl WallpaperView {
         }
         let target = self.current as i64 + delta;
         self.current = target.rem_euclid(n) as usize;
-        // Animate in unwrapped space from where we are now (draw() wraps positions).
-        let from = self.position(style);
-        let to = (from + delta as f64).round();
+        // Animate in unwrapped space from where we are heading (draw() wraps positions), so
+        // quick repeated steps add up and the motion keeps its speed.
+        let to = (self.pos.target() + delta as f64).round();
         if style.animations {
-            self.anim = Some((from, to, Instant::now()));
+            self.pos.set(to, SPRING_MOVE, style);
         } else {
-            self.anim = None;
-            self.pos = to;
+            self.pos.snap(to);
         }
     }
 
     /// Current (animated) carousel position.
-    fn position(&mut self, style: &Style) -> f64 {
-        if let Some((from, to, t0)) = self.anim {
-            let dur = style.duration_ms(MOVE_MS).max(1.0);
-            let k = (t0.elapsed().as_secs_f64() * 1000.0 / dur).min(1.0);
-            self.pos = from + (to - from) * out_cubic(k);
-            if k >= 1.0 {
-                self.anim = None;
-                self.pos = to;
-            }
-        }
-        self.pos
+    fn position(&mut self, _style: &Style) -> f64 {
+        if self.pos.settled(0.002) { self.pos.target() } else { self.pos.value() }
     }
 
     pub fn draw(&mut self, cr: *mut Cairo, panel_x: f64, panel_y: f64, width: f64, style: &Style, theme: &prism_common::Theme) {

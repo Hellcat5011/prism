@@ -57,7 +57,7 @@ impl PowerView {
 
 impl CardView for PowerView {
     fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, theme: &Theme) {
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, style.radius, style.card_bg);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
         let fg = style.fg;
         let inv = cb::hex_to_rgba(&theme.inverse_primary, 1.0);
         let outline = cb::hex_to_rgba(&theme.outline_variant, 1.0);

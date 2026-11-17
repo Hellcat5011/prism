@@ -819,12 +819,14 @@ fn notify(path: &std::path::Path, saved: bool, w: u32, h: u32) {
         let mut hints: HashMap<&str, Value> = HashMap::new();
         hints.insert("image-path", Value::from(p.as_str()));
         hints.insert("desktop-entry", Value::from("prism-capture"));
+        // Prism's notification UI shows the picture as a large preview, not as the icon.
+        hints.insert("x-prism-preview", Value::from(true));
         let actions: Vec<&str> = if saved { vec!["open", "Open", "folder", "Show in folder", "delete", "Delete"] } else { vec!["open", "Open"] };
         let body = if saved { format!("{w} × {h} · copied to the clipboard\n{}", path.display()) } else { format!("{w} × {h} · copied to the clipboard") };
         const D: &str = "org.freedesktop.Notifications";
         let Ok(proxy) = zbus::blocking::Proxy::new(&conn, D, "/org/freedesktop/Notifications", D) else { return };
         let Ok(signals) = proxy.receive_all_signals() else { return };
-        let Ok(reply) = conn.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Screenshot", 0u32, p.as_str(), "Screenshot saved", body.as_str(), actions, hints, -1i32)) else { return };
+        let Ok(reply) = conn.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Screenshot", 0u32, "applets-screenshooter", "Screenshot saved", body.as_str(), actions, hints, -1i32)) else { return };
         let Ok(id) = reply.body().deserialize::<u32>() else { return };
         for m in signals {
             let member = m.header().member().map(|s| s.to_string()).unwrap_or_default();

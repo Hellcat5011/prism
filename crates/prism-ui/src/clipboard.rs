@@ -30,7 +30,11 @@ pub struct ClipboardView {
     measured_w: f64,
     query: Query,
     selected: usize,
-    scroll: f64,
+    scroll: crate::ui::Scroller,
+    /// Selection highlight (content y and height), glides between rows.
+    glide: crate::ui::Glide,
+    /// Hover fade of the clear-history button.
+    hot_fade: crate::ui::Fades<()>,
     list: Rect,
     rows: Vec<(usize, Rect)>,
     clear_btn: Rect,
@@ -47,7 +51,9 @@ impl ClipboardView {
             measured_w: 0.0,
             query: Query::default(),
             selected: 0,
-            scroll: 0.0,
+            scroll: crate::ui::Scroller::default(),
+            glide: crate::ui::Glide::default(),
+            hot_fade: crate::ui::Fades::default(),
             list: Rect::default(),
             rows: Vec::new(),
             clear_btn: Rect::default(),
@@ -63,7 +69,8 @@ impl ClipboardView {
         self.results = (0..self.all.len()).filter(|&i| q.is_empty() || self.all[i].content.to_lowercase().contains(&q)).collect();
         self.heights.clear();
         self.selected = 0;
-        self.scroll = 0.0;
+        self.scroll.reset(0.0);
+        self.glide.reset();
     }
 
     fn measure(&mut self, cr: *mut Cairo, w: f64) {
@@ -93,11 +100,7 @@ impl ClipboardView {
         self.selected = (self.selected as i32 + delta).clamp(0, self.results.len() as i32 - 1) as usize;
         let top = self.row_top(self.selected);
         let h = self.heights.get(self.selected).copied().unwrap_or(0.0);
-        if top < self.scroll {
-            self.scroll = top;
-        } else if top + h > self.scroll + self.list.h {
-            self.scroll = top + h - self.list.h;
-        }
+        self.scroll.ensure_visible(top, h, self.list.h);
     }
 
     fn copy(&self, i: usize) -> Effect {
@@ -143,7 +146,7 @@ impl CardView for ClipboardView {
         let fg = style.fg;
         let inv = cb::hex_to_rgba(&theme.inverse_primary, 1.0);
         let sv_text = cb::hex_to_rgba(&theme.on_surface_variant, 1.0);
-        cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, style.radius, style.card_bg);
+        crate::ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
         let x = card.x + PAD;
         let w = card.w - 2.0 * PAD;
         let y = card.y + PAD;
@@ -153,26 +156,38 @@ impl CardView for ClipboardView {
         cb::stroke_rounded_rect(cr, x + 1.0, y + 1.0, w - 2.0, 46.0, 11.0, cb::hex_to_rgba(&theme.primary, 1.0), 2.0);
         self.clear_btn = Rect { x: x + w - 12.0 - 28.0, y: y + 10.0, w: 28.0, h: 28.0 };
         let hot = self.clear_btn.contains(self.pointer.0, self.pointer.1);
-        if hot {
-            cb::fill_rounded_rect(cr, self.clear_btn.x, self.clear_btn.y, 28.0, 28.0, 6.0, cb::hex_to_rgba(&theme.error, 1.0));
+        let hot_t = self.hot_fade.level((), hot, style);
+        if hot_t > 0.0 {
+            cb::fill_rounded_rect(cr, self.clear_btn.x, self.clear_btn.y, 28.0, 28.0, 6.0, cb::hex_to_rgba(&theme.error, hot_t));
         }
         let bf = "Inter, Sans 16px";
         let (bw, bh) = cb::measure_pango_text(cr, "🗑", bf, 100, Some(1));
-        cb::draw_pango_text(cr, self.clear_btn.x + ((28.0 - bw as f64) / 2.0).round(), self.clear_btn.y + ((28.0 - bh as f64) / 2.0).round(), "🗑", bf, if hot { (1.0, 1.0, 1.0, 1.0) } else { sv_text }, None);
+        cb::draw_pango_text(cr, self.clear_btn.x + ((28.0 - bw as f64) / 2.0).round(), self.clear_btn.y + ((28.0 - bh as f64) / 2.0).round(), "🗑", bf, crate::ui::mix(sv_text, (1.0, 1.0, 1.0, 1.0), hot_t), None);
         draw_query(cr, &self.query, "Search Clipboard...", x + 12.0, y + 12.0, self.clear_btn.x - 12.0 - (x + 12.0), 24.0, "Inter, Sans 16px", cb::hex_to_rgba(&theme.on_surface, 1.0), sv_text);
 
         // List.
         self.list = Rect { x, y: y + 48.0 + 12.0, w, h: card.y + card.h - PAD - (y + 60.0) };
         self.measure(cr, w);
         let total: f64 = self.heights.iter().map(|h| h + GAP).sum::<f64>() - GAP;
-        self.scroll = self.scroll.clamp(0.0, (total - self.list.h).max(0.0));
+        self.scroll.set_max(total - self.list.h, style);
+        let scroll = self.scroll.pos();
         self.rows.clear();
         unsafe {
             cb::cairo_save(cr);
             cb::cairo_rectangle(cr, self.list.x, self.list.y, self.list.w, self.list.h);
             cb::cairo_clip(cr);
         }
-        let mut ry = self.list.y - self.scroll;
+        // Selection highlight: one pill gliding (and resizing) between rows.
+        let (hy, hh) = if self.results.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let (top, h) = (self.row_top(self.selected), self.heights.get(self.selected).copied().unwrap_or(0.0));
+            let (gy, gh) = self.glide.to(top, h, style);
+            let (a, dy) = crate::ui::stagger(0);
+            cb::fill_rounded_rect(cr, x, self.list.y + gy - scroll + dy, w, gh, 12.0, (fg.0, fg.1, fg.2, 0.85 * a));
+            (self.list.y + gy - scroll, gh)
+        };
+        let mut ry = self.list.y - scroll;
         let mut vis = 0usize;
         for (ri, &k) in self.results.iter().enumerate() {
             let h = self.heights[ri];
@@ -182,12 +197,9 @@ impl CardView for ClipboardView {
             if ry + h >= self.list.y {
                 let row = Rect { x, y: ry, w, h };
                 self.rows.push((ri, row));
-                let on = ri == self.selected;
+                let on = crate::ui::coverage(hy, hh, row.y, row.h);
                 let it = &self.all[k];
                 crate::ui::staggered(cr, vis, row, || {
-                    if on {
-                        cb::fill_rounded_rect(cr, row.x, row.y, row.w, row.h, 12.0, (fg.0, fg.1, fg.2, 0.85));
-                    }
                     if it.is_image {
                         let path = it.image_path.as_deref().unwrap_or("").trim_start_matches("file://");
                         if let Some(img) = cb::cached_image(path, (w - 24.0) as i32, IMAGE_H as i32, true) {
@@ -195,7 +207,7 @@ impl CardView for ClipboardView {
                             cb::paint_cached(cr, img, row.x + 12.0 + ((w - 24.0 - iw) / 2.0).round(), row.y + 12.0 + ((IMAGE_H - ih) / 2.0).round());
                         }
                     } else {
-                        cb::draw_pango_text_wrapped(cr, row.x + 12.0, row.y + 12.0, &it.content, TEXT_FONT, if on { inv } else { fg }, (w - 24.0) as i32, Some(10));
+                        cb::draw_pango_text_wrapped(cr, row.x + 12.0, row.y + 12.0, &it.content, TEXT_FONT, crate::ui::mix(fg, inv, on), (w - 24.0) as i32, Some(10));
                     }
                 });
                 vis += 1;
@@ -210,6 +222,7 @@ impl CardView for ClipboardView {
             let t = "Clear History (Ctrl+Backspace)";
             let (tw, th) = cb::measure_pango_text(cr, t, tf, 1000, Some(1));
             let tip = Rect { x: self.clear_btn.x - 8.0 - tw as f64 - 16.0, y: self.clear_btn.y + 14.0 - (th as f64 + 8.0) / 2.0, w: tw as f64 + 16.0, h: th as f64 + 8.0 };
+            cb::drop_shadow(cr, tip.x, tip.y, tip.w, tip.h, 4.0, 8.0, 2.0, 0.4);
             cb::fill_rounded_rect(cr, tip.x, tip.y, tip.w, tip.h, 4.0, cb::hex_to_rgba(&theme.surface, 1.0));
             cb::stroke_rounded_rect(cr, tip.x + 0.5, tip.y + 0.5, tip.w - 1.0, tip.h - 1.0, 4.0, cb::hex_to_rgba(&theme.outline_variant, 1.0), 1.0);
             cb::draw_pango_text(cr, tip.x + 8.0, tip.y + 4.0, t, tf, cb::hex_to_rgba(&theme.on_surface, 1.0), None);
@@ -245,8 +258,7 @@ impl CardView for ClipboardView {
     }
 
     fn scroll(&mut self, delta: f64) -> bool {
-        self.scroll = (self.scroll + delta).max(0.0);
-        true
+        self.scroll.by(delta)
     }
 
     fn key(&mut self, special: u32, typed: Option<char>, _shift: bool, ctrl: bool) -> Effect {
