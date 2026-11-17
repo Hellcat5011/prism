@@ -67,6 +67,11 @@ pub enum Hit {
     MediaNext,
     Tray(usize),
     Shortcut(usize),
+    PhoneOpen,
+    PhoneCard,
+    PhoneRing,
+    PhonePlayPause,
+    PhoneNext,
 }
 
 pub type Hits = Vec<(Hit, Rect)>;
@@ -585,18 +590,26 @@ pub fn draw_tray(
 
 // ── Shortcuts ─────────────────────────────────────────────────────────────
 
-pub const SHORTCUTS: [(&str, &str, &str); 4] = [
+pub const SHORTCUTS: [(&str, &str, &str); 5] = [
     ("launcher", "App launcher", "\u{f003b}"),
+    ("phone", "Phone", "\u{f011c}"),
     ("notifications", "Notifications", "\u{f009a}"),
     ("settings", "Settings", "\u{f0493}"),
     ("power", "Power", "\u{f0425}"),
 ];
 
+/// Index of the Phone shortcut; it is only shown while phone sync is on.
+pub const SHORTCUT_PHONE: usize = 1;
+
+/// Phone sync is on (config `phone_enabled`), set by the desktop when it loads the config.
+pub static PHONE_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn shortcut_enabled(p: &WidgetPosition, idx: usize) -> bool {
     match idx {
         0 => p.shortcuts.launcher,
-        1 => p.shortcuts.notifications,
-        2 => p.shortcuts.settings,
+        1 => p.shortcuts.phone,
+        2 => p.shortcuts.notifications,
+        3 => p.shortcuts.settings,
         _ => p.shortcuts.power,
     }
 }
@@ -614,7 +627,8 @@ pub fn draw_shortcuts(
 ) -> Hits {
     let mut hits = Hits::new();
     draw_background(cr, w, h, look, p.transparent_bg);
-    let enabled: Vec<usize> = (0..SHORTCUTS.len()).filter(|i| shortcut_enabled(p, *i)).collect();
+    let phone_sync = PHONE_SYNC.load(std::sync::atomic::Ordering::Relaxed);
+    let enabled: Vec<usize> = (0..SHORTCUTS.len()).filter(|i| shortcut_enabled(p, *i) && (*i != SHORTCUT_PHONE || phone_sync)).collect();
     if enabled.is_empty() {
         if edit_mode {
             draw_in_box(cr, "Shortcuts: no icons enabled", &TextStyle { family: &look.family, px: 12.0, bold: true, color: look.fg }, 0.0, 0.0, w, h, Align::Center);
@@ -849,4 +863,68 @@ mod tests {
         assert_eq!(days_in_month(2024, 2), 29);
         assert_eq!(days_in_month(2026, 2), 28);
     }
+}
+
+// ── Phone ─────────────────────────────────────────────────────────────────
+
+/// Phone widget: battery ring, name and status, what plays on the phone, and buttons for
+/// find-my-phone, play/pause and next. A click elsewhere opens the Phone card.
+pub fn draw_phone(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, state: Option<&prism_common::phone::PhoneState>, hovered: Option<Hit>) -> Hits {
+    use crate::phone::{draw_battery_ring, media_position, status_line, ICON_NEXT, ICON_OPEN, ICON_PAUSE, ICON_PLAY, ICON_RING};
+    let mut hits = Hits::new();
+    draw_background(cr, w, h, look, p.transparent_bg);
+    let muted = (look.fg.0, look.fg.1, look.fg.2, 0.65);
+    let font = |weight: &str, px: f64| format!("{} {weight} {px:.0}px", look.family);
+    let Some(d) = state.and_then(|s| s.primary()) else {
+        let msg = match state {
+            None => "Phone sync is off",
+            Some(_) => "No phone paired",
+        };
+        draw_in_box(cr, msg, &TextStyle { family: &look.family, px: 14.0, bold: true, color: muted }, 0.0, 0.0, w, h, Align::Center);
+        hits.push((Hit::PhoneOpen, Rect { x: 0.0, y: 0.0, w, h }));
+        return hits;
+    };
+    let r = (h * 0.30).clamp(18.0, 44.0);
+    let cx = 14.0 + r + 4.0;
+    draw_battery_ring(cr, cx, h / 2.0, r, d, look.fg, look.primary);
+    let tx = cx + r + 16.0;
+    let tw = (w - tx - 12.0).max(10.0);
+    crate::cairo_backend::draw_pango_text(cr, tx, h * 0.14, &d.name, &font("Bold", 16.0), look.fg, Some(tw as i32));
+    crate::cairo_backend::draw_pango_text(cr, tx, h * 0.14 + 24.0, &status_line(d), &font("Regular", 12.0), muted, Some(tw as i32));
+    let media = d.media.as_ref().filter(|m| !m.title.is_empty());
+    if let Some(m) = media {
+        let line = if m.artist.is_empty() { m.title.clone() } else { format!("{} · {}", m.title, m.artist) };
+        let extra = if m.length_ms > 0 { format!("  {}", crate::phone::fmt_time(media_position(m))) } else { String::new() };
+        crate::cairo_backend::draw_pango_text(cr, tx, h * 0.14 + 44.0, &format!("♪ {line}{extra}"), &font("Regular", 12.0), look.fg, Some(tw as i32));
+    } else if !d.notifications.is_empty() {
+        let n = d.notifications.len();
+        crate::cairo_backend::draw_pango_text(cr, tx, h * 0.14 + 44.0, &format!("{n} notification{}", if n == 1 { "" } else { "s" }), &font("Regular", 12.0), look.fg, Some(tw as i32));
+    }
+    // Buttons, bottom right.
+    let b = 28.0;
+    let by = h - b - 10.0;
+    let mut bx = w - 12.0 - b;
+    let mut buttons: Vec<(Hit, &str, bool)> = Vec::new();
+    if d.reachable {
+        if let Some(m) = media {
+            buttons.push((Hit::PhonePlayPause, if m.playing { ICON_PAUSE } else { ICON_PLAY }, true));
+            buttons.push((Hit::PhoneNext, ICON_NEXT, true));
+        }
+        buttons.push((Hit::PhoneRing, ICON_RING, false));
+    }
+    // Always there: opens the Phone card.
+    buttons.push((Hit::PhoneCard, ICON_OPEN, false));
+    if by > h * 0.14 + 60.0 {
+        for (hit, icon, filled) in buttons.into_iter().rev() {
+            if hovered == Some(hit) {
+                crate::cairo_backend::fill_circle(cr, bx + b / 2.0, by + b / 2.0, b / 2.0, (look.primary.0, look.primary.1, look.primary.2, 0.22));
+            }
+            let i = b * 0.55;
+            crate::svg::draw_path(cr, icon, bx + (b - i) / 2.0, by + (b - i) / 2.0, i, look.fg, if filled { None } else { Some(2.0) });
+            hits.push((hit, Rect { x: bx, y: by, w: b, h: b }));
+            bx -= b + 6.0;
+        }
+    }
+    hits.push((Hit::PhoneOpen, Rect { x: 0.0, y: 0.0, w, h }));
+    hits
 }

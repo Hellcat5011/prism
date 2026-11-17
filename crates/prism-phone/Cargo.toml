@@ -1,0 +1,25 @@
+[package]
+name = "prism-phone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "prism-phoned"
+path = "src/main.rs"
+
+[dependencies]
+prism-common = { path = "../prism-common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+x509-parser = "0.17"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+wayland-client = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = { version = "0.8" }
+zbus = "5"

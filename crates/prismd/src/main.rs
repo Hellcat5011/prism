@@ -423,8 +423,61 @@ fn apply_blur(cfg: &Config) {
     }
 }
 
+/// prism-phoned should run (config `phone_enabled`).
+static PHONE_WANTED: AtomicBool = AtomicBool::new(false);
+static PHONE_SUPERVISOR: std::sync::Once = std::sync::Once::new();
+
+/// Run prism-phoned while `phone_enabled` is on: start it, restart it if it exits, stop it when
+/// the setting goes off. A running one is told to re-read the config.
+fn apply_phone(cfg: &Config) {
+    let was = PHONE_WANTED.swap(cfg.phone_enabled, Ordering::SeqCst);
+    if was && cfg.phone_enabled {
+        thread::spawn(|| {
+            let _ = prism_common::phone::phone_request(&prism_common::phone::PhoneCommand::ReloadConfig);
+        });
+    }
+    PHONE_SUPERVISOR.call_once(|| {
+        thread::spawn(|| {
+            let mut child: Option<Child> = None;
+            let mut started = std::time::Instant::now();
+            loop {
+                let wanted = PHONE_WANTED.load(Ordering::SeqCst);
+                if let Some(c) = child.as_mut() {
+                    if !wanted {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                        child = None;
+                        eprintln!("[prismd] phone sync stopped");
+                    } else if let Ok(Some(status)) = c.try_wait() {
+                        eprintln!("[prismd] prism-phoned exited ({status})");
+                        child = None;
+                        // Back off when it dies at once (e.g. ports taken).
+                        if started.elapsed() < Duration::from_secs(5) {
+                            thread::sleep(Duration::from_secs(10));
+                        }
+                    }
+                } else if wanted {
+                    match Command::new(resolve_sibling_bin("prism-phoned")).spawn() {
+                        Ok(c) => {
+                            eprintln!("[prismd] phone sync started");
+                            started = std::time::Instant::now();
+                            child = Some(c);
+                        }
+                        Err(e) => {
+                            eprintln!("[prismd] cannot start prism-phoned: {e}");
+                            thread::sleep(Duration::from_secs(10));
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+    });
+}
+
 fn apply_config(st: &DaemonState) {
     apply_blur(&st.config);
+    apply_phone(&st.config);
     st.bluelight.update_config(&st.config);
     st.depth.update_config(&st.config);
     if let Some(idle) = &st.idle {
@@ -453,6 +506,23 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
         let cmd: Result<IpcCommand, _> = serde_json::from_str(&line);
         let resp = match cmd {
             Ok(IpcCommand::Ping) => IpcResponse::Ok(Some("pong".to_string())),
+            Ok(IpcCommand::Phone(cmd)) => match prism_common::phone::phone_request(&cmd) {
+                Ok(prism_common::phone::PhoneReply::Ok { message }) => IpcResponse::Ok(message),
+                Ok(prism_common::phone::PhoneReply::Error { message }) => IpcResponse::Error(message),
+                Ok(prism_common::phone::PhoneReply::State { state }) => IpcResponse::Ok(serde_json::to_string(&state).ok()),
+                Err(e) => IpcResponse::Error(e),
+            },
+            Ok(IpcCommand::PhoneCard(action)) => {
+                let cmd = match action.as_str() {
+                    "open" => prism_common::UiCommand::Open("phone".into()),
+                    "close" => prism_common::UiCommand::Close,
+                    _ => prism_common::UiCommand::Toggle("phone".into()),
+                };
+                match send_ui(&cmd) {
+                    Ok(_) => IpcResponse::Ok(None),
+                    Err(e) => IpcResponse::Error(e),
+                }
+            }
             Ok(IpcCommand::Help) => IpcResponse::Ok(Some("Prism IPC server active".to_string())),
 
             Ok(IpcCommand::Lock(LockAction::Status)) => {
@@ -1221,6 +1291,7 @@ fn main() {
     let idle_start = idle_settings(&cfg);
 
     apply_blur(&cfg);
+    apply_phone(&cfg);
     let state = Arc::new(Mutex::new(DaemonState {
         config: cfg,
         theme,

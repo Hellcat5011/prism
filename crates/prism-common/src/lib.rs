@@ -13,6 +13,7 @@ pub mod keybinds;
 pub mod media;
 pub mod network;
 pub mod notifications;
+pub mod phone;
 pub mod power;
 pub mod render;
 pub mod theme;

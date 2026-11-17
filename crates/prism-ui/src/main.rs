@@ -14,6 +14,8 @@ mod keybinds;
 mod launcher;
 mod nc;
 mod osd;
+mod phone;
+mod phone_client;
 mod picker;
 mod power;
 mod portal;
@@ -80,6 +82,7 @@ enum UiMode {
     NotificationCenter,
     Power,
     Keybinds,
+    Phone,
 }
 
 struct UiState {
@@ -547,7 +550,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                             let is_modal = matches!(
                                 state.mode,
                                 UiMode::Launcher | UiMode::Spotlight | UiMode::Clipboard | UiMode::Emoji |
-                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds
+                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone
                             );
 
                             if is_modal && cw > 0 && ch > 0
@@ -1003,6 +1006,7 @@ impl UiState {
                 (((sw - w) / 2.0).round() as i32, spotlight::TOP as i32, w as i32, h as i32)
             }
             UiMode::Clipboard => centered(clipboard::CARD_W, clipboard::CARD_H),
+            UiMode::Phone => centered(phone::CARD_W, phone::CARD_H),
             UiMode::Power => {
                 let w = power::card_w(sw);
                 (((sw - w) / 2.0).round() as i32, ((sh - power::CARD_H) / 2.0).round() as i32, w as i32, power::CARD_H as i32)
@@ -1326,7 +1330,7 @@ impl UiState {
                         is_animating |= v.animating();
                     }
                 }
-                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds => {
+                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Phone => {
                     let card = self.design_card();
                     self.card_bounds = self.desired_card_rect();
                     let (style, theme) = (self.style.clone(), self.theme.clone());
@@ -1626,6 +1630,7 @@ fn mode_from_name(name: &str) -> Option<UiMode> {
         "settings" => UiMode::Settings,
         "power" => UiMode::Power,
         "keybinds" => UiMode::Keybinds,
+        "phone" => UiMode::Phone,
         "launcher" => UiMode::Launcher,
         "desktop" => UiMode::Desktop,
         "desktop-edit" | "edit-mode" => UiMode::DesktopEdit,
@@ -1643,6 +1648,7 @@ fn mode_name(mode: &UiMode) -> &'static str {
         UiMode::Settings => "settings",
         UiMode::Power => "power",
         UiMode::Keybinds => "keybinds",
+        UiMode::Phone => "phone",
         UiMode::NotificationCenter => "notif-center",
         UiMode::Osd { .. } => "osd",
         UiMode::Desktop => "desktop",
@@ -1700,7 +1706,7 @@ impl Overlay {
                 &style,
             )),
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-            | UiMode::Settings | UiMode::Power | UiMode::Keybinds => Some(Transition::enter(Motion::Scale, &style)),
+            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Phone => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
         // Opened from a desktop shortcut: grow out of the button (needs a scalable surface).
@@ -1804,6 +1810,7 @@ impl Overlay {
             UiMode::Clipboard => state.view = Some(Box::new(clipboard::ClipboardView::new(ClipboardStore::load().items))),
             UiMode::Emoji => state.view = Some(Box::new(emoji::EmojiView::new(res.emojis()))),
             UiMode::Keybinds => state.view = Some(Box::new(keybinds::KeybindsView::new(waker.clone()))),
+            UiMode::Phone => state.view = Some(Box::new(phone::PhoneView::new(waker.clone()))),
             _ => {}
         }
         if matches!(state.mode, UiMode::Settings) {
@@ -1814,7 +1821,7 @@ impl Overlay {
         let uses_card_surface = matches!(
             state.mode,
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds
+                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone
         );
         if uses_card_surface {
             // The scrim's configure reports the logical screen size the card is laid out in. It

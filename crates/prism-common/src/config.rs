@@ -150,6 +150,38 @@ pub struct Config {
     /// Interface scale: 0 = automatic (screen height / 1440), otherwise a fixed factor.
     #[serde(default)]
     pub ui_scale: f32,
+
+    // ── Phone sync (KDE Connect protocol, run by prism-phoned) ──
+    /// prismd runs prism-phoned while this is on.
+    #[serde(default)]
+    pub phone_enabled: bool,
+    /// Name shown on the phone; empty = the host name.
+    #[serde(default)]
+    pub phone_device_name: String,
+    /// The phone may move the pointer and type (KDE Connect remote input, presenter).
+    #[serde(default = "default_true")]
+    pub phone_allow_input: bool,
+    /// Remote input also while the session is locked.
+    #[serde(default)]
+    pub phone_input_when_locked: bool,
+    #[serde(default = "default_true")]
+    pub phone_clipboard_sync: bool,
+    #[serde(default = "default_true")]
+    pub phone_notifications: bool,
+    #[serde(default = "default_true")]
+    pub phone_notification_popups: bool,
+    /// Received files land here (`~` is expanded).
+    #[serde(default = "default_phone_download_dir")]
+    pub phone_download_dir: String,
+    #[serde(default)]
+    pub phone_open_received: bool,
+    /// Tray icon (StatusNotifierItem) that opens the Phone card.
+    #[serde(default)]
+    pub phone_tray: bool,
+}
+
+fn default_phone_download_dir() -> String {
+    "~/Downloads".to_string()
 }
 
 fn default_popup_position() -> String {
@@ -170,6 +202,8 @@ pub struct ShortcutsConfig {
     pub settings: bool,
     #[serde(default = "default_true")]
     pub power: bool,
+    #[serde(default = "default_true")]
+    pub phone: bool,
 }
 
 impl Default for ShortcutsConfig {
@@ -179,6 +213,7 @@ impl Default for ShortcutsConfig {
             notifications: true,
             settings: true,
             power: true,
+            phone: true,
         }
     }
 }
@@ -241,6 +276,13 @@ pub struct DesktopLayoutConfig {
     pub tray: WidgetPosition,
     #[serde(default = "default_shortcuts_widget")]
     pub shortcuts: WidgetPosition,
+    #[serde(default = "default_phone_widget")]
+    pub phone: WidgetPosition,
+}
+
+/// Phone widget (battery, status, media, find my phone): hidden until enabled.
+pub fn default_phone_widget() -> WidgetPosition {
+    WidgetPosition { x: 30.0, y: -190.0, w: 360.0, h: 140.0, visible: false, transparent_bg: false, send_to_background: false, vertical: false, hide_date: false, font_family: String::new(), shortcuts: ShortcutsConfig::default() }
 }
 
 // Defaults mirror the QML DesktopLayout.getDefaultGeometry (negative = from the right/bottom
@@ -350,6 +392,7 @@ impl DesktopLayoutConfig {
                 font_family: String::new(),
                 shortcuts: ShortcutsConfig::default(),
             },
+            phone: default_phone_widget(),
         }
     }
 }
@@ -363,6 +406,7 @@ impl Default for DesktopLayoutConfig {
             mpris: default_mpris_widget(),
             tray: default_tray_widget(),
             shortcuts: default_shortcuts_widget(),
+            phone: default_phone_widget(),
         }
     }
 }
@@ -447,6 +491,16 @@ impl Default for Config {
             notification_popup_position: default_popup_position(),
             notification_center_position: default_nc_position(),
             ui_scale: 0.0,
+            phone_enabled: false,
+            phone_device_name: String::new(),
+            phone_allow_input: true,
+            phone_input_when_locked: false,
+            phone_clipboard_sync: true,
+            phone_notifications: true,
+            phone_notification_popups: true,
+            phone_download_dir: default_phone_download_dir(),
+            phone_open_received: false,
+            phone_tray: false,
         }
     }
 }

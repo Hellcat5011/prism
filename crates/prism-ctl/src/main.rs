@@ -32,6 +32,9 @@ Targets & Commands:
   bluetooth [status|toggle]
   keybinds [list|toggle|open|close]
   lock [lock|unlock|status]
+  phone [toggle|open|close|status|refresh|connect <ip>|pair|unpair|accept|reject [device]
+         |ping|ring|clipboard [text]|media [play|pause|next|previous]
+         |send <file>...|send --text <text>|send --url <url>]
   bluelight [toggle|manual_toggle|dump]
   depth [status|generate|clear]
   index [rebuild|status]
@@ -422,6 +425,8 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
             Ok(IpcCommand::Index(act))
         }
 
+        "phone" => parse_phone(&args[1..]),
+
         "ping" => Ok(IpcCommand::Ping),
         "help" => Ok(IpcCommand::Help),
 
@@ -494,6 +499,54 @@ fn main() {
             print!("{}", response_line);
         }
     }
+}
+
+/// `prism-ctl phone ...`
+fn parse_phone(args: &[String]) -> Result<IpcCommand, String> {
+    use prism_common::phone::{MediaCommand, PhoneCommand as P};
+    let a = |i: usize| args.get(i).cloned();
+    let dev = |i: usize| args.get(i).cloned();
+    let cmd = match args.first().map(|s| s.as_str()).unwrap_or("toggle") {
+        "toggle" | "open" | "close" => return Ok(IpcCommand::PhoneCard(args.first().cloned().unwrap_or_else(|| "toggle".into()))),
+        "status" => P::Status,
+        "refresh" => P::Refresh,
+        "connect" => P::Connect { addr: a(1).ok_or("usage: phone connect <ip>[:port]")? },
+        "pair" => P::Pair { device: dev(1) },
+        "unpair" => P::Unpair { device: dev(1) },
+        "accept" => P::Accept { device: dev(1) },
+        "reject" => P::Reject { device: dev(1) },
+        "ping" => P::Ping { device: dev(1) },
+        "ring" => P::Ring { device: dev(1) },
+        "clipboard" => P::SendClipboard { device: None, text: a(1).unwrap_or_default() },
+        "media" => {
+            let action = match a(1).as_deref() {
+                Some("play") => MediaCommand::Play,
+                Some("pause") => MediaCommand::Pause,
+                Some("next") => MediaCommand::Next,
+                Some("previous") | Some("prev") => MediaCommand::Previous,
+                _ => MediaCommand::PlayPause,
+            };
+            P::Media { device: None, action }
+        }
+        "send" => {
+            if args.get(1).map(|s| s.as_str()) == Some("--text") {
+                P::SendText { device: None, text: args[2..].join(" ") }
+            } else if args.get(1).map(|s| s.as_str()) == Some("--url") {
+                P::SendUrl { device: None, url: a(2).ok_or("usage: phone send --url <url>")? }
+            } else {
+                let paths: Vec<String> = args[1..]
+                    .iter()
+                    .map(|p| std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| p.clone()))
+                    .collect();
+                if paths.is_empty() {
+                    return Err("usage: phone send <file>... | --text <text> | --url <url>".into());
+                }
+                P::SendFiles { device: None, paths }
+            }
+        }
+        other => return Err(format!("unknown phone command '{other}'")),
+    };
+    Ok(IpcCommand::Phone(cmd))
 }
 
 /// "on" / "off" to Some(bool); anything else (or nothing) means toggle.

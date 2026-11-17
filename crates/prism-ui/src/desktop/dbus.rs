@@ -60,6 +60,8 @@ pub struct TrayItem {
     pub pixmap: Option<(i32, i32, Vec<u8>)>,
     pub item_is_menu: bool,
     pub has_menu: bool,
+    /// Hover text: (title, body) from ToolTip, else (Title, "").
+    pub tooltip: (String, String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -579,6 +581,7 @@ impl Worker {
                 pixmap,
                 item_is_menu: props.get("ItemIsMenu").and_then(|v| val_bool(v)).unwrap_or(false),
                 has_menu: !s("Menu").is_empty() && s("Menu") != "/",
+                tooltip: props.get("ToolTip").and_then(|v| tooltip_of(v)).filter(|t| !t.0.is_empty() || !t.1.is_empty()).unwrap_or_else(|| (s("Title"), String::new())),
             };
             match self.tray.iter_mut().find(|t| &t.key == key) {
                 Some(t) => *t = entry,
@@ -755,6 +758,29 @@ fn unwrap_variant<'a, 'b>(v: &'b Value<'a>) -> &'b Value<'a> {
         Value::Value(inner) => unwrap_variant(inner),
         other => other,
     }
+}
+
+/// SNI ToolTip `(sa(iiay)ss)`: (title, body), markup stripped.
+fn tooltip_of(v: &Value) -> Option<(String, String)> {
+    let Value::Structure(st) = unwrap_variant(v) else { return None };
+    let f = st.fields();
+    let title = f.get(2).and_then(val_str).unwrap_or_default();
+    let body = f.get(3).and_then(val_str).unwrap_or_default();
+    Some((strip_markup(&title), strip_markup(&body)))
+}
+
+fn strip_markup(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").trim().to_string()
 }
 
 fn dict_get(v: &Value, key: &str) -> Option<Value<'static>> {

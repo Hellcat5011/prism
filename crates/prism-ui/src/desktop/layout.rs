@@ -18,11 +18,12 @@ pub enum WidgetId {
     Calendar,
     AnalogClock,
     Shortcuts,
+    Phone,
 }
 
 impl WidgetId {
-    pub const ALL: [WidgetId; 6] =
-        [WidgetId::Mpris, WidgetId::Tray, WidgetId::Clock, WidgetId::Calendar, WidgetId::AnalogClock, WidgetId::Shortcuts];
+    pub const ALL: [WidgetId; 7] =
+        [WidgetId::Mpris, WidgetId::Tray, WidgetId::Clock, WidgetId::Calendar, WidgetId::AnalogClock, WidgetId::Shortcuts, WidgetId::Phone];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -32,6 +33,7 @@ impl WidgetId {
             WidgetId::Calendar => "Calendar",
             WidgetId::AnalogClock => "Analog Clock",
             WidgetId::Shortcuts => "Shortcuts",
+            WidgetId::Phone => "Phone",
         }
     }
 
@@ -43,6 +45,7 @@ impl WidgetId {
             WidgetId::Calendar => (240.0, 220.0),
             WidgetId::AnalogClock => (120.0, 120.0),
             WidgetId::Shortcuts => (48.0, 48.0),
+            WidgetId::Phone => (240.0, 100.0),
         }
     }
 
@@ -54,6 +57,7 @@ impl WidgetId {
             WidgetId::Calendar => &l.calendar,
             WidgetId::AnalogClock => &l.analogclock,
             WidgetId::Shortcuts => &l.shortcuts,
+            WidgetId::Phone => &l.phone,
         }
     }
 
@@ -65,6 +69,7 @@ impl WidgetId {
             WidgetId::Calendar => &mut l.calendar,
             WidgetId::AnalogClock => &mut l.analogclock,
             WidgetId::Shortcuts => &mut l.shortcuts,
+            WidgetId::Phone => &mut l.phone,
         }
     }
 }

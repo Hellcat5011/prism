@@ -26,7 +26,7 @@ use crate::ui::Style;
 use crate::uikit::{self, ButtonKind, Dropdown, Palette};
 use crate::waker::Waker;
 
-pub const TABS: [&str; 8] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search", "Notifications"];
+pub const TABS: [&str; 9] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search", "Notifications", "Phone"];
 /// Undo steps kept per Settings session.
 const UNDO_LIMIT: usize = 100;
 
@@ -47,6 +47,7 @@ pub enum Action {
     DepthClear,
     DepthInstallCpu,
     DepthInstallGpu,
+    OpenPhone,
 }
 
 /// Title of the row whose subtitle is the live depth-runtime status.
@@ -291,6 +292,8 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.desktop_layout.analogclock.visible, |c, v| c.desktop_layout.analogclock.visible = v) },
         Row { tab: 4, title: "Shortcuts", subtitle: "Launcher, notifications, settings and power buttons.", visible: always,
             control: Switch(|c| c.desktop_layout.shortcuts.visible, |c, v| c.desktop_layout.shortcuts.visible = v) },
+        Row { tab: 4, title: "Phone", subtitle: "Battery, status and media of the paired phone, with find my phone.", visible: always,
+            control: Switch(|c| c.desktop_layout.phone.visible, |c, v| c.desktop_layout.phone.visible = v) },
         // ── UI ──
         heading(5, "Windows"),
         Row { tab: 5, title: "Window Background Blur", subtitle: "Compositor blur behind Prism cards.", visible: always,
@@ -364,6 +367,38 @@ fn rows() -> Vec<Row> {
                 set: |c, v| c.notification_center_position = v.to_string(),
                 fonts: false,
             } },
+        // ── Phone ──
+        heading(8, "Phone Sync"),
+        Row { tab: 8, title: "Phone Sync", subtitle: "Connect an Android phone running KDE Connect (same Wi-Fi). Needs the ports open: sudo ufw allow KDEConnect.", visible: always,
+            control: Switch(|c| c.phone_enabled, |c, v| c.phone_enabled = v) },
+        Row { tab: 8, title: "Device Name", subtitle: "How this computer appears on the phone. Empty = the host name.", visible: |c| c.phone_enabled,
+            control: Text { get: |c| c.phone_device_name.clone(), set: |c, v| { c.phone_device_name = v.trim().chars().take(32).collect(); true }, placeholder: "host name", browse: false } },
+        Row { tab: 8, title: "Pairing & Status", subtitle: "Pair a phone, see battery, media, notifications and transfers.", visible: |c| c.phone_enabled,
+            control: Buttons(&[("Open the Phone card", Action::OpenPhone, ButtonKind::Primary)]) },
+        heading(8, "Phone Card Access"),
+        Row { tab: 8, title: "Shortcuts Button", subtitle: "A phone button in the desktop Shortcuts widget (when that widget is shown).", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.desktop_layout.shortcuts.shortcuts.phone, |c, v| c.desktop_layout.shortcuts.shortcuts.phone = v) },
+        Row { tab: 8, title: "Tray Icon", subtitle: "A phone icon in the system tray (Prism's tray widget or any other tray).", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.phone_tray, |c, v| c.phone_tray = v) },
+        Row { tab: 8, title: "Desktop Widget", subtitle: "The Phone desktop widget, with a button that opens the card.", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.desktop_layout.phone.visible, |c, v| c.desktop_layout.phone.visible = v) },
+        heading(8, "Remote Input"),
+        Row { tab: 8, title: "Allow Remote Input", subtitle: "The phone can move the pointer and type (KDE Connect \u{201c}Remote input\u{201d} and presenter).", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.phone_allow_input, |c, v| c.phone_allow_input = v) },
+        Row { tab: 8, title: "Also While Locked", subtitle: "Accept remote input while the screen is locked.", visible: |c| c.phone_enabled && c.phone_allow_input,
+            control: Switch(|c| c.phone_input_when_locked, |c, v| c.phone_input_when_locked = v) },
+        heading(8, "Sync"),
+        Row { tab: 8, title: "Clipboard", subtitle: "Copies go to the phone. From the phone, use Send clipboard in KDE Connect (Android blocks automatic reading).", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.phone_clipboard_sync, |c, v| c.phone_clipboard_sync = v) },
+        Row { tab: 8, title: "Phone Notifications", subtitle: "Show the phone's notifications here, with reply and actions. Allow notification access for KDE Connect on the phone.", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.phone_notifications, |c, v| c.phone_notifications = v) },
+        Row { tab: 8, title: "Notification Popups", subtitle: "Pop up phone notifications (they are always listed in the Phone card).", visible: |c| c.phone_enabled && c.phone_notifications,
+            control: Switch(|c| c.phone_notification_popups, |c, v| c.phone_notification_popups = v) },
+        heading(8, "Files"),
+        Row { tab: 8, title: "Download Folder", subtitle: "Where files from the phone are saved (~ is expanded).", visible: |c| c.phone_enabled,
+            control: Text { get: |c| c.phone_download_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.phone_download_dir = v.to_string(); true }, placeholder: "~/Downloads", browse: true } },
+        Row { tab: 8, title: "Open Received Files", subtitle: "Open each file with its default app when it arrives.", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.phone_open_received, |c, v| c.phone_open_received = v) },
     ]
 }
 
@@ -1426,6 +1461,14 @@ impl SettingsView {
             Action::EditMode => {
                 self.commit_edit();
                 self.pending_edit_mode = true;
+                return Effect::Close;
+            }
+            Action::OpenPhone => {
+                self.commit_edit();
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let _ = prism_common::ipc::request(&prism_common::IpcCommand::PhoneCard("open".into()));
+                });
                 return Effect::Close;
             }
             Action::ResetLayout => {

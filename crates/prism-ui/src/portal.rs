@@ -11,6 +11,15 @@ use zbus::MatchRule;
 
 /// Ask the user for a folder. Ok(None) when the dialog was cancelled.
 pub fn pick_folder(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    Ok(open_file(title, start, true, false)?.into_iter().next())
+}
+
+/// Pick files to open (several allowed); empty when cancelled.
+pub fn pick_files(title: &str) -> Result<Vec<PathBuf>, String> {
+    open_file(title, None, false, true)
+}
+
+fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool) -> Result<Vec<PathBuf>, String> {
     let e = |e: zbus::Error| e.to_string();
     let conn = Connection::session().map_err(e)?;
     let token = format!(
@@ -33,7 +42,8 @@ pub fn pick_folder(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>,
 
     let mut opts: HashMap<&str, Value> = HashMap::new();
     opts.insert("handle_token", Value::from(token.as_str()));
-    opts.insert("directory", Value::from(true));
+    opts.insert("directory", Value::from(directory));
+    opts.insert("multiple", Value::from(multiple));
     opts.insert("modal", Value::from(true));
     if let Some(dir) = start.filter(|d| d.is_dir()) {
         // current_folder is a NUL-terminated byte string.
@@ -53,13 +63,13 @@ pub fn pick_folder(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>,
     let msg = responses.next().ok_or("portal closed without a response")?.map_err(e)?;
     let (code, results): (u32, HashMap<String, OwnedValue>) = msg.body().deserialize().map_err(e)?;
     if code != 0 {
-        return Ok(None); // 1 = cancelled, 2 = other
+        return Ok(Vec::new()); // 1 = cancelled, 2 = other
     }
     let uris: Vec<String> = results
         .get("uris")
         .and_then(|v| Vec::<String>::try_from(v.try_clone().ok()?).ok())
         .unwrap_or_default();
-    Ok(uris.first().and_then(|u| uri_to_path(u)))
+    Ok(uris.iter().filter_map(|u| uri_to_path(u)).collect())
 }
 
 /// file:// URI to a path, decoding %XX escapes.

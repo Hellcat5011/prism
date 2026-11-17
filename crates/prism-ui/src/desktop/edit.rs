@@ -324,6 +324,10 @@ impl Edit {
                     let lr = Rect { x: 0.0, y: 0.0, w: r.w, h: r.h };
                     draw_shortcuts(cr, r.w, r.h, &p, &look, shortcuts_vertical(&p, &lr), None, false, true);
                 }
+                WidgetId::Phone => {
+                    let st = crate::phone_client::snapshot().1;
+                    super::widgets::draw_phone(cr, r.w, r.h, &p, &look, st.as_ref(), None);
+                }
             }
             unsafe { cairo_restore(cr) };
 
@@ -621,8 +625,9 @@ impl Edit {
                 let s = &mut p.shortcuts;
                 match k {
                     0 => s.launcher = !s.launcher,
-                    1 => s.notifications = !s.notifications,
-                    2 => s.settings = !s.settings,
+                    1 => s.phone = !s.phone,
+                    2 => s.notifications = !s.notifications,
+                    3 => s.settings = !s.settings,
                     _ => s.power = !s.power,
                 }
             }

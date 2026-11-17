@@ -174,6 +174,14 @@ pub enum IpcCommand {
     /// Keep the session awake (idle inhibitor): on, off, or toggle (None).
     #[serde(rename = "caffeinate")]
     Caffeinate(Option<bool>),
+
+    /// Phone sync: forwarded to prism-phoned.
+    #[serde(rename = "phone")]
+    Phone(crate::phone::PhoneCommand),
+
+    /// The Phone card: "toggle", "open" or "close".
+    #[serde(rename = "phone_card")]
+    PhoneCard(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

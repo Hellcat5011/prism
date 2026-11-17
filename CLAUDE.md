@@ -15,7 +15,7 @@ cargo test --release -p prism-ui settings   # one crate / tests matching a name
 cargo clippy --release --workspace
 
 # Install for live testing (the user runs these binaries from ~/.local/bin)
-install -m755 target/release/{prismd,prism-ui,prism-ctl,prism-lock} ~/.local/bin/
+install -m755 target/release/{prismd,prism-ui,prism-ctl,prism-lock,prism-phoned} ~/.local/bin/
 systemctl --user restart prismd             # restarts prismd and the prism-ui daemon
 journalctl --user -u prismd -f              # logs of prismd and prism-ui
 ```
@@ -43,6 +43,19 @@ Workspace crates (`crates/`):
 * `prism-ctl`: CLI that sends `IpcCommand`s to prismd (used by compositor keybinds).
 
 * `prism-ui`: all UI. Raw FFI to cairo/pango/gdk-pixbuf (`cairo_backend.rs`), wayland-client, xkbcommon, zbus.
+
+* `prism-phone` (binary `prism-phoned`): phone sync with the official KDE Connect Android app (KDE Connect
+  protocol v8, see `PHONE_SYNC_PLAN.md`). prismd runs it while `phone_enabled` is on and forwards
+  `IpcCommand::Phone`; it serves `$XDG_RUNTIME_DIR/prism-phone.sock` (`prism_common::phone`: commands, and a state
+  stream after `Subscribe` that prism-ui's `phone_client.rs` reads for the Phone card `phone.rs` and the desktop
+  Phone widget). Link: UDP 1716 discovery, TCP 1716-1764, TLS with roles reversed (the TCP initiator is the TLS
+  server and re-sends its identity inside TLS), self-signed EC certs pinned at pairing, verification key =
+  SHA-256(larger SPKI, smaller SPKI, timestamp)[..8]. Payloads (files, album art, icons) on their own TLS socket
+  (ports 1739-1764, listener = TLS server). Remote input goes through `zwlr_virtual_pointer_v1` and
+  `zwp_virtual_keyboard_v1` (keymap built on the fly, like wtype); refused while locked unless configured. Phone
+  notifications, pair requests and received files are posted over org.freedesktop.Notifications. Local
+  `kdeconnectd` works as an interop peer for testing (desktop to desktop), but never leave it running next to
+  prism-phoned (both want UDP 1716). `PRISM_PHONE_DEBUG=1` logs every packet.
 
 * `prism-lock`: lockscreen (ext-session-lock) and greetd greeter (`--greeter`, run under `cage -s --`), QML
   Lockscreen.qml look. PAM runs on a worker thread with one service (`/etc/pam.d/prism`, else `login`); lock

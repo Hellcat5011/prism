@@ -22,11 +22,12 @@ cargo build --release --manifest-path "$RUST_TREE/Cargo.toml"
 echo "[2/5] Installing binaries to $BIN_DIR..."
 cp -f "$RUST_TREE/target/release/prism-ctl" "$BIN_DIR/prism-ctl"
 cp -f "$RUST_TREE/target/release/prism-lock" "$BIN_DIR/prism-lock"
+cp -f "$RUST_TREE/target/release/prism-phoned" "$BIN_DIR/prism-phoned"
 cp -f "$RUST_TREE/target/release/prismd" "$BIN_DIR/prismd"
 cp -f "$RUST_TREE/target/release/prism-ui" "$BIN_DIR/prism-ui"
 
-chmod +x "$BIN_DIR/prism-ctl" "$BIN_DIR/prism-lock" "$BIN_DIR/prismd" "$BIN_DIR/prism-ui"
-echo "Installed to $BIN_DIR: prism-ctl, prism-lock, prismd, prism-ui"
+chmod +x "$BIN_DIR/prism-ctl" "$BIN_DIR/prism-lock" "$BIN_DIR/prismd" "$BIN_DIR/prism-ui" "$BIN_DIR/prism-phoned"
+echo "Installed to $BIN_DIR: prism-ctl, prism-lock, prismd, prism-ui, prism-phoned"
 
 # Also install to /usr/local/bin for system-level services (greetd Cage kiosk)
 if [ -w /usr/local/bin ]; then

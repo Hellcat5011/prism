@@ -128,6 +128,18 @@ pub struct BufTag(WidgetId, usize);
 
 #[derive(Clone, Copy)]
 struct MenuTag;
+/// Layer surface of the tray tooltip.
+struct TipTag;
+
+/// Hover tooltip of a tray icon (no input; below or above the icon).
+struct Tip {
+    key: String,
+    text: (String, String),
+    rect: Rect,
+    surface: wl_surface::WlSurface,
+    layer: ZwlrLayerSurfaceV1,
+    buf: Option<ShmBuf>,
+}
 #[derive(Clone, Copy)]
 struct CatcherTag;
 
@@ -144,6 +156,9 @@ struct Menu {
     buf: Option<ShmBuf>,
     hover: Option<usize>,
     rows: Vec<(usize, Rect)>,
+    /// Height of all entries; the menu is at most the screen height and scrolls.
+    content_h: f64,
+    scroll: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -203,6 +218,7 @@ struct Desk {
     second_anim: Option<Instant>,
     last_second: Option<u32>,
     menu: Option<Menu>,
+    tip: Option<Tip>,
     pending_menu_anchor: Option<(String, Rect)>,
     /// Depth effect: wallpaper foreground mask (white, alpha = foreground) published by
     /// prismd, and when it appeared (fade-in).
@@ -221,15 +237,19 @@ pub struct Desktop {
     last_day: u32,
     last_minute: u32,
     icon_gen: u64,
+    /// phone_client generation the Phone widget was last drawn for.
+    phone_seen: u64,
 }
 
 impl Desktop {
     pub fn new(conn: &Connection, waker: Waker) -> Option<Desktop> {
         let mut queue: EventQueue<Desk> = conn.new_event_queue();
         let qh = queue.handle();
+        crate::phone_client::start(waker.clone());
         let dbus = dbus::spawn(waker);
 
         let config = Config::load();
+        PHONE_SYNC.store(config.phone_enabled, std::sync::atomic::Ordering::Relaxed);
         let theme = Theme::load();
         let style = Style::new(&config, &theme);
         set_global_font(&style.font_family);
@@ -281,6 +301,7 @@ impl Desktop {
             second_anim: None,
             last_second: None,
             menu: None,
+            tip: None,
             pending_menu_anchor: None,
             depth_mask: None,
             depth_fade: None,
@@ -304,6 +325,7 @@ impl Desktop {
             last_day: now.mday,
             last_minute: now.minute,
             icon_gen: crate::icons::generation(),
+            phone_seen: 0,
         })
     }
 
@@ -332,6 +354,14 @@ impl Desktop {
             self.icon_gen = gen;
             let _ = d.dbus.cmds.send(DbusCmd::RefreshTray);
         }
+        // Phone state changed (prism-phoned), or a track is playing: redraw the Phone widget.
+        let phone_gen = crate::phone_client::generation();
+        let phone_playing = d.has(WidgetId::Phone)
+            && crate::phone_client::snapshot().1.as_ref().and_then(|s| s.primary()).and_then(|p| p.media.as_ref()).is_some_and(|m| m.playing);
+        if phone_gen != self.phone_seen || phone_playing {
+            self.phone_seen = phone_gen;
+            d.mark(WidgetId::Phone, &qh);
+        }
         let now = LocalTime::now();
         if now.minute != self.last_minute {
             self.last_minute = now.minute;
@@ -345,7 +375,7 @@ impl Desktop {
         d.sync_time(false, &qh);
         // Wake at the next wall-clock second (analog clock) or minute.
         let ms_to_second = 1000 - now.millis as i32 + 15;
-        if d.has(WidgetId::AnalogClock) {
+        if d.has(WidgetId::AnalogClock) || phone_playing {
             ms_to_second
         } else {
             ((59 - now.second as i32) * 1000 + ms_to_second).max(50)
@@ -431,6 +461,7 @@ impl Desk {
 
     fn reload(&mut self, qh: &QueueHandle<Self>) {
         self.config = Config::load();
+        PHONE_SYNC.store(self.config.phone_enabled, std::sync::atomic::Ordering::Relaxed);
         self.theme = Theme::load();
         self.style = Style::new(&self.config, &self.theme);
         set_global_font(&self.style.font_family);
@@ -673,6 +704,14 @@ impl Desk {
                 };
                 draw_shortcuts(cr, w, h, &p, &self.look, shortcuts_vertical(&p, &r), hovered, self.pressed, false)
             }
+            WidgetId::Phone => {
+                let hovered = match self.ptr_on {
+                    PointerOn::Widget(WidgetId::Phone) => self.hover_hit,
+                    _ => None,
+                };
+                let st = crate::phone_client::snapshot().1;
+                draw_phone(cr, w, h, &p, &self.look, st.as_ref(), hovered)
+            }
         };
         // Only widgets sent to the background pass behind the wallpaper scenery (QML DepthMask).
         if p.send_to_background {
@@ -806,6 +845,10 @@ impl Desk {
                 if hit != self.hover_hit {
                     self.hover_hit = hit;
                     self.set_cursor(qh, if hit.is_some() { CursorShape::Pointer } else { CursorShape::Default });
+                    match hit {
+                        Some(Hit::Tray(k)) => self.show_tip(k, qh),
+                        _ => self.hide_tip(),
+                    }
                     if matches!(id, WidgetId::Tray | WidgetId::Shortcuts) {
                         self.mark(id, qh);
                     }
@@ -878,6 +921,27 @@ impl Desk {
                         let _ = self.dbus.cmds.send(DbusCmd::Media("Next"));
                     }
                     Hit::Tray(k) => self.tray_click(k, button, qh),
+                    Hit::PhoneRing | Hit::PhonePlayPause | Hit::PhoneNext => {
+                        use prism_common::phone::{MediaCommand, PhoneCommand};
+                        let cmd = match hit {
+                            Hit::PhoneRing => PhoneCommand::Ring { device: None },
+                            Hit::PhoneNext => PhoneCommand::Media { device: None, action: MediaCommand::Next },
+                            _ => PhoneCommand::Media { device: None, action: MediaCommand::PlayPause },
+                        };
+                        std::thread::spawn(move || {
+                            if let Ok(prism_common::phone::PhoneReply::Error { message }) = prism_common::phone::phone_request(&cmd) {
+                                eprintln!("[prism-ui] phone: {message}");
+                            }
+                        });
+                    }
+                    Hit::PhoneOpen | Hit::PhoneCard => {
+                        if let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Phone) {
+                            crate::ui::set_open_origin(w.rect.x + w.rect.w / 2.0, w.rect.y + w.rect.h / 2.0);
+                        }
+                        if let Ok(c) = std::process::Command::new("prism-ctl").args(["phone", "toggle"]).spawn() {
+                            crate::reap(c);
+                        }
+                    }
                     Hit::Shortcut(k) => {
                         // The card opens out of this button (collapse to origin, ui.rs).
                         if let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Shortcuts) {
@@ -887,8 +951,9 @@ impl Desk {
                         }
                         let args: &[&str] = match k {
                             0 => &["launcher", "toggle"],
-                            1 => &["notif", "toggle"],
-                            2 => &["settings", "toggle"],
+                            1 => &["phone", "toggle"],
+                            2 => &["notif", "toggle"],
+                            3 => &["settings", "toggle"],
                             _ => &["power", "toggle"],
                         };
                         if let Ok(c) = std::process::Command::new("prism-ctl").args(args).spawn() {
@@ -926,6 +991,7 @@ impl Desk {
 
     fn open_menu(&mut self, key: String, entries: Vec<MenuEntry>, anchor: Rect, qh: &QueueHandle<Self>) {
         self.close_menu();
+        self.hide_tip();
         let (Some(comp), Some(ls)) = (self.compositor.clone(), self.layer_shell.clone()) else { return };
         // Size: widest label, fixed row heights (QML popup menu metrics).
         let probe = unsafe { cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1) };
@@ -941,12 +1007,17 @@ impl Desk {
             cairo_surface_destroy(probe);
         }
         let width = width.min(420.0).round();
-        let height: f64 = 12.0 + entries.iter().map(|e| if e.separator { 9.0 } else { 30.0 }).sum::<f64>();
+        let content_h: f64 = 12.0 + entries.iter().map(|e| if e.separator { 9.0 } else { 30.0 }).sum::<f64>();
         let (sw, sh) = self.screen;
+        // Never taller than the screen; longer menus scroll.
+        let height = content_h.min((sh - 8.0).max(60.0)).round();
         let mut x = (anchor.x + anchor.w / 2.0 - width / 2.0).clamp(4.0, sw - width - 4.0);
         let mut y = anchor.y + anchor.h + 6.0;
         if y + height > sh - 4.0 {
             y = anchor.y - height - 6.0;
+            if y < 4.0 {
+                y = sh - height - 4.0;
+            }
         }
         x = x.round();
         y = y.max(4.0).round();
@@ -979,7 +1050,104 @@ impl Desk {
             buf: None,
             hover: None,
             rows: Vec::new(),
+            content_h,
+            scroll: 0.0,
         });
+    }
+
+    /// Scroll a long menu by `dy` pixels.
+    fn scroll_menu(&mut self, dy: f64, qh: &QueueHandle<Self>) {
+        let Some(m) = self.menu.as_mut() else { return };
+        let max = (m.content_h - m.rect.h).max(0.0);
+        let s = (m.scroll + dy).clamp(0.0, max);
+        if s != m.scroll {
+            m.scroll = s;
+            self.draw_menu(qh);
+            self.on_motion(qh);
+        }
+    }
+
+    // ── Tray tooltip ──────────────────────────────────────────────────
+
+    fn show_tip(&mut self, k: usize, qh: &QueueHandle<Self>) {
+        let Some(item) = self.tray.get(k).cloned() else { return self.hide_tip() };
+        if self.tip.as_ref().is_some_and(|t| t.key == item.key && t.text == item.tooltip) {
+            return;
+        }
+        self.hide_tip();
+        if self.menu.is_some() || (item.tooltip.0.is_empty() && item.tooltip.1.is_empty()) {
+            return;
+        }
+        let (Some(comp), Some(ls)) = (self.compositor.clone(), self.layer_shell.clone()) else { return };
+        let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Tray) else { return };
+        let Some((_, r)) = w.hits.iter().find(|(h, _)| *h == Hit::Tray(k)) else { return };
+        let icon = Rect { x: w.rect.x + r.x, y: w.rect.y + r.y, w: r.w, h: r.h };
+        let probe = unsafe { cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1) };
+        let pcr = unsafe { cairo_create(probe) };
+        let (title_f, body_f) = (format!("{} Bold 13px", self.look.family), format!("{} 12px", self.look.family));
+        let (tw, th) = crate::cairo_backend::measure_pango_text(pcr, &item.tooltip.0, &title_f, 320, Some(2));
+        let (bw, bh) = if item.tooltip.1.is_empty() { (0, 0) } else { crate::cairo_backend::measure_pango_text(pcr, &item.tooltip.1, &body_f, 320, Some(6)) };
+        unsafe {
+            cairo_destroy(pcr);
+            cairo_surface_destroy(probe);
+        }
+        let width = (tw.max(bw) as f64 + 24.0).clamp(60.0, 344.0).round();
+        let height = (th as f64 + if bh > 0 { bh as f64 + 4.0 } else { 0.0 } + 16.0).round();
+        let (sw, sh) = self.screen;
+        let x = (icon.x + icon.w / 2.0 - width / 2.0).clamp(4.0, (sw - width - 4.0).max(4.0)).round();
+        let mut y = icon.y + icon.h + 8.0;
+        if y + height > sh - 4.0 {
+            y = icon.y - height - 8.0;
+        }
+        let rect = Rect { x, y: y.max(4.0).round(), w: width, h: height };
+        let surface = comp.create_surface(qh, ());
+        let layer = ls.get_layer_surface(&surface, None, Layer::Overlay, self.style.namespace("prism-modal"), qh, TipTag);
+        layer.set_anchor(Anchor::Top | Anchor::Left);
+        layer.set_exclusive_zone(-1);
+        layer.set_size(width as u32, height as u32);
+        layer.set_margin(rect.y as i32, 0, 0, rect.x as i32);
+        surface.commit();
+        self.tip = Some(Tip { key: item.key, text: item.tooltip, rect, surface, layer, buf: None });
+    }
+
+    fn hide_tip(&mut self) {
+        if let Some(t) = self.tip.take() {
+            t.layer.destroy();
+            t.surface.destroy();
+        }
+    }
+
+    fn draw_tip(&mut self, qh: &QueueHandle<Self>) {
+        let Some(shm) = self.shm.clone() else { return };
+        let look = self.look.clone();
+        let Some(t) = self.tip.as_mut() else { return };
+        let (w, h) = (t.rect.w as i32, t.rect.h as i32);
+        if t.buf.as_ref().map(|b| b.busy || b.w != w || b.h != h).unwrap_or(true) {
+            t.buf = ShmBuf::new(&shm, qh, w, h, BufTag(WidgetId::Tray, 97));
+        }
+        let Some(buf) = t.buf.as_mut() else { return };
+        let surf = buf.cairo();
+        let cr = unsafe { cairo_create(surf) };
+        unsafe {
+            cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+            cairo_paint(cr);
+            cairo_set_operator(cr, 2);
+        }
+        fill_rounded_rect(cr, 0.0, 0.0, w as f64, h as f64, 8.0, look.card);
+        stroke_rounded_rect(cr, 0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0, 8.0, (look.fg.0, look.fg.1, look.fg.2, 0.12), 1.0);
+        let (title_f, body_f) = (format!("{} Bold 13px", look.family), format!("{} 12px", look.family));
+        let (_, th) = crate::cairo_backend::draw_pango_text_wrapped(cr, 12.0, 8.0, &t.text.0, &title_f, look.fg, w - 24, Some(2));
+        if !t.text.1.is_empty() {
+            crate::cairo_backend::draw_pango_text_wrapped(cr, 12.0, 12.0 + th as f64, &t.text.1, &body_f, (look.fg.0, look.fg.1, look.fg.2, 0.72), w - 24, Some(6));
+        }
+        unsafe {
+            cairo_destroy(cr);
+            cairo_surface_destroy(surf);
+        }
+        buf.busy = true;
+        t.surface.attach(Some(&buf.buffer), 0, 0);
+        t.surface.damage_buffer(0, 0, w, h);
+        t.surface.commit();
     }
 
     fn close_menu(&mut self) {
@@ -1016,9 +1184,19 @@ impl Desk {
         }
         fill_rounded_rect(cr, 0.0, 0.0, w as f64, h as f64, radius, look.card);
         stroke_rounded_rect(cr, 0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0, radius, (look.fg.0, look.fg.1, look.fg.2, 0.12), 1.0);
-        let mut y = 6.0;
+        let scrolls = m.content_h > h as f64 + 0.5;
+        unsafe {
+            cairo_save(cr);
+            cairo_rectangle(cr, 0.0, 4.0, w as f64, h as f64 - 8.0);
+            cairo_clip(cr);
+        }
+        let mut y = 6.0 - m.scroll;
         m.rows.clear();
         for (k, e) in m.entries.iter().enumerate() {
+            if y > h as f64 || y + 30.0 < 0.0 {
+                y += if e.separator { 9.0 } else { 30.0 };
+                continue;
+            }
             if e.separator {
                 unsafe {
                     cairo_set_source_rgba(cr, look.fg.0, look.fg.1, look.fg.2, 0.15);
@@ -1028,7 +1206,7 @@ impl Desk {
                 y += 9.0;
                 continue;
             }
-            let r = Rect { x: 6.0, y, w: w as f64 - 12.0, h: 30.0 };
+            let r = Rect { x: 6.0, y, w: w as f64 - if scrolls { 18.0 } else { 12.0 }, h: 30.0 };
             if m.hover == Some(k) && e.enabled && !e.is_submenu {
                 fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 8.0, (look.primary.0, look.primary.1, look.primary.2, 0.22));
             }
@@ -1043,6 +1221,16 @@ impl Desk {
             text::draw_in_box(cr, &e.label, &st, r.x + 32.0 + indent, r.y, r.w - 40.0 - indent, r.h, text::Align::Start);
             m.rows.push((k, r));
             y += 30.0;
+        }
+        unsafe { cairo_restore(cr) };
+        if scrolls {
+            // Scrollbar on the right edge.
+            let track = h as f64 - 16.0;
+            let thumb = (track * h as f64 / m.content_h).max(24.0);
+            let max = m.content_h - h as f64;
+            let ty = 8.0 + (track - thumb) * (m.scroll / max).clamp(0.0, 1.0);
+            fill_rounded_rect(cr, w as f64 - 9.0, 8.0, 4.0, track, 2.0, (look.fg.0, look.fg.1, look.fg.2, 0.08));
+            fill_rounded_rect(cr, w as f64 - 9.0, ty, 4.0, thumb, 2.0, (look.fg.0, look.fg.1, look.fg.2, 0.45));
         }
         unsafe {
             cairo_destroy(cr);
@@ -1250,6 +1438,19 @@ impl Dispatch<ZwlrLayerSurfaceV1, MenuTag> for Desk {
     }
 }
 
+impl Dispatch<ZwlrLayerSurfaceV1, TipTag> for Desk {
+    fn event(d: &mut Self, ls: &ZwlrLayerSurfaceV1, ev: zwlr_layer_surface_v1::Event, _: &TipTag, _: &Connection, qh: &QueueHandle<Self>) {
+        match ev {
+            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+                ls.ack_configure(serial);
+                d.draw_tip(qh);
+            }
+            zwlr_layer_surface_v1::Event::Closed => d.hide_tip(),
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<ZwlrLayerSurfaceV1, CatcherTag> for Desk {
     fn event(d: &mut Self, ls: &ZwlrLayerSurfaceV1, ev: zwlr_layer_surface_v1::Event, _: &CatcherTag, _: &Connection, qh: &QueueHandle<Self>) {
         if let zwlr_layer_surface_v1::Event::Configure { serial, width, height } = ev {
@@ -1288,6 +1489,14 @@ impl Dispatch<wl_callback::WlCallback, WidgetId> for Desk {
 impl Dispatch<wl_buffer::WlBuffer, BufTag> for Desk {
     fn event(d: &mut Self, buffer: &wl_buffer::WlBuffer, ev: wl_buffer::Event, tag: &BufTag, _: &Connection, qh: &QueueHandle<Self>) {
         if let wl_buffer::Event::Release = ev {
+            if tag.1 == 97 {
+                if let Some(b) = d.tip.as_mut().and_then(|t| t.buf.as_mut()) {
+                    if &b.buffer == buffer {
+                        b.busy = false;
+                    }
+                }
+                return;
+            }
             if tag.1 == 99 {
                 if let Some(b) = d.menu.as_mut().and_then(|m| m.buf.as_mut()) {
                     if &b.buffer == buffer {
@@ -1329,6 +1538,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 d.on_motion(qh);
             }
             wl_pointer::Event::Leave { .. } => {
+                d.hide_tip();
                 let prev = d.ptr_on;
                 d.ptr_on = PointerOn::None;
                 d.hover_hit = None;
@@ -1349,9 +1559,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 if let PointerOn::Widget(WidgetId::Shortcuts) = d.ptr_on {
                     d.mark(WidgetId::Shortcuts, qh);
                 }
+                if pressed {
+                    d.hide_tip();
+                }
                 if !pressed {
                     d.on_click(button, qh);
                 }
+            }
+            wl_pointer::Event::Axis { axis: WEnum::Value(wl_pointer::Axis::VerticalScroll), value, .. } if d.ptr_on == PointerOn::Menu => {
+                d.scroll_menu(value * 2.0, qh);
             }
             _ => {}
         }

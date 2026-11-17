@@ -4,6 +4,7 @@ members = [
     "crates/prism-common",
     "crates/prism-ctl",
     "crates/prism-lock",
+    "crates/prism-phone",
     "crates/prismd",
     "crates/prism-ui",
 ]
