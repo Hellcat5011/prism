@@ -17,6 +17,9 @@ pub struct GreeterConfig {
     /// The design to show, resolved from the greeter theme setting when Prism saved its config.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// The desktop plays a video wallpaper; the greeter's copy is in the state directory.
+    #[serde(rename = "wallpaperVideo", default)]
+    pub wallpaper_video: bool,
 }
 
 fn default_theme() -> String {
@@ -74,6 +77,7 @@ impl Default for GreeterConfig {
             remember_last_user: default_remember(),
             default_session: default_session(),
             theme: default_theme(),
+            wallpaper_video: false,
         }
     }
 }

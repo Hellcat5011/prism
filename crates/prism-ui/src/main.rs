@@ -4,6 +4,7 @@ use std::os::fd::{AsFd, FromRawFd};
 use std::path::Path;
 use std::process::{exit, Command};
 
+mod apps_watch;
 mod background;
 mod caffeinate;
 mod displays;
@@ -158,10 +159,9 @@ struct UiState {
     /// Card pose to apply to the shadow after this frame.
     shadow_pending: Option<Pose>,
     alpha_multiplier: u32,
-    /// Collapse to origin: the card's layer surface is scaled toward `origin` (screen px; the
-    /// card centre if None) during the scale transitions, its buffer stretched by this viewport.
+    /// The card's layer surface is scaled about its centre during the scale transitions, its
+    /// buffer stretched by this viewport.
     card_viewport: Option<WpViewport>,
-    origin: Option<(f64, f64)>,
     /// Layer surface geometry last sent (x, y, w, h).
     geom: (i32, i32, i32, i32),
     /// A buffer of the current card size is attached (geometry-only frames may reuse it).
@@ -174,6 +174,8 @@ struct UiState {
     /// Screen-space origin of the surface the pointer is currently over.
     /// True while the pointer is over the scrim (at the screen origin), false over the card.
     pointer_on_scrim: bool,
+    /// The pointer moved during the card's transition; hover catches up when it ends.
+    hover_pending: bool,
     /// True while the last drawn frame was mid-animation (another frame is wanted).
     animating: bool,
     last_frame_at: Option<std::time::Instant>,
@@ -488,6 +490,12 @@ impl Dispatch<wl_callback::WlCallback, ()> for UiState {
         if state.configured && !state.exit_requested && (state.needs_render || state.animating) {
             state.draw_frame(qh);
         }
+        // The card has arrived: catch up with where the pointer went meanwhile.
+        if state.hover_pending && state.transition.is_none() && !state.exit_requested {
+            state.hover_pending = false;
+            let (px, py) = state.design_point(state.pointer_x as f64, state.pointer_y as f64);
+            state.pointer_moved(px, py, qh);
+        }
     }
 }
 
@@ -535,40 +543,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                 let (ox, oy) = state.pointer_origin();
                 state.pointer_x = surface_x as i32 + ox;
                 state.pointer_y = surface_y as i32 + oy;
+                // Hover waits until the card has arrived: redrawing its content for pointer
+                // events would replace the cheap scaled frames of the transition.
+                if state.transition.is_some() {
+                    state.hover_pending = true;
+                    return;
+                }
                 let (px, py) = state.design_point(surface_x + ox as f64, surface_y + oy as f64);
-                if let Some(sv) = state.settings.as_mut() {
-                    if sv.motion(px, py, state.pointer_down) {
-                        state.render_and_commit(qh);
-                    }
-                    return;
-                }
-                if let Some(v) = state.view.as_mut() {
-                    let (redraw, over) = (v.motion(px, py), v.clickable());
-                    state.set_cursor_shape(qh, if over { CursorShape::Pointer } else { CursorShape::Default });
-                    if redraw {
-                        state.render_and_commit(qh);
-                    }
-                    return;
-                }
-                if let Some(v) = state.nc.as_mut() {
-                    let redraw = v.motion(px, py);
-                    let shape = if v.over_clickable() { CursorShape::Pointer } else { CursorShape::Default };
-                    state.set_cursor_shape(qh, shape);
-                    if redraw {
-                        state.render_and_commit(qh);
-                    }
-                    return;
-                }
-                if let Some(v) = state.wallpaper.as_mut() {
-                    let (redraw, over) = v.motion(px, py);
-                    state.set_cursor_shape(qh, if over { CursorShape::Pointer } else { CursorShape::Default });
-                    if redraw {
-                        state.render_and_commit(qh);
-                    }
-                    return;
-                }
-
-                state.set_cursor_shape(qh, CursorShape::Default);
+                state.pointer_moved(px, py, qh);
             }
             // Hidden Settings (polkit dialog up): the scrim must not close it on a click.
             wl_pointer::Event::Button { .. } if state.settings_hidden() => {}
@@ -947,6 +929,42 @@ impl UiState {
     /// Request a redraw. Draws immediately when no frame is in flight; otherwise the request is
     /// coalesced into the next `wl_surface.frame` callback. Input bursts (1000 Hz mice, key
     /// repeat) therefore never cause more than one render per display refresh.
+    /// The pointer moved to (px, py) in design pixels: update hover in the open view.
+    fn pointer_moved(&mut self, px: f64, py: f64, qh: &QueueHandle<Self>) {
+        if let Some(sv) = self.settings.as_mut() {
+            if sv.motion(px, py, self.pointer_down) {
+                self.render_and_commit(qh);
+            }
+            return;
+        }
+        if let Some(v) = self.view.as_mut() {
+            let (redraw, over) = (v.motion(px, py), v.clickable());
+            self.set_cursor_shape(qh, if over { CursorShape::Pointer } else { CursorShape::Default });
+            if redraw {
+                self.render_and_commit(qh);
+            }
+            return;
+        }
+        if let Some(v) = self.nc.as_mut() {
+            let redraw = v.motion(px, py);
+            let shape = if v.over_clickable() { CursorShape::Pointer } else { CursorShape::Default };
+            self.set_cursor_shape(qh, shape);
+            if redraw {
+                self.render_and_commit(qh);
+            }
+            return;
+        }
+        if let Some(v) = self.wallpaper.as_mut() {
+            let (redraw, over) = v.motion(px, py);
+            self.set_cursor_shape(qh, if over { CursorShape::Pointer } else { CursorShape::Default });
+            if redraw {
+                self.render_and_commit(qh);
+            }
+            return;
+        }
+        self.set_cursor_shape(qh, CursorShape::Default);
+    }
+
     fn render_and_commit(&mut self, qh: &QueueHandle<Self>) {
         self.needs_render = true;
         self.content_dirty = true;
@@ -1093,7 +1111,7 @@ impl UiState {
             _ => self.desired_card_rect(),
         };
         let (x, y, w, h) = (rest.0 as f64, rest.1 as f64, rest.2 as f64, rest.3 as f64);
-        // Where the card is drawn now: the surface itself scales toward the origin (collapse),
+        // Where the card is drawn now: the surface itself scales about its centre (collapse),
         // or the pixels inside the surface move and scale about its centre.
         let visible = if self.collapse() {
             let g = self.geometry_for(pose);
@@ -1190,12 +1208,12 @@ impl UiState {
         desktop::layout::Rect { x: x as f64, y: y as f64, w: w as f64, h: h as f64 }
     }
 
-    /// Cards that grow from / collapse to their origin by scaling the surface itself.
+    /// Cards that grow from / collapse into their centre by scaling the surface itself.
     fn collapse(&self) -> bool {
         self.card_viewport.is_some() && matches!(self.motion, Motion::Scale)
     }
 
-    /// Layer surface geometry for `pose`: the card rectangle, scaled toward the origin while
+    /// Layer surface geometry for `pose`: the card rectangle, scaled toward its centre while
     /// a collapse transition runs.
     fn geometry_for(&self, pose: &Pose) -> (i32, i32, i32, i32) {
         let (x, y, w, h) = self.surf_rect;
@@ -1203,7 +1221,7 @@ impl UiState {
             return (x, y, w, h);
         }
         let s = pose.scale.max(0.01);
-        let (ox, oy) = self.origin.unwrap_or((x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0));
+        let (ox, oy) = (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0);
         let nx = ox + (x as f64 - ox) * s;
         let ny = oy + (y as f64 - oy) * s;
         ((nx.round()) as i32, (ny.round()) as i32, ((w as f64 * s).round() as i32).max(1), ((h as f64 * s).round() as i32).max(1))
@@ -1255,6 +1273,9 @@ impl UiState {
     fn pointer_origin(&self) -> (i32, i32) {
         if self.pointer_on_scrim {
             (0, 0)
+        } else if self.collapse() {
+            // A card that is still scaling is not at its final place yet.
+            (self.geom.0, self.geom.1)
         } else {
             (self.surf_rect.0, self.surf_rect.1)
         }
@@ -1530,7 +1551,7 @@ impl UiState {
                 }
                 if let (Some((img, _, _)), false) = (self.card_cache, self.settings_hidden()) {
                     let out = cairo_backend::cairo_create(cairo_surface);
-                    // Collapse to origin scales the surface itself (viewport), not the pixels.
+                    // A collapse scales the surface itself (viewport), not the pixels.
                     let collapse = self.collapse();
                     if !collapse {
                         cairo_backend::cairo_translate(out, pose.tx * ui_scale, pose.ty * ui_scale);
@@ -1643,7 +1664,7 @@ globals_ignore!(wl_compositor::WlCompositor, wl_shm::WlShm, ZwlrLayerShellV1, wl
 /// Data that is expensive to load, kept between overlay openings.
 #[derive(Default)]
 struct Resources {
-    apps: Option<(Vec<DesktopApp>, std::time::Instant)>,
+    apps: Option<Vec<DesktopApp>>,
     emojis: Option<Vec<EmojiItem>>,
     /// Background loader of the app list and icons (daemon only).
     preload: Option<Preloader>,
@@ -1651,15 +1672,9 @@ struct Resources {
 
 impl Resources {
     fn apps(&mut self) -> Vec<DesktopApp> {
-        // .desktop files rarely change: a stale list is shown while a fresh one loads in the
-        // background. Only the very first opening, before any preload finished, scans inline.
-        let stale = self.apps.as_ref().map(|(_, t)| t.elapsed().as_secs() > 300).unwrap_or(true);
-        match (&mut self.preload, &self.apps) {
-            (Some(p), Some(_)) if stale => p.start(),
-            (_, None) => self.apps = Some((load_all_desktop_apps(), std::time::Instant::now())),
-            _ => {}
-        }
-        self.apps.as_ref().map(|(a, _)| a.clone()).unwrap_or_default()
+        // The daemon keeps the list current in the background (apps_watch.rs). Only the very
+        // first opening, before any preload finished, scans inline.
+        self.apps.get_or_insert_with(load_all_desktop_apps).clone()
     }
 
     fn emojis(&mut self) -> Vec<EmojiItem> {
@@ -1678,7 +1693,14 @@ impl Resources {
         }
         if let Some(a) = apps {
             p.running = false;
-            self.apps = Some((a, std::time::Instant::now()));
+            self.apps = Some(a);
+        }
+        // Apps were installed or removed. A scan that is already running may have missed the
+        // change: this waits for it to finish and scans again.
+        let installed = apps_watch::generation();
+        if installed != p.apps_gen && !p.running {
+            p.apps_gen = installed;
+            p.start();
         }
         // A new icon theme or wallpaper means other pictures: decode them again. The
         // wallpaper is checked at most every 2 s (one stat).
@@ -1710,9 +1732,24 @@ struct Preloader {
     rx: std::sync::mpsc::Receiver<Preloaded>,
     waker: Waker,
     running: bool,
+    /// apps_watch generation the last scan started from.
+    apps_gen: u64,
     icon_gen: u64,
     wallpaper_mtime: Option<std::time::SystemTime>,
     wallpaper_checked: std::time::Instant,
+}
+
+/// Run the UI thread ahead of background work, so a compile or an indexer cannot delay frames and
+/// clicks. Only this thread: everything it starts (workers, launched apps) returns to normal
+/// priority. Needs the session's nice limit; without it the thread just keeps its priority.
+fn raise_ui_priority() {
+    const UI_NICE: libc::c_int = -10;
+    unsafe {
+        let param: libc::sched_param = std::mem::zeroed();
+        if libc::sched_setscheduler(0, libc::SCHED_OTHER | libc::SCHED_RESET_ON_FORK, &param) != 0 || libc::setpriority(libc::PRIO_PROCESS, 0, UI_NICE) != 0 {
+            eprintln!("[prism-ui] cannot raise the UI thread's priority: {}", std::io::Error::last_os_error());
+        }
+    }
 }
 
 /// Icon sizes (design px) of the app rows in launcher.rs and spotlight.rs.
@@ -1722,7 +1759,7 @@ impl Preloader {
     fn new(waker: Waker) -> Preloader {
         let (tx, rx) = std::sync::mpsc::channel();
         let wallpaper_mtime = cairo_backend::wallpaper_panel_path().and_then(|f| std::fs::metadata(f).ok()?.modified().ok());
-        Preloader { tx, rx, waker, running: false, icon_gen: icons::generation(), wallpaper_mtime, wallpaper_checked: std::time::Instant::now() }
+        Preloader { tx, rx, waker, running: false, apps_gen: apps_watch::generation(), icon_gen: icons::generation(), wallpaper_mtime, wallpaper_checked: std::time::Instant::now() }
     }
 
     fn start(&mut self) {
@@ -1876,12 +1913,6 @@ impl Overlay {
             | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
-        // Opened from a desktop shortcut: grow out of the button (needs a scalable surface).
-        let open_origin = ui::take_open_origin().filter(|_| g.viewporter.is_some());
-        let transition = match (transition, open_origin) {
-            (Some(t), Some(_)) if t.motion == Motion::Scale => Some(t.with_min_scale(ui::ORIGIN_SCALE)),
-            (t, _) => t,
-        };
         // Rows of the new card start hidden; the entrance restarts with its first shown frame.
         if transition.is_some() {
             ui::begin_entrance(&style);
@@ -1934,13 +1965,13 @@ impl Overlay {
             alpha_surface: None,
             alpha_multiplier: u32::MAX,
             card_viewport: None,
-            origin: open_origin,
             geom: (0, 0, 0, 0),
             buffer_committed: false,
             scrim_configured: false,
             card_surface: false,
             surf_rect: (0, 0, 0, 0),
             pointer_on_scrim: false,
+            hover_pending: false,
             animating: false,
             last_frame_at: None,
             frame_dt: 1.0 / 60.0,
@@ -2285,6 +2316,9 @@ fn main() {
         eprintln!("[prism-ui] daemon already running. Exiting.");
         exit(0);
     }
+    if daemon {
+        raise_ui_priority();
+    }
     let mode = if daemon { None } else { Some(parse_mode(&args)) };
     if let Some(UiMode::Desktop) = mode {
         if !acquire_instance_lock("prism-desktop.lock") {
@@ -2406,6 +2440,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut config_seq = desktop.as_ref().map(|d| d.config_seq()).unwrap_or(0);
     if daemon {
         prompt::init(waker.clone());
+        apps_watch::start(waker.clone());
         apply_agents(&prism_common::Config::load());
         let mut p = Preloader::new(waker.clone());
         p.start();
@@ -2524,6 +2559,11 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 timeout = t;
             }
         }
+        if let Some(t) = background.as_mut().and_then(|b| b.tick()) {
+            if timeout < 0 || t < timeout {
+                timeout = t;
+            }
+        }
         if let Some(s) = shooter.as_mut() {
             s.tick();
         }
@@ -2634,6 +2674,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             ];
             if let Some(fd) = desktop.as_ref().and_then(|d| d.inotify_fd()) {
                 fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+            }
+            if let Some(b) = background.as_ref() {
+                fds.extend(b.video_fds().into_iter().map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }));
             }
             let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
             if ret > 0 && (fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP)) != 0 {

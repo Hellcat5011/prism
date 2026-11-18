@@ -34,8 +34,18 @@ pub struct Incoming {
     /// Show the image as a large preview (Prism's private hint "x-prism-preview").
     pub preview: bool,
     pub transient: bool,
+    /// The sender asks for no sound (hint "suppress-sound").
+    pub suppress_sound: bool,
     /// Popup duration in ms; 0 = stays until dismissed (critical).
     pub timeout_ms: u32,
+}
+
+impl Incoming {
+    /// A new notification worth a sound: updates of one already shown and passing messages
+    /// stay quiet.
+    pub fn wants_sound(&self) -> bool {
+        self.replaces_id == 0 && !self.transient && !self.suppress_sound
+    }
 }
 
 pub trait Handler: Send + Sync {
@@ -187,6 +197,7 @@ fn normalise(
         preview: image.is_some() && bool_hint("x-prism-preview"),
         image,
         transient: bool_hint("transient"),
+        suppress_sound: bool_hint("suppress-sound"),
         timeout_ms: popup_timeout(expire_timeout, urgency),
     }
 }
@@ -370,6 +381,7 @@ mod tests {
         let n = normalise("".into(), 0, "firefox".into(), "s".into(), "b".into(), vec!["default".into(), "".into(), "reply".into(), "Reply".into()], &hints, -1);
         assert_eq!(n.app_name, "System");
         assert_eq!(n.urgency, 2);
+        assert!(n.wants_sound());
         assert_eq!(n.timeout_ms, 0);
         assert_eq!(n.desktop_entry, "firefox");
         assert_eq!(n.actions, vec![("default".into(), "Open".into()), ("reply".into(), "Reply".into())]);

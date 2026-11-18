@@ -14,7 +14,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/prism"
-BINARIES=(prismd prism-ui prism-ctl prism-lock prism-phoned prism-rec)
+BINARIES=(prismd prism-ui prism-ctl prism-lock prism-phoned prism-rec prism-video)
 
 GREETER=0
 for arg in "$@"; do
@@ -114,8 +114,8 @@ fi
 echo "[6/6] Greeter binary..."
 if [ "$GREETER" = 1 ]; then
     echo "Installing prism-lock to /usr/local/bin for the greetd greeter (sudo)..."
-    sudo install -m755 "$REPO_DIR/target/release/prism-lock" /usr/local/bin/prism-lock
-    echo "Installed /usr/local/bin/prism-lock."
+    sudo install -m755 "$REPO_DIR/target/release/prism-lock" "$REPO_DIR/target/release/prism-video" /usr/local/bin/
+    echo "Installed prism-lock and prism-video to /usr/local/bin."
 elif [ -e /usr/local/bin/prism-lock ] && ! cmp -s "$REPO_DIR/target/release/prism-lock" /usr/local/bin/prism-lock; then
     echo "The greeter's /usr/local/bin/prism-lock is from an older build; update it with:"
     echo "  $0 --greeter"

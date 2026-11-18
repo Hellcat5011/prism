@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::{wl_buffer, wl_callback, wl_output, wl_region, wl_registry, wl_shm_pool, wl_surface};
+use std::os::fd::AsFd;
+
+use prism_common::video::VideoStream;
+use wayland_client::protocol::{wl_buffer, wl_callback, wl_output, wl_region, wl_registry, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -77,6 +80,20 @@ enum Kind {
     Grow(f64, f64),
 }
 
+/// A video on one output: its decoder and one wl_buffer per frame of the shared memory.
+struct OutVideo {
+    stream: VideoStream,
+    buffers: Vec<wl_buffer::WlBuffer>,
+}
+
+impl Drop for OutVideo {
+    fn drop(&mut self) {
+        for b in self.buffers.drain(..) {
+            b.destroy();
+        }
+    }
+}
+
 struct Out {
     /// Registry name of the wl_output.
     name: u32,
@@ -96,6 +113,8 @@ struct Out {
     old: Option<*mut CairoSurface>,
     progress: SpringValue,
     kind: Kind,
+    /// Playing a video instead of showing a picture.
+    video: Option<OutVideo>,
     /// Decode request number; results for older ones are dropped.
     seq: u64,
     /// The path decoded (or being decoded) for this output, with its pixel size.
@@ -123,6 +142,7 @@ impl Out {
     }
 
     fn destroy(&mut self) {
+        self.video = None;
         self.free_images();
         if let Some(f) = self.frame.take() {
             drop(f);
@@ -151,6 +171,8 @@ struct St {
     /// Wallpaper shown (None: daemon off or nothing set yet).
     path: Option<PathBuf>,
     enabled: bool,
+    /// The video to play instead of `path`.
+    video: Option<PathBuf>,
     transition: String,
     time_scale: Option<f64>,
     seed: u64,
@@ -172,6 +194,7 @@ impl Background {
             done,
             path: None,
             enabled: false,
+            video: None,
             transition: "random".into(),
             time_scale: Some(1.0),
             seed: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1,
@@ -193,13 +216,20 @@ impl Background {
     /// Follow the config: show the current wallpaper when the built-in daemon is selected, remove
     /// the surfaces otherwise.
     pub fn apply_config(&mut self, cfg: &prism_common::Config) {
-        let enabled = cfg.wallpaper_daemon == "prism";
+        let enabled = matches!(cfg.wallpaper_daemon.as_str(), "prism" | "prism-video");
+        let video = cfg.video_wallpaper();
         self.st.transition = cfg.wallpaper_transition.clone();
         self.st.time_scale = crate::ui::Style::new(cfg, &prism_common::Theme::load()).time_scale();
-        if enabled == self.st.enabled {
+        if enabled == self.st.enabled && video == self.st.video {
             return;
         }
+        // Switching between a picture and a video starts over with new surfaces.
+        for o in self.st.outs.iter_mut() {
+            o.destroy();
+            o.want = None;
+        }
         self.st.enabled = enabled;
+        self.st.video = video;
         let qh = self.queue.handle();
         if enabled {
             self.st.path = prism_common::wallpaper::displayed_wallpaper();
@@ -211,6 +241,17 @@ impl Background {
                 o.destroy();
             }
         }
+    }
+
+    /// What the event loop has to watch for the videos.
+    pub fn video_fds(&self) -> Vec<i32> {
+        self.st.outs.iter().filter_map(|o| o.video.as_ref()).map(|v| v.stream.fd()).collect()
+    }
+
+    /// Show the frames that are due; returns ms until the next one.
+    pub fn tick(&mut self) -> Option<i32> {
+        let qh = self.queue.handle();
+        self.st.play_videos(&qh)
     }
 
     /// Show `path` with a transition (when the built-in daemon is selected).
@@ -263,6 +304,7 @@ impl St {
             kind: Kind::None,
             seq: 0,
             want: None,
+            video: None,
             frame: None,
         });
         if self.enabled {
@@ -293,8 +335,75 @@ impl St {
         o.layer = Some(layer);
     }
 
+    /// Start the video on output `i`, once its size is known. A video that cannot be played
+    /// leaves the picture on screen.
+    fn start_video(&mut self, i: usize, qh: &QueueHandle<St>) {
+        let (Some(file), Some(shm)) = (self.video.clone(), self.g.shm.clone()) else { return };
+        let vp = self.g.viewporter.is_some();
+        let o = &mut self.outs[i];
+        if o.video.is_some() || o.size.0 <= 0 || o.surface.is_none() {
+            return;
+        }
+        let (w, h) = o.pixel_size(vp);
+        let Some(stream) = VideoStream::open(&file, w, h) else {
+            eprintln!("[prism-ui] cannot start the video wallpaper");
+            self.video = None;
+            return self.request(i);
+        };
+        let pool = shm.create_pool(stream.memory().as_fd(), stream.pool_size(), qh, ());
+        let buffers = (0..prism_common::video::SLOTS as i32)
+            .map(|slot| pool.create_buffer(slot * stream.frame_size(), w, h, w * 4, wl_shm::Format::Argb8888, qh, o.name))
+            .collect();
+        pool.destroy();
+        o.video = Some(OutVideo { stream, buffers });
+    }
+
+    /// Put the frames that are due on screen; returns ms until the next one is due.
+    fn play_videos(&mut self, qh: &QueueHandle<St>) -> Option<i32> {
+        let now = std::time::Instant::now();
+        let mut next: Option<i32> = None;
+        let mut failed = false;
+        for o in self.outs.iter_mut() {
+            let Some(v) = o.video.as_mut() else { continue };
+            if !v.stream.pump() {
+                failed = true;
+                continue;
+            }
+            // The compositor stops asking for frames while the wallpaper is fully covered: the
+            // decoder then runs out of free frames and rests.
+            if o.frame.is_none() {
+                if let (Some(slot), Some(surface)) = (v.stream.take_due(now), o.surface.as_ref()) {
+                    surface.attach(Some(&v.buffers[slot as usize]), 0, 0);
+                    surface.damage_buffer(0, 0, v.stream.width, v.stream.height);
+                    if let Some(view) = o.viewport.as_ref() {
+                        view.set_destination(o.size.0, o.size.1);
+                    }
+                    o.frame = Some(surface.frame(qh, o.name));
+                    surface.commit();
+                }
+                if let Some(wait) = v.stream.due_in(now) {
+                    let ms = wait.as_millis() as i32 + 1;
+                    next = Some(next.map_or(ms, |n| n.min(ms)));
+                }
+            }
+        }
+        if failed {
+            eprintln!("[prism-ui] the video wallpaper stopped; showing the picture instead");
+            self.video = None;
+            for i in 0..self.outs.len() {
+                self.outs[i].video = None;
+                self.outs[i].want = None;
+                self.request(i);
+            }
+        }
+        next
+    }
+
     /// Ask the worker for the current wallpaper at output `i`'s pixel size.
     fn request(&mut self, i: usize) {
+        if self.video.is_some() {
+            return;
+        }
         let vp = self.g.viewporter.is_some();
         let o = &mut self.outs[i];
         let Some(path) = self.path.clone() else { return };
@@ -579,6 +688,8 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for St {
                 let changed = o.size != (width as i32, height as i32);
                 o.size = (width as i32, height as i32);
                 if changed {
+                    st.outs[i].video = None;
+                    st.start_video(i, qh);
                     st.request(i);
                 }
                 // Something on screen at once (the old picture or black) until the decode lands.
@@ -617,7 +728,9 @@ impl Dispatch<wl_callback::WlCallback, u32> for St {
             let Some(i) = st.outs.iter().position(|o| o.name == *name) else { return };
             if st.outs[i].frame.as_ref() == Some(cb) {
                 st.outs[i].frame = None;
-                st.draw(i, qh);
+                if st.outs[i].video.is_none() {
+                    st.draw(i, qh);
+                }
             }
         }
     }
@@ -627,6 +740,12 @@ impl Dispatch<wl_buffer::WlBuffer, u32> for St {
     fn event(st: &mut Self, buffer: &wl_buffer::WlBuffer, ev: wl_buffer::Event, name: &u32, _: &Connection, _: &QueueHandle<Self>) {
         if let wl_buffer::Event::Release = ev {
             if let Some(o) = st.outs.iter_mut().find(|o| o.name == *name) {
+                if let Some(v) = o.video.as_mut() {
+                    if let Some(slot) = v.buffers.iter().position(|b| b == buffer) {
+                        v.stream.release(slot as u32);
+                        return;
+                    }
+                }
                 for b in o.bufs.iter_mut().filter(|b| &b.buffer == buffer) {
                     b.busy = false;
                 }

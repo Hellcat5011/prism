@@ -20,7 +20,9 @@ pub mod phone;
 pub mod pixbuf;
 pub mod power;
 pub mod render;
+pub mod sound;
 pub mod theme;
+pub mod video;
 pub mod wallpaper;
 pub mod wlclip;
 

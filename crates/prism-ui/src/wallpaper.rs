@@ -168,7 +168,6 @@ pub struct WallpaperView {
     error: Option<String>,
     hits: Vec<(usize, Vec<(f64, f64)>)>,
     waker: Waker,
-    daemon: String,
     scheme: String,
     mode: String,
 }
@@ -233,7 +232,6 @@ impl WallpaperView {
             error: None,
             hits: Vec::new(),
             waker,
-            daemon: cfg.wallpaper_daemon.clone(),
             scheme: cfg.matugen_scheme.clone(),
             mode: cfg.matugen_mode.clone(),
         }
@@ -809,16 +807,21 @@ impl WallpaperView {
         if let Some(p) = self.strip.as_mut() {
             p.close();
         }
-        let (daemon, scheme, mode) = (self.daemon.clone(), self.scheme.clone(), self.mode.clone());
+        let (scheme, mode) = (self.scheme.clone(), self.mode.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         let w = self.waker.clone();
         std::thread::spawn(move || {
+            // Fresh from disk: the daemon may have changed since this card opened.
+            let cfg = prism_common::Config::load();
+            let daemon = cfg.still_daemon().to_string();
             let r = prism_common::wallpaper::render_filtered(&path, filter).and_then(|shown| {
                 if daemon == "prism" {
                     crate::background::request_show(&shown);
                 }
                 prism_common::wallpaper::set_wallpaper_filtered(&path, filter, Some(&daemon), Some(&scheme), Some(&mode))
             });
+            // Only now: the desktop picks up the new picture as it leaves the video.
+            let r = r.and_then(|_| prism_common::wallpaper::leave_video_wallpaper());
             let _ = tx.send(r);
             w.wake();
         });

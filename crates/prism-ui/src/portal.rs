@@ -11,15 +11,25 @@ use zbus::MatchRule;
 
 /// Ask the user for a folder. Ok(None) when the dialog was cancelled.
 pub fn pick_folder(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>, String> {
-    Ok(open_file(title, start, true, false)?.into_iter().next())
+    Ok(open_file(title, start, true, false, None)?.into_iter().next())
+}
+
+/// Ask the user for an audio file. Ok(None) when the dialog was cancelled.
+pub fn pick_audio(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    Ok(open_file(title, start, false, false, Some(("Audio", "audio/*")))?.into_iter().next())
+}
+
+/// Ask the user for a video file. Ok(None) when the dialog was cancelled.
+pub fn pick_video(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    Ok(open_file(title, start, false, false, Some(("Videos", "video/*")))?.into_iter().next())
 }
 
 /// Pick files to open (several allowed); empty when cancelled.
 pub fn pick_files(title: &str) -> Result<Vec<PathBuf>, String> {
-    open_file(title, None, false, true)
+    open_file(title, None, false, true, None)
 }
 
-fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool) -> Result<Vec<PathBuf>, String> {
+fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool, filter: Option<(&str, &str)>) -> Result<Vec<PathBuf>, String> {
     let e = |e: zbus::Error| e.to_string();
     let conn = Connection::session().map_err(e)?;
     let token = format!(
@@ -45,6 +55,10 @@ fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool)
     opts.insert("directory", Value::from(directory));
     opts.insert("multiple", Value::from(multiple));
     opts.insert("modal", Value::from(true));
+    if let Some((name, mime)) = filter {
+        // A list of (name, [(1 = MIME type, pattern)]).
+        opts.insert("filters", Value::new(vec![(name.to_string(), vec![(1u32, mime.to_string())])]));
+    }
     if let Some(dir) = start.filter(|d| d.is_dir()) {
         // current_folder is a NUL-terminated byte string.
         let mut bytes = std::os::unix::ffi::OsStrExt::as_bytes(dir.as_os_str()).to_vec();

@@ -26,7 +26,7 @@ use crate::ui::Style;
 use crate::uikit::{self, ButtonKind, Dropdown, Palette};
 use crate::waker::Waker;
 
-pub const TABS: [&str; 14] = ["Appearance", "Wallpaper", "Desktop", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "System"];
+pub const TABS: [&str; 16] = ["Appearance", "Wallpaper", "Desktop", "Bar", "Dock", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "System"];
 /// Undo steps kept per Settings session.
 const UNDO_LIMIT: usize = 100;
 
@@ -37,6 +37,8 @@ const MARGIN: f64 = 12.0;
 const SIDEBAR_W: f64 = 220.0;
 const PANE_PAD: f64 = 24.0;
 const CONTROL_W: f64 = 230.0;
+/// Height of a tab in the sidebar: all of them fit the card.
+const TAB_H: f64 = 34.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
@@ -48,6 +50,8 @@ pub enum Action {
     DepthInstallCpu,
     DepthInstallGpu,
     OpenPhone,
+    PlayNotificationSound,
+    ChooseVideoWallpaper,
 }
 
 /// Title of the row whose subtitle is the live depth-runtime status.
@@ -57,6 +61,39 @@ const DEPTH_STATUS_ROW: &str = "Status & Device";
 static DEPTH_STATUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 /// Set when DEPTH_STATUS or INDEX_LAST changed and the view has not redrawn since.
 static DEPTH_STATUS_NEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+const WALLPAPER_DAEMON_ROW: &str = "Wallpaper Daemon";
+const VIDEO_WALLPAPER_ROW: &str = "Video";
+/// File name of the video wallpaper, for its row's subtitle (kept in step by `draw`).
+static VIDEO_NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Title of the row that picks a sound file instead of a folder.
+const NOTIFICATION_SOUND_ROW: &str = "Sound";
+/// The last entry of the sound list: not a sound, it asks for a file to add.
+const ADD_SOUND: &str = "\u{1}add-sound";
+/// The user's sounds in the list, kept in step with the config by `draw`.
+static ADDED_SOUNDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The user's sounds: the files they added, and the selected sound if it is not among them (one
+/// chosen before it had to be added).
+fn added_sounds(c: &Config) -> Vec<String> {
+    let mut list = c.notification_sounds.clone();
+    let current = &c.notification_sound_file;
+    if !current.is_empty() && !list.contains(current) {
+        list.push(current.clone());
+    }
+    list
+}
+
+/// Prism's chime, the user's sounds, and the way to add another.
+fn sound_options() -> Vec<(String, String)> {
+    let added = ADDED_SOUNDS.lock().map(|a| a.clone()).unwrap_or_default();
+    let sounds = added.iter().map(|p| (prism_common::sound::label(p), p.clone()));
+    std::iter::once(("Prism Chime".to_string(), String::new()))
+        .chain(sounds)
+        .chain(std::iter::once(("Add New Sound\u{2026}".to_string(), ADD_SOUND.to_string())))
+        .collect()
+}
 
 /// Title of the file-index row; its subtitle ends with the last index time (QML IndexService).
 const INDEX_ROW: &str = "Rebuild File Index";
@@ -107,6 +144,8 @@ enum Control {
     Buttons(&'static [(&'static str, Action, ButtonKind)]),
     /// Toggle pills: (label, value) options, any number on.
     Pills { options: &'static [(&'static str, &'static str)], get: fn(&Config) -> Vec<String>, set: fn(&mut Config, Vec<String>) },
+    /// The bar's modules: drag them between left, center, right and off.
+    BarModules,
     /// Small print at the end of a tab (the row subtitle); not focusable, hidden in search results.
     Note,
     /// Section heading (the row title) grouping the rows after it; not focusable, hidden
@@ -132,6 +171,12 @@ fn row_subtitle(r: &Row) -> std::borrow::Cow<'static, str> {
             return s.clone().into();
         }
     }
+    if r.title == VIDEO_WALLPAPER_ROW {
+        let name = VIDEO_NAME.lock().unwrap();
+        if !name.is_empty() {
+            return format!("{} Wallpaper filters do not apply to it.", name.as_str()).into();
+        }
+    }
     if r.title == INDEX_ROW {
         if let Some(t) = INDEX_LAST.lock().unwrap().as_ref() {
             return format!("{} \u{2022} Last indexed: {t}", r.subtitle).into();
@@ -148,6 +193,7 @@ impl Control {
             Control::Slider { get, .. } => Some(get(c).to_string()),
             Control::Text { get, .. } | Control::Combo { get, .. } => Some(get(c)),
             Control::Pills { get, .. } => Some(get(c).join(",")),
+            Control::BarModules => Some(format!("{:?}", (&c.bar.left, &c.bar.center, &c.bar.right))),
             Control::Buttons(_) | Control::Heading | Control::Note => None,
         }
     }
@@ -162,6 +208,11 @@ impl Control {
             }
             Control::Combo { get, set, .. } => set(to, &get(from)),
             Control::Pills { get, set, .. } => set(to, get(from)),
+            Control::BarModules => {
+                to.bar.left = from.bar.left.clone();
+                to.bar.center = from.bar.center.clone();
+                to.bar.right = from.bar.right.clone();
+            }
             Control::Buttons(_) | Control::Heading | Control::Note => {}
         }
     }
@@ -258,11 +309,13 @@ fn rows() -> Vec<Row> {
         heading(1, "General"),
         Row { tab: 1, title: "Wallpaper Directory", subtitle: "The directory containing your wallpaper images (~ is expanded).", visible: always,
             control: Text { get: |c| c.wallpaper_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.wallpaper_dir = v.to_string(); true }, placeholder: "~/Pictures/Wallpapers", browse: true } },
-        Row { tab: 1, title: "Wallpaper Daemon", subtitle: "The backend used to set and render your desktop wallpapers.", visible: always,
-            control: Combo { options: || opts(&[("Built-in", "prism"), ("awww", "awww"), ("swww", "swww")]), get: |c| c.wallpaper_daemon.clone(), set: |c, v| c.wallpaper_daemon = v.to_string(), fonts: false } },
+        Row { tab: 1, title: WALLPAPER_DAEMON_ROW, subtitle: "The backend used to set and render your desktop wallpapers.", visible: always,
+            control: Combo { options: || opts(&[("Built-in", "prism"), ("Built-in Video", "prism-video"), ("awww", "awww"), ("swww", "swww")]), get: |c| c.wallpaper_daemon.clone(), set: |c, v| c.wallpaper_daemon = v.to_string(), fonts: false } },
+        Row { tab: 1, title: VIDEO_WALLPAPER_ROW, subtitle: "The video playing as your wallpaper. Wallpaper filters do not apply to it.", visible: |c| c.wallpaper_daemon == "prism-video",
+            control: Buttons(&[("Choose Video\u{2026}", Action::ChooseVideoWallpaper, ButtonKind::Primary)]) },
         Row { tab: 1, title: "Transition", subtitle: "How a new wallpaper replaces the old one.", visible: |c| c.wallpaper_daemon == "prism",
             control: Combo { options: || opts(&[("Random", "random"), ("Fade", "fade"), ("Wipe", "wipe"), ("Grow", "grow"), ("None", "none")]), get: |c| c.wallpaper_transition.clone(), set: |c, v| c.wallpaper_transition = v.to_string(), fonts: false } },
-        Row { tab: 1, title: "Use Wallpaper Filters", subtitle: "Choose a colour filter when applying a wallpaper.", visible: always,
+        Row { tab: 1, title: "Use Wallpaper Filters", subtitle: "Choose a colour filter when applying a wallpaper.", visible: |c| c.wallpaper_daemon != "prism-video",
             control: Switch(|c| c.wallpaper_filters_enabled, |c, v| c.wallpaper_filters_enabled = v) },
         heading(1, "Depth Effect"),
         Row { tab: 1, title: "Wallpaper Depth", subtitle: "Makes desktop widgets pass behind wallpaper foregrounds.", visible: always,
@@ -303,39 +356,93 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.desktop_layout.phone.visible, |c, v| c.desktop_layout.phone.visible = v) },
         Row { tab: 2, title: "Batteries", subtitle: "Battery levels of connected headphones, speakers, controllers and other devices.", visible: always,
             control: Switch(|c| c.desktop_layout.batteries.visible, |c, v| c.desktop_layout.batteries.visible = v) },
+        // ── Bar ──
+        heading(3, "Bar"),
+        Row { tab: 3, title: "Show Bar", subtitle: "A panel along one edge of the screen.", visible: always,
+            control: Switch(|c| c.bar.enabled, |c, v| c.bar.enabled = v) },
+        Row { tab: 3, title: "Position", subtitle: "The screen edge the bar sits on.", visible: always,
+            control: Combo { options: || opts(&[("Top", "top"), ("Bottom", "bottom"), ("Left", "left"), ("Right", "right")]), get: |c| c.bar.position.clone(), set: |c, v| c.bar.position = v.to_string(), fonts: false } },
+        Row { tab: 3, title: "Style", subtitle: "Edge to edge, one floating panel, or a separate island for each section.", visible: always,
+            control: Combo { options: || opts(&[("Full Width", "full"), ("Floating", "floating"), ("Islands", "islands")]), get: |c| c.bar.style.clone(), set: |c, v| c.bar.style = v.to_string(), fonts: false } },
+        Row { tab: 3, title: "Thickness", subtitle: "How tall the bar is, or how wide on a side edge.", visible: always,
+            control: Slider { min: 28.0, max: 64.0, step: 1.0, get: |c| c.bar.thickness as f64, set: |c, v| c.bar.thickness = v.round() as u32, fmt: |v| format!("{v:.0} px") } },
+        Row { tab: 3, title: "Screen Gap", subtitle: "Space between the bar and the screen edges.", visible: |c| c.bar.style != "full",
+            control: Slider { min: 0.0, max: 32.0, step: 1.0, get: |c| c.bar.gap as f64, set: |c, v| c.bar.gap = v.round() as u32, fmt: |v| format!("{v:.0} px") } },
+        Row { tab: 3, title: "Corner Radius", subtitle: "Roundness of the floating panel or islands.", visible: |c| c.bar.style != "full",
+            control: Slider { min: 0.0, max: 32.0, step: 1.0, get: |c| c.bar.radius as f64, set: |c, v| c.bar.radius = v.round() as u32, fmt: |v| format!("{v:.0} px") } },
+        Row { tab: 3, title: "Opacity", subtitle: "How solid the bar's background is.", visible: always,
+            control: Slider { min: 0.0, max: 1.0, step: 0.05, get: |c| c.bar.opacity as f64, set: |c, v| c.bar.opacity = v as f32, fmt: |v| format!("{:.0}%", v * 100.0) } },
+        Row { tab: 3, title: "Reserve Space", subtitle: "Windows stay clear of the bar instead of going under it.", visible: always,
+            control: Switch(|c| c.bar.reserve_space, |c, v| c.bar.reserve_space = v) },
+        heading(3, "Modules"),
+        Row { tab: 3, title: "Arrangement", subtitle: "Drag modules between sections to arrange them. Click one to turn it on or off.", visible: always, control: BarModules },
+        heading(3, "Workspaces"),
+        Row { tab: 3, title: "Workspace Style", subtitle: "How workspaces are drawn.", visible: always,
+            control: Combo { options: || opts(&[("Numbers", "numbers"), ("Dots", "dots"), ("Pills", "pills")]), get: |c| c.bar.workspace_style.clone(), set: |c, v| c.bar.workspace_style = v.to_string(), fonts: false } },
+        Row { tab: 3, title: "Hide Empty Workspaces", subtitle: "Only show workspaces with windows, and the active one.", visible: always,
+            control: Switch(|c| c.bar.workspace_hide_empty, |c, v| c.bar.workspace_hide_empty = v) },
+        heading(3, "Clock"),
+        Row { tab: 3, title: "Time Format", subtitle: "strftime format, such as %H:%M or %I:%M %p.", visible: always,
+            control: Text { get: |c| c.bar.clock_format.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.bar.clock_format = v.to_string(); true }, placeholder: "%H:%M", browse: false } },
+        Row { tab: 3, title: "Show Date", subtitle: "The date next to the time on a horizontal bar.", visible: always,
+            control: Switch(|c| c.bar.clock_date, |c, v| c.bar.clock_date = v) },
+        heading(3, "System Monitor"),
+        Row { tab: 3, title: "CPU Usage", subtitle: "", visible: always, control: Switch(|c| c.bar.sysmon_cpu, |c, v| c.bar.sysmon_cpu = v) },
+        Row { tab: 3, title: "Memory Usage", subtitle: "", visible: always, control: Switch(|c| c.bar.sysmon_memory, |c, v| c.bar.sysmon_memory = v) },
+        Row { tab: 3, title: "CPU Temperature", subtitle: "", visible: always, control: Switch(|c| c.bar.sysmon_temperature, |c, v| c.bar.sysmon_temperature = v) },
+        heading(3, "Media Player"),
+        Row { tab: 3, title: "Show Title", subtitle: "The playing track next to the controls.", visible: always,
+            control: Switch(|c| c.bar.media_title, |c, v| c.bar.media_title = v) },
+        // ── Dock ──
+        heading(4, "Dock"),
+        Row { tab: 4, title: "Show Dock", subtitle: "Starts with your terminal, files and browser pinned. Right-click an app to pin or remove it.", visible: always,
+            control: Switch(|c| c.dock.enabled, |c, v| c.dock.enabled = v) },
+        Row { tab: 4, title: "Position", subtitle: "The screen edge the dock sits on.", visible: always,
+            control: Combo { options: || opts(&[("Bottom", "bottom"), ("Left", "left"), ("Right", "right")]), get: |c| c.dock.position.clone(), set: |c, v| c.dock.position = v.to_string(), fonts: false } },
+        Row { tab: 4, title: "Icon Size", subtitle: "", visible: always,
+            control: Slider { min: 32.0, max: 72.0, step: 2.0, get: |c| c.dock.icon_size as f64, set: |c, v| c.dock.icon_size = v.round() as u32, fmt: |v| format!("{v:.0} px") } },
+        Row { tab: 4, title: "Screen Gap", subtitle: "Space between the dock and the screen edge.", visible: always,
+            control: Slider { min: 0.0, max: 32.0, step: 1.0, get: |c| c.dock.gap as f64, set: |c, v| c.dock.gap = v.round() as u32, fmt: |v| format!("{v:.0} px") } },
+        Row { tab: 4, title: "Opacity", subtitle: "How solid the dock's background is.", visible: always,
+            control: Slider { min: 0.0, max: 1.0, step: 0.05, get: |c| c.dock.opacity as f64, set: |c, v| c.dock.opacity = v as f32, fmt: |v| format!("{:.0}%", v * 100.0) } },
+        heading(4, "Behaviour"),
+        Row { tab: 4, title: "Auto-Hide", subtitle: "Smart keeps the dock up until windows are on screen. A hidden dock returns when you hover the screen edge.", visible: always,
+            control: Combo { options: || opts(&[("Never", "off"), ("Always", "always"), ("Smart", "smart")]), get: |c| c.dock.autohide.clone(), set: |c, v| c.dock.autohide = v.to_string(), fonts: false } },
+        Row { tab: 4, title: "Windows Behind Dock", subtitle: "Windows use the full screen and pass behind the dock.", visible: |c| c.dock.autohide == "off",
+            control: Switch(|c| c.dock.windows_behind, |c, v| c.dock.windows_behind = v) },
         // ── Launcher ──
-        Row { tab: 3, title: "Launcher Theme", subtitle: "The design of the app launcher.", visible: always,
+        Row { tab: 5, title: "Launcher Theme", subtitle: "The design of the app launcher.", visible: always,
             control: Combo { options: || opts(crate::launcher_themes::THEMES), get: |c| c.launcher_theme.clone(), set: |c, v| c.launcher_theme = v.to_string(), fonts: false } },
         // ── Search ──
-        heading(4, "Sources"),
-        Row { tab: 4, title: "Search Section Order", subtitle: "Order of the result sections in Spotlight.", visible: always,
+        heading(6, "Sources"),
+        Row { tab: 6, title: "Search Section Order", subtitle: "Order of the result sections in Spotlight.", visible: always,
             control: Combo {
                 options: || {
                     let perms = ["apps,folders,files", "apps,files,folders", "folders,apps,files", "folders,files,apps", "files,apps,folders", "files,folders,apps"];
                     perms.iter().map(|p| (p.split(',').map(|s| { let mut c = s.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join(", "), p.to_string())).collect()
                 },
                 get: |c| c.search_section_order.clone(), set: |c, v| c.search_section_order = v.to_string(), fonts: false } },
-        Row { tab: 4, title: "Search Applications", subtitle: "Include installed applications.", visible: always,
+        Row { tab: 6, title: "Search Applications", subtitle: "Include installed applications.", visible: always,
             control: Switch(|c| c.search_enable_apps, |c, v| c.search_enable_apps = v) },
-        Row { tab: 4, title: "Search Folders", subtitle: "Include folders from the file index.", visible: always,
+        Row { tab: 6, title: "Search Folders", subtitle: "Include folders from the file index.", visible: always,
             control: Switch(|c| c.search_enable_folders, |c, v| c.search_enable_folders = v) },
-        Row { tab: 4, title: "Search Files", subtitle: "Include files from the file index.", visible: always,
+        Row { tab: 6, title: "Search Files", subtitle: "Include files from the file index.", visible: always,
             control: Switch(|c| c.search_enable_files, |c, v| c.search_enable_files = v) },
-        heading(4, "Results"),
-        Row { tab: 4, title: "Max Folder Results", subtitle: "", visible: |c| c.search_enable_folders,
+        heading(6, "Results"),
+        Row { tab: 6, title: "Max Folder Results", subtitle: "", visible: |c| c.search_enable_folders,
             control: Combo { options: || ["5", "10", "15", "20", "30"].iter().map(|s| (s.to_string(), s.to_string())).collect(),
                 get: |c| c.search_max_folder_results.to_string(), set: |c, v| c.search_max_folder_results = v.parse().unwrap_or(10), fonts: false } },
-        Row { tab: 4, title: "Max File Results", subtitle: "", visible: |c| c.search_enable_files,
+        Row { tab: 6, title: "Max File Results", subtitle: "", visible: |c| c.search_enable_files,
             control: Combo { options: || ["10", "15", "20", "30", "50"].iter().map(|s| (s.to_string(), s.to_string())).collect(),
                 get: |c| c.search_max_file_results.to_string(), set: |c, v| c.search_max_file_results = v.parse().unwrap_or(20), fonts: false } },
-        Row { tab: 4, title: "Include Hidden Files & Folders", subtitle: "Show dot-files and dot-folders in results.", visible: always,
+        Row { tab: 6, title: "Include Hidden Files & Folders", subtitle: "Show dot-files and dot-folders in results.", visible: always,
             control: Switch(|c| c.search_include_hidden, |c, v| c.search_include_hidden = v) },
-        heading(4, "File Index"),
-        Row { tab: 4, title: "Rebuild File Index", subtitle: "Indexes files system-wide for search (pkexec updatedb). Can take a few minutes.", visible: always,
+        heading(6, "File Index"),
+        Row { tab: 6, title: "Rebuild File Index", subtitle: "Indexes files system-wide for search (pkexec updatedb). Can take a few minutes.", visible: always,
             control: Buttons(&[("Rebuild index", Action::RebuildIndex, ButtonKind::Primary)]) },
         // ── Notifications ──
-        heading(5, "Popups"),
-        Row { tab: 5, title: "Popup Position", subtitle: "Where notification popups appear on screen.", visible: always,
+        heading(7, "Popups"),
+        Row { tab: 7, title: "Popup Position", subtitle: "Where notification popups appear on screen.", visible: always,
             control: Combo {
                 options: || opts(&[("Top Left", "top-left"), ("Top Center", "top-center"), ("Top Right", "top-right"),
                     ("Bottom Left", "bottom-left"), ("Bottom Center", "bottom-center"), ("Bottom Right", "bottom-right")]),
@@ -343,181 +450,192 @@ fn rows() -> Vec<Row> {
                 set: |c, v| c.notification_popup_position = v.to_string(),
                 fonts: false,
             } },
-        heading(5, "Notification Centre"),
-        Row { tab: 5, title: "Notification Centre Position", subtitle: "Which side of the screen the notification center opens on.", visible: always,
+        heading(7, "Sound"),
+        Row { tab: 7, title: "Notification Sound", subtitle: "Play a sound when a notification arrives. Silent mode keeps it quiet, except for critical notifications.", visible: always,
+            control: Switch(|c| c.notification_sound, |c, v| c.notification_sound = v) },
+        Row { tab: 7, title: NOTIFICATION_SOUND_ROW, subtitle: "The sound notifications play. Choose Add New Sound to put your own in the list.", visible: |c| c.notification_sound,
+            control: Combo { options: sound_options, get: |c| c.notification_sound_file.clone(), set: |c, v| c.notification_sound_file = v.to_string(), fonts: false } },
+        Row { tab: 7, title: "Preview", subtitle: "Hear the sound that is selected.", visible: |c| c.notification_sound,
+            control: Buttons(&[("Play Sound", Action::PlayNotificationSound, ButtonKind::Outline)]) },
+        heading(7, "Notification Centre"),
+        Row { tab: 7, title: "Notification Centre Position", subtitle: "Which side of the screen the notification center opens on.", visible: always,
             control: Combo {
                 options: || opts(&[("Left", "left"), ("Center", "center"), ("Right", "right")]),
                 get: |c| c.notification_center_position.clone(),
                 set: |c, v| c.notification_center_position = v.to_string(),
                 fonts: false,
             } },
-        Row { tab: 5, title: "Control Centre Tiles", subtitle: "Tiles shown in the Control Centre; the others close up the gap.", visible: always,
+        Row { tab: 7, title: "Control Centre Tiles", subtitle: "Tiles shown in the Control Centre; the others close up the gap.", visible: always,
             control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
         // ── Lock Screen ──
-        heading(6, "Design"),
-        Row { tab: 6, title: "Lock Screen Theme", subtitle: "The design of the lock screen.", visible: always,
+        heading(8, "Design"),
+        Row { tab: 8, title: "Lock Screen Theme", subtitle: "The design of the lock screen.", visible: always,
             control: Combo { options: || opts(LOCK_THEMES), get: |c| c.lockscreen_theme.clone(), set: |c, v| c.lockscreen_theme = v.to_string(), fonts: false } },
-        Row { tab: 6, title: "Alignment", subtitle: "Align the lock screen elements to the left or right edge (Classic theme).", visible: |c| c.lockscreen_theme == "classic" || c.greeter_theme == "classic",
+        Row { tab: 8, title: "", subtitle: "The Tide design is not available with a video wallpaper. The Classic design is shown instead.", control: Control::Note,
+            visible: |c| c.wallpaper_daemon == "prism-video" && c.lockscreen_theme == "tide" },
+        Row { tab: 8, title: "Alignment", subtitle: "Align the lock screen elements to the left or right edge (Classic theme).", visible: |c| c.lockscreen_theme == "classic" || c.greeter_theme == "classic",
             control: Combo { options: || opts(&[("Left", "left"), ("Right", "right")]), get: |c| c.lockscreen_alignment.clone(), set: |c, v| c.lockscreen_alignment = v.to_string(), fonts: false } },
-        Row { tab: 6, title: "Power Menu", subtitle: "Allow Suspend, Reboot and Shutdown directly from the lock screen.", visible: always,
+        Row { tab: 8, title: "Power Menu", subtitle: "Allow Suspend, Reboot and Shutdown directly from the lock screen.", visible: always,
             control: Switch(|c| c.show_lockscreen_session_controls, |c, v| c.show_lockscreen_session_controls = v) },
-        note(6, THEME_FILTER_NOTE),
-        heading(6, "Idle & Lock"),
-        Row { tab: 6, title: "Lock When Idle", subtitle: "Lock the screen automatically when the system is idle.", visible: always,
+        note(8, THEME_FILTER_NOTE),
+        heading(8, "Idle & Lock"),
+        Row { tab: 8, title: "Lock When Idle", subtitle: "Lock the screen automatically when the system is idle.", visible: always,
             control: Switch(|c| c.manage_idle, |c, v| c.manage_idle = v) },
-        Row { tab: 6, title: "Lock After (Minutes)", subtitle: "Minutes of inactivity before the screen locks.", visible: |c| c.manage_idle,
+        Row { tab: 8, title: "Lock After (Minutes)", subtitle: "Minutes of inactivity before the screen locks.", visible: |c| c.manage_idle,
             control: Text { get: |c| c.idle_timeout.to_string(), set: |c, v| match v.trim().parse::<u32>() { Ok(n) if n >= 1 => { c.idle_timeout = n; true } _ => false }, placeholder: "5", browse: false } },
         // ── Greeter ──
-        Row { tab: 7, title: "Greeter Theme", subtitle: "The design of the login screen.", visible: always,
+        Row { tab: 9, title: "Greeter Theme", subtitle: "The design of the login screen.", visible: always,
             control: Combo { options: || { let mut o = opts(&[("Mirror the Lock Screen", "mirror")]); o.extend(opts(LOCK_THEMES)); o }, get: |c| c.greeter_theme.clone(), set: |c, v| c.greeter_theme = v.to_string(), fonts: false } },
-        Row { tab: 7, title: "Remember Last User", subtitle: "Pre-select the last user and session on the next boot (applies after logout).", visible: always,
+        Row { tab: 9, title: "", subtitle: "The Tide design is not available with a video wallpaper. The Classic design is shown instead.", control: Control::Note,
+            visible: |c| c.wallpaper_daemon == "prism-video" && (c.greeter_theme == "tide" || (c.greeter_theme == "mirror" && c.lockscreen_theme == "tide")) },
+        Row { tab: 9, title: "Remember Last User", subtitle: "Pre-select the last user and session on the next boot (applies after logout).", visible: always,
             control: Switch(|c| c.remember_last_user, |c, v| c.remember_last_user = v) },
-        note(7, THEME_FILTER_NOTE),
+        note(9, THEME_FILTER_NOTE),
         // ── Power ──
-        heading(8, "Design"),
-        Row { tab: 8, title: "Power Menu Theme", subtitle: "The design of the power menu.", visible: always,
+        heading(10, "Design"),
+        Row { tab: 10, title: "Power Menu Theme", subtitle: "The design of the power menu.", visible: always,
             control: Combo { options: || opts(crate::power::THEMES), get: |c| crate::power::theme_id(&c.power_theme), set: |c, v| c.power_theme = v.to_string(), fonts: false } },
-        Row { tab: 8, title: "Hold to Confirm", subtitle: "Logout, Reboot and Shutdown run only after being held for a second.", visible: always,
+        Row { tab: 10, title: "Hold to Confirm", subtitle: "Logout, Reboot and Shutdown run only after being held for a second.", visible: always,
             control: Switch(|c| c.power_hold_to_confirm, |c, v| c.power_hold_to_confirm = v) },
-        heading(8, "Actions"),
-        Row { tab: 8, title: "Lock", subtitle: "Keep everything open behind the lock screen.", visible: always,
+        heading(10, "Actions"),
+        Row { tab: 10, title: "Lock", subtitle: "Keep everything open behind the lock screen.", visible: always,
             control: Switch(|c| c.power_lock, |c, v| c.power_lock = v) },
-        Row { tab: 8, title: "Logout", subtitle: "Close your apps and end this session.", visible: always,
+        Row { tab: 10, title: "Logout", subtitle: "Close your apps and end this session.", visible: always,
             control: Switch(|c| c.power_logout, |c, v| c.power_logout = v) },
-        Row { tab: 8, title: "Suspend", subtitle: "Pause in memory and wake up quickly.", visible: |_| prism_common::power::support().suspend,
+        Row { tab: 10, title: "Suspend", subtitle: "Pause in memory and wake up quickly.", visible: |_| prism_common::power::support().suspend,
             control: Switch(|c| c.power_suspend, |c, v| c.power_suspend = v) },
-        Row { tab: 8, title: "Sleep", subtitle: "Pause in memory with a safe copy on disk (hybrid sleep).", visible: |_| prism_common::power::support().sleep,
+        Row { tab: 10, title: "Sleep", subtitle: "Pause in memory with a safe copy on disk (hybrid sleep).", visible: |_| prism_common::power::support().sleep,
             control: Switch(|c| c.power_sleep, |c, v| c.power_sleep = v) },
-        Row { tab: 8, title: "Hibernate", subtitle: "Save everything to disk and power off.", visible: |_| prism_common::power::support().hibernate,
+        Row { tab: 10, title: "Hibernate", subtitle: "Save everything to disk and power off.", visible: |_| prism_common::power::support().hibernate,
             control: Switch(|c| c.power_hibernate, |c, v| c.power_hibernate = v) },
-        Row { tab: 8, title: "Reboot", subtitle: "Close your apps and restart the computer.", visible: always,
+        Row { tab: 10, title: "Reboot", subtitle: "Close your apps and restart the computer.", visible: always,
             control: Switch(|c| c.power_reboot, |c, v| c.power_reboot = v) },
-        Row { tab: 8, title: "Shutdown", subtitle: "Close your apps and power off.", visible: always,
+        Row { tab: 10, title: "Shutdown", subtitle: "Close your apps and power off.", visible: always,
             control: Switch(|c| c.power_shutdown, |c, v| c.power_shutdown = v) },
-        Row { tab: 8, title: "", subtitle: "Sleep and Hibernate appear here when this computer supports them. Both need swap space on disk that is at least as large as your memory.", control: Control::Note,
+        Row { tab: 10, title: "", subtitle: "Sleep and Hibernate appear here when this computer supports them. Both need swap space on disk that is at least as large as your memory.", control: Control::Note,
             visible: |_| { let s = prism_common::power::support(); !s.sleep || !s.hibernate } },
         // ── Display ──
-        heading(9, "Monitor"),
-        Row { tab: 9, title: "Monitor", subtitle: "Which monitor the settings below change.", visible: |_| crate::displays::count() > 1,
+        heading(11, "Monitor"),
+        Row { tab: 11, title: "Monitor", subtitle: "Which monitor the settings below change.", visible: |_| crate::displays::count() > 1,
             control: Combo { options: crate::displays::monitor_options, get: |c| crate::displays::selected(c).map(|o| o.name).unwrap_or_default(), set: |c, v| c.display_output = v.to_string(), fonts: false } },
-        Row { tab: 9, title: "Enabled", subtitle: "Turn this monitor off or on.", visible: |_| crate::displays::count() > 1,
+        Row { tab: 11, title: "Enabled", subtitle: "Turn this monitor off or on.", visible: |_| crate::displays::count() > 1,
             control: Switch(|c| crate::displays::entry(c).map(|e| e.enabled).unwrap_or(true), |c, v| crate::displays::update(c, |e| e.enabled = v)) },
-        Row { tab: 9, title: "Resolution", subtitle: "Size and refresh rate. A change is undone after 15 seconds unless you keep it.", visible: |_| crate::displays::count() > 0,
+        Row { tab: 11, title: "Resolution", subtitle: "Size and refresh rate. A change is undone after 15 seconds unless you keep it.", visible: |_| crate::displays::count() > 0,
             control: Combo { options: crate::displays::mode_options, get: |c| crate::displays::entry(c).map(|e| e.mode).unwrap_or_default(), set: |c, v| crate::displays::update(c, |e| e.mode = v.to_string()), fonts: false } },
-        Row { tab: 9, title: "Display Scale", subtitle: "How large everything is drawn on this monitor (compositor scale).", visible: |_| crate::displays::count() > 0,
+        Row { tab: 11, title: "Display Scale", subtitle: "How large everything is drawn on this monitor (compositor scale).", visible: |_| crate::displays::count() > 0,
             control: Combo { options: crate::displays::scale_options, get: |c| crate::displays::entry(c).map(|e| format!("{:.2}", e.scale)).unwrap_or_default(), set: |c, v| { if let Ok(s) = v.parse::<f64>() { crate::displays::update(c, |e| e.scale = s) } }, fonts: false } },
-        Row { tab: 9, title: "Rotation", subtitle: "", visible: |_| crate::displays::count() > 0,
+        Row { tab: 11, title: "Rotation", subtitle: "", visible: |_| crate::displays::count() > 0,
             control: Combo { options: || opts(&[("Normal", "normal"), ("90\u{00B0}", "90"), ("180\u{00B0}", "180"), ("270\u{00B0}", "270"), ("Flipped", "flipped")]), get: |c| crate::displays::entry(c).map(|e| e.transform).unwrap_or_default(), set: |c, v| crate::displays::update(c, |e| e.transform = v.to_string()), fonts: false } },
-        Row { tab: 9, title: "Adaptive Sync", subtitle: "Variable refresh rate (FreeSync / G-Sync Compatible).", visible: |c| crate::displays::selected(c).is_some_and(|o| o.adaptive_sync.is_some()),
+        Row { tab: 11, title: "Adaptive Sync", subtitle: "Variable refresh rate (FreeSync / G-Sync Compatible).", visible: |c| crate::displays::selected(c).is_some_and(|o| o.adaptive_sync.is_some()),
             control: Switch(|c| crate::displays::entry(c).and_then(|e| e.adaptive_sync).unwrap_or(false), |c, v| crate::displays::update(c, |e| e.adaptive_sync = Some(v))) },
-        Row { tab: 9, title: "Position", subtitle: "Top-left corner in the layout, as X,Y in logical pixels.", visible: |_| crate::displays::count() > 1,
+        Row { tab: 11, title: "Position", subtitle: "Top-left corner in the layout, as X,Y in logical pixels.", visible: |_| crate::displays::count() > 1,
             control: Text { get: |c| crate::displays::entry(c).and_then(|e| e.position).map(|(x, y)| format!("{x},{y}")).unwrap_or_default(), set: |c, v| match v.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))) { Some(p) => { crate::displays::update(c, |e| e.position = Some(p)); true } None => false }, placeholder: "0,0", browse: false } },
-        heading(9, "Blue Light Filter"),
-        Row { tab: 9, title: "Blue Light Filter", subtitle: "Adjust display colour temperature based on time or location.", visible: always,
+        heading(11, "Blue Light Filter"),
+        Row { tab: 11, title: "Blue Light Filter", subtitle: "Adjust display colour temperature based on time or location.", visible: always,
             control: Switch(|c| c.blue_light_enabled, |c, v| c.blue_light_enabled = v) },
-        Row { tab: 9, title: "Turn On Now", subtitle: "Force the blue light filter on.", visible: |c| c.blue_light_enabled,
+        Row { tab: 11, title: "Turn On Now", subtitle: "Force the blue light filter on.", visible: |c| c.blue_light_enabled,
             control: Switch(|c| c.blue_light_manual_on, |c, v| c.blue_light_manual_on = v) },
-        Row { tab: 9, title: "Mode", subtitle: "How day and night are determined.", visible: |c| c.blue_light_enabled,
+        Row { tab: 11, title: "Mode", subtitle: "How day and night are determined.", visible: |c| c.blue_light_enabled,
             control: Combo { options: || opts(&[("Fixed Time", "fixed_time"), ("Sunset/Sunrise", "sunset_sunrise")]),
                 get: |c| if c.blue_light_mode == "time" { "fixed_time".into() } else { c.blue_light_mode.clone() }, set: |c, v| c.blue_light_mode = v.to_string(), fonts: false } },
-        heading(9, "Schedule"),
-        Row { tab: 9, title: "Night Starts (HH:MM)", subtitle: "Overnight windows like 22:00 to 06:00 are supported.", visible: |c| c.blue_light_enabled && c.blue_light_mode != "sunset_sunrise",
+        heading(11, "Schedule"),
+        Row { tab: 11, title: "Night Starts (HH:MM)", subtitle: "Overnight windows like 22:00 to 06:00 are supported.", visible: |c| c.blue_light_enabled && c.blue_light_mode != "sunset_sunrise",
             control: Text { get: |c| c.blue_light_night_start.clone(), set: |c, v| { let v = v.trim(); if !valid_time(v) { return false; } c.blue_light_night_start = v.to_string(); true }, placeholder: "22:00", browse: false } },
-        Row { tab: 9, title: "Night Ends (HH:MM)", subtitle: "", visible: |c| c.blue_light_enabled && c.blue_light_mode != "sunset_sunrise",
+        Row { tab: 11, title: "Night Ends (HH:MM)", subtitle: "", visible: |c| c.blue_light_enabled && c.blue_light_mode != "sunset_sunrise",
             control: Text { get: |c| c.blue_light_night_end.clone(), set: |c, v| { let v = v.trim(); if !valid_time(v) { return false; } c.blue_light_night_end = v.to_string(); true }, placeholder: "06:00", browse: false } },
-        Row { tab: 9, title: "Use Location From IP", subtitle: "Look up coordinates automatically instead of entering them.", visible: |c| c.blue_light_enabled && c.blue_light_mode == "sunset_sunrise",
+        Row { tab: 11, title: "Use Location From IP", subtitle: "Look up coordinates automatically instead of entering them.", visible: |c| c.blue_light_enabled && c.blue_light_mode == "sunset_sunrise",
             control: Switch(|c| c.blue_light_use_ip_location, |c, v| c.blue_light_use_ip_location = v) },
-        Row { tab: 9, title: "Latitude", subtitle: "Used to calculate sunrise and sunset.", visible: |c| c.blue_light_enabled && c.blue_light_mode == "sunset_sunrise" && !c.blue_light_use_ip_location,
+        Row { tab: 11, title: "Latitude", subtitle: "Used to calculate sunrise and sunset.", visible: |c| c.blue_light_enabled && c.blue_light_mode == "sunset_sunrise" && !c.blue_light_use_ip_location,
             control: Text { get: |c| c.blue_light_latitude.clone(), set: |c, v| match v.trim().parse::<f64>() { Ok(x) if (-90.0..=90.0).contains(&x) => { c.blue_light_latitude = v.trim().to_string(); true } _ => v.trim().is_empty() && { c.blue_light_latitude.clear(); true } }, placeholder: "e.g. 12.97", browse: false } },
-        Row { tab: 9, title: "Longitude", subtitle: "", visible: |c| c.blue_light_enabled && c.blue_light_mode == "sunset_sunrise" && !c.blue_light_use_ip_location,
+        Row { tab: 11, title: "Longitude", subtitle: "", visible: |c| c.blue_light_enabled && c.blue_light_mode == "sunset_sunrise" && !c.blue_light_use_ip_location,
             control: Text { get: |c| c.blue_light_longitude.clone(), set: |c, v| match v.trim().parse::<f64>() { Ok(x) if (-180.0..=180.0).contains(&x) => { c.blue_light_longitude = v.trim().to_string(); true } _ => v.trim().is_empty() && { c.blue_light_longitude.clear(); true } }, placeholder: "e.g. 77.59", browse: false } },
-        heading(9, "Colour Temperature"),
-        Row { tab: 9, title: "Transition Duration (Minutes)", subtitle: "The transition completes by the scheduled time.", visible: |c| c.blue_light_enabled,
+        heading(11, "Colour Temperature"),
+        Row { tab: 11, title: "Transition Duration (Minutes)", subtitle: "The transition completes by the scheduled time.", visible: |c| c.blue_light_enabled,
             control: Text { get: |c| c.blue_light_transition_minutes.to_string(), set: |c, v| match v.trim().parse::<u32>() { Ok(n) if n <= 240 => { c.blue_light_transition_minutes = n; true } _ => false }, placeholder: "30", browse: false } },
-        Row { tab: 9, title: "Day Temperature", subtitle: "Colour temperature during the day.", visible: |c| c.blue_light_enabled,
+        Row { tab: 11, title: "Day Temperature", subtitle: "Colour temperature during the day.", visible: |c| c.blue_light_enabled,
             control: Slider { min: 4500.0, max: 6500.0, step: 100.0, get: |c| c.blue_light_day_temp as f64, set: |c, v| c.blue_light_day_temp = v as u32, fmt: |v| format!("{:.0} K", v) } },
-        Row { tab: 9, title: "Night Temperature", subtitle: "Colour temperature at night.", visible: |c| c.blue_light_enabled,
+        Row { tab: 11, title: "Night Temperature", subtitle: "Colour temperature at night.", visible: |c| c.blue_light_enabled,
             control: Slider { min: 1500.0, max: 6500.0, step: 100.0, get: |c| c.blue_light_night_temp as f64, set: |c, v| c.blue_light_night_temp = v as u32, fmt: |v| format!("{:.0} K", v) } },
         // ── Connections ──
-        heading(10, "Network"),
-        Row { tab: 10, title: "Network Tray Icon", subtitle: "Network status in the tray; its menu connects VPNs. Replaces nm-applet's icon.", visible: always,
+        heading(12, "Network"),
+        Row { tab: 12, title: "Network Tray Icon", subtitle: "Network status in the tray; its menu connects VPNs. Replaces nm-applet's icon.", visible: always,
             control: Switch(|c| c.network_tray, |c, v| c.network_tray = v) },
-        Row { tab: 10, title: "Network Passwords", subtitle: "Ask for Wi-Fi, VPN and 802.1X secrets when NetworkManager needs them. Replaces nm-applet.", visible: always,
+        Row { tab: 12, title: "Network Passwords", subtitle: "Ask for Wi-Fi, VPN and 802.1X secrets when NetworkManager needs them. Replaces nm-applet.", visible: always,
             control: Switch(|c| c.network_agent_enabled, |c, v| c.network_agent_enabled = v) },
-        Row { tab: 10, title: "Save VPN User Names", subtitle: "Store the user name typed in the VPN prompt in the connection.", visible: |c| c.network_agent_enabled,
+        Row { tab: 12, title: "Save VPN User Names", subtitle: "Store the user name typed in the VPN prompt in the connection.", visible: |c| c.network_agent_enabled,
             control: Switch(|c| c.vpn_save_username, |c, v| c.vpn_save_username = v) },
-        Row { tab: 10, title: "Save VPN Passwords", subtitle: "Store VPN passwords with NetworkManager (system-owned secrets, like nm-applet's \u{201C}store for all users\u{201D}).", visible: |c| c.network_agent_enabled,
+        Row { tab: 12, title: "Save VPN Passwords", subtitle: "Store VPN passwords with NetworkManager (system-owned secrets, like nm-applet's \u{201C}store for all users\u{201D}).", visible: |c| c.network_agent_enabled,
             control: Switch(|c| c.vpn_save_password, |c, v| c.vpn_save_password = v) },
-        heading(10, "Bluetooth"),
-        Row { tab: 10, title: "Bluetooth Tray Icon", subtitle: "Bluetooth status in the tray; its menu connects devices and sends files. Replaces blueman's icon.", visible: always,
+        heading(12, "Bluetooth"),
+        Row { tab: 12, title: "Bluetooth Tray Icon", subtitle: "Bluetooth status in the tray; its menu connects devices and sends files. Replaces blueman's icon.", visible: always,
             control: Switch(|c| c.bluetooth_tray, |c, v| c.bluetooth_tray = v) },
-        Row { tab: 10, title: "Receive Files", subtitle: "Accept files sent from phones and computers over Bluetooth (asks each time; needs bluez-obex). Replaces blueman's file receiving.", visible: always,
+        Row { tab: 12, title: "Receive Files", subtitle: "Accept files sent from phones and computers over Bluetooth (asks each time; needs bluez-obex). Replaces blueman's file receiving.", visible: always,
             control: Switch(|c| c.bluetooth_receive_files, |c, v| c.bluetooth_receive_files = v) },
-        Row { tab: 10, title: "Bluetooth Download Folder", subtitle: "Where received files are saved (~ is expanded).", visible: |c| c.bluetooth_receive_files,
+        Row { tab: 12, title: "Bluetooth Download Folder", subtitle: "Where received files are saved (~ is expanded).", visible: |c| c.bluetooth_receive_files,
             control: Text { get: |c| c.bluetooth_download_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.bluetooth_download_dir = v.to_string(); true }, placeholder: "~/Downloads", browse: true } },
         // ── Phone ──
-        heading(11, "Connection"),
-        Row { tab: 11, title: "Phone Sync", subtitle: "Connect an Android phone running KDE Connect (same Wi-Fi). Needs the ports open: sudo ufw allow KDEConnect.", visible: always,
+        heading(13, "Connection"),
+        Row { tab: 13, title: "Phone Sync", subtitle: "Connect an Android phone running KDE Connect (same Wi-Fi). Needs the ports open: sudo ufw allow KDEConnect.", visible: always,
             control: Switch(|c| c.phone_enabled, |c, v| c.phone_enabled = v) },
-        Row { tab: 11, title: "Device Name", subtitle: "How this computer appears on the phone. Empty = the host name.", visible: |c| c.phone_enabled,
+        Row { tab: 13, title: "Device Name", subtitle: "How this computer appears on the phone. Empty = the host name.", visible: |c| c.phone_enabled,
             control: Text { get: |c| c.phone_device_name.clone(), set: |c, v| { c.phone_device_name = v.trim().chars().take(32).collect(); true }, placeholder: "host name", browse: false } },
-        Row { tab: 11, title: "Pairing & Status", subtitle: "Pair a phone, see battery, media, notifications and transfers.", visible: |c| c.phone_enabled,
+        Row { tab: 13, title: "Pairing & Status", subtitle: "Pair a phone, see battery, media, notifications and transfers.", visible: |c| c.phone_enabled,
             control: Buttons(&[("Open the Phone card", Action::OpenPhone, ButtonKind::Primary)]) },
-        heading(11, "Phone Card Access"),
-        Row { tab: 11, title: "Shortcuts Button", subtitle: "A phone button in the desktop Shortcuts widget (when that widget is shown).", visible: |c| c.phone_enabled,
+        heading(13, "Phone Card Access"),
+        Row { tab: 13, title: "Shortcuts Button", subtitle: "A phone button in the desktop Shortcuts widget (when that widget is shown).", visible: |c| c.phone_enabled,
             control: Switch(|c| c.desktop_layout.shortcuts.shortcuts.phone, |c, v| c.desktop_layout.shortcuts.shortcuts.phone = v) },
-        Row { tab: 11, title: "Tray Icon", subtitle: "A phone icon in the system tray (Prism's tray widget or any other tray).", visible: |c| c.phone_enabled,
+        Row { tab: 13, title: "Tray Icon", subtitle: "A phone icon in the system tray (Prism's tray widget or any other tray).", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_tray, |c, v| c.phone_tray = v) },
-        heading(11, "Remote Input"),
-        Row { tab: 11, title: "Allow Remote Input", subtitle: "The phone can move the pointer and type (KDE Connect \u{201c}Remote input\u{201d} and presenter).", visible: |c| c.phone_enabled,
+        heading(13, "Remote Input"),
+        Row { tab: 13, title: "Allow Remote Input", subtitle: "The phone can move the pointer and type (KDE Connect \u{201c}Remote input\u{201d} and presenter).", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_allow_input, |c, v| c.phone_allow_input = v) },
-        Row { tab: 11, title: "Also While Locked", subtitle: "Accept remote input while the screen is locked.", visible: |c| c.phone_enabled && c.phone_allow_input,
+        Row { tab: 13, title: "Also While Locked", subtitle: "Accept remote input while the screen is locked.", visible: |c| c.phone_enabled && c.phone_allow_input,
             control: Switch(|c| c.phone_input_when_locked, |c, v| c.phone_input_when_locked = v) },
-        heading(11, "Sync"),
-        Row { tab: 11, title: "Clipboard", subtitle: "Copies go to the phone. From the phone, use Send clipboard in KDE Connect (Android blocks automatic reading).", visible: |c| c.phone_enabled,
+        heading(13, "Sync"),
+        Row { tab: 13, title: "Clipboard", subtitle: "Copies go to the phone. From the phone, use Send clipboard in KDE Connect (Android blocks automatic reading).", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_clipboard_sync, |c, v| c.phone_clipboard_sync = v) },
-        Row { tab: 11, title: "Phone Notifications", subtitle: "Show the phone's notifications here, with reply and actions. Allow notification access for KDE Connect on the phone.", visible: |c| c.phone_enabled,
+        Row { tab: 13, title: "Phone Notifications", subtitle: "Show the phone's notifications here, with reply and actions. Allow notification access for KDE Connect on the phone.", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_notifications, |c, v| c.phone_notifications = v) },
-        Row { tab: 11, title: "Notification Popups", subtitle: "Pop up phone notifications (they are always listed in the Phone card).", visible: |c| c.phone_enabled && c.phone_notifications,
+        Row { tab: 13, title: "Notification Popups", subtitle: "Pop up phone notifications (they are always listed in the Phone card).", visible: |c| c.phone_enabled && c.phone_notifications,
             control: Switch(|c| c.phone_notification_popups, |c, v| c.phone_notification_popups = v) },
-        heading(11, "Files"),
-        Row { tab: 11, title: "Download Folder", subtitle: "Where files from the phone are saved (~ is expanded).", visible: |c| c.phone_enabled,
+        heading(13, "Files"),
+        Row { tab: 13, title: "Download Folder", subtitle: "Where files from the phone are saved (~ is expanded).", visible: |c| c.phone_enabled,
             control: Text { get: |c| c.phone_download_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.phone_download_dir = v.to_string(); true }, placeholder: "~/Downloads", browse: true } },
-        Row { tab: 11, title: "Open Received Files", subtitle: "Open each file with its default app when it arrives.", visible: |c| c.phone_enabled,
+        Row { tab: 13, title: "Open Received Files", subtitle: "Open each file with its default app when it arrives.", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_open_received, |c, v| c.phone_open_received = v) },
         // ── Capture ──
-        heading(12, "Screenshots"),
-        Row { tab: 12, title: "Screenshot Folder", subtitle: "Where screenshots are saved (~ is expanded).", visible: always,
+        heading(14, "Screenshots"),
+        Row { tab: 14, title: "Screenshot Folder", subtitle: "Where screenshots are saved (~ is expanded).", visible: always,
             control: Text { get: |c| c.capture_screenshot_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.capture_screenshot_dir = v.to_string(); true }, placeholder: "~/Pictures/Screenshots", browse: true } },
-        Row { tab: 12, title: "Copy to Clipboard", subtitle: "Put every screenshot on the clipboard as an image.", visible: always,
+        Row { tab: 14, title: "Copy to Clipboard", subtitle: "Put every screenshot on the clipboard as an image.", visible: always,
             control: Switch(|c| c.capture_copy_to_clipboard, |c, v| c.capture_copy_to_clipboard = v) },
-        Row { tab: 12, title: "Show the Pointer", subtitle: "Include the mouse pointer in screenshots and recordings.", visible: always,
+        Row { tab: 14, title: "Show the Pointer", subtitle: "Include the mouse pointer in screenshots and recordings.", visible: always,
             control: Switch(|c| c.capture_cursor, |c, v| c.capture_cursor = v) },
-        heading(12, "Recording"),
-        Row { tab: 12, title: "Recording Folder", subtitle: "Where recordings are saved (~ is expanded).", visible: always,
+        heading(14, "Recording"),
+        Row { tab: 14, title: "Recording Folder", subtitle: "Where recordings are saved (~ is expanded).", visible: always,
             control: Text { get: |c| c.capture_recording_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.capture_recording_dir = v.to_string(); true }, placeholder: "~/Videos/Recordings", browse: true } },
-        Row { tab: 12, title: "File Format", subtitle: "MKV and MP4 are both written as they record, so a crash still leaves a playable file.", visible: always,
+        Row { tab: 14, title: "File Format", subtitle: "MKV and MP4 are both written as they record, so a crash still leaves a playable file.", visible: always,
             control: Combo { options: || opts(&[("MKV", "mkv"), ("MP4", "mp4")]), get: |c| c.capture_container.clone(), set: |c, v| c.capture_container = v.to_string(), fonts: false } },
-        Row { tab: 12, title: "Video Codec", subtitle: "Auto uses H.264 on the GPU (NVENC) when available, else x264.", visible: always,
+        Row { tab: 14, title: "Video Codec", subtitle: "Auto uses H.264 on the GPU (NVENC) when available, else x264.", visible: always,
             control: Combo { options: || opts(&[("Auto (H.264)", "auto"), ("HEVC", "hevc"), ("AV1", "av1")]), get: |c| c.capture_codec.clone(), set: |c, v| c.capture_codec = v.to_string(), fonts: false } },
-        Row { tab: 12, title: "Quality", subtitle: "Higher quality means larger files.", visible: always,
+        Row { tab: 14, title: "Quality", subtitle: "Higher quality means larger files.", visible: always,
             control: Combo { options: || opts(&[("Low", "low"), ("Medium", "medium"), ("High", "high"), ("Near lossless", "lossless")]), get: |c| c.capture_quality.clone(), set: |c, v| c.capture_quality = v.to_string(), fonts: false } },
-        Row { tab: 12, title: "Frame Rate", subtitle: "Most frames per second; still screens use none.", visible: always,
+        Row { tab: 14, title: "Frame Rate", subtitle: "Most frames per second; still screens use none.", visible: always,
             control: Combo { options: || opts(&[("30 fps", "30"), ("60 fps", "60")]), get: |c| c.capture_fps.to_string(), set: |c, v| c.capture_fps = v.parse().unwrap_or(60), fonts: false } },
-        Row { tab: 12, title: "Desktop Audio", subtitle: "Record what the speakers play. Also switchable in the capture overlay.", visible: always,
+        Row { tab: 14, title: "Desktop Audio", subtitle: "Record what the speakers play. Also switchable in the capture overlay.", visible: always,
             control: Switch(|c| c.capture_audio_desktop, |c, v| c.capture_audio_desktop = v) },
-        Row { tab: 12, title: "Microphone", subtitle: "Record the default microphone. Also switchable in the capture overlay.", visible: always,
+        Row { tab: 14, title: "Microphone", subtitle: "Record the default microphone. Also switchable in the capture overlay.", visible: always,
             control: Switch(|c| c.capture_audio_mic, |c, v| c.capture_audio_mic = v) },
         // ── System ──
-        heading(13, "Authentication"),
-        Row { tab: 13, title: "Polkit Agent", subtitle: "Ask for your password when an app needs administrator rights. Replaces polkit-gnome (stop it first: only one agent per session).", visible: always,
+        heading(15, "Authentication"),
+        Row { tab: 15, title: "Polkit Agent", subtitle: "Ask for your password when an app needs administrator rights. Replaces polkit-gnome (stop it first: only one agent per session).", visible: always,
             control: Switch(|c| c.polkit_agent_enabled, |c, v| c.polkit_agent_enabled = v) },
-        heading(13, "Music Player Daemon"),
-        Row { tab: 13, title: "MPD Media Controls", subtitle: "Show MPD as a media player (MPRIS) for media keys, the media widget and the phone. Replaces mpd-mpris.", visible: always,
+        heading(15, "Music Player Daemon"),
+        Row { tab: 15, title: "MPD Media Controls", subtitle: "Show MPD as a media player (MPRIS) for media keys, the media widget and the phone. Replaces mpd-mpris.", visible: always,
             control: Switch(|c| c.mpd_mpris_enabled, |c, v| c.mpd_mpris_enabled = v) },
-        Row { tab: 13, title: "MPD Host", subtitle: "Host name, or the path of MPD's socket.", visible: |c| c.mpd_mpris_enabled,
+        Row { tab: 15, title: "MPD Host", subtitle: "Host name, or the path of MPD's socket.", visible: |c| c.mpd_mpris_enabled,
             control: Text { get: |c| c.mpd_host.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.mpd_host = v.to_string(); true }, placeholder: "127.0.0.1", browse: false } },
-        Row { tab: 13, title: "MPD Port", subtitle: "TCP port (not used with a socket path).", visible: |c| c.mpd_mpris_enabled && !c.mpd_host.starts_with('/'),
+        Row { tab: 15, title: "MPD Port", subtitle: "TCP port (not used with a socket path).", visible: |c| c.mpd_mpris_enabled && !c.mpd_host.starts_with('/'),
             control: Text { get: |c| c.mpd_port.to_string(), set: |c, v| match v.trim().parse::<u16>() { Ok(n) if n > 0 => { c.mpd_port = n; true } _ => false }, placeholder: "6600", browse: false } },
     ]
 }
@@ -541,8 +659,146 @@ pub enum Effect {
     Close,
 }
 
+// ── Bar module board ──────────────────────────────────────────────────────
+
+const BOARD_CHIP_H: f64 = 32.0;
+const BOARD_CHIP_GAP: f64 = 6.0;
+const BOARD_HEADER_H: f64 = 28.0;
+const BOARD_GAP: f64 = 10.0;
+/// Chips per line in the tray of modules that are off.
+const BOARD_OFF_COLUMNS: usize = 3;
+const BOARD_SECTIONS: [&str; 3] = ["Left", "Center", "Right"];
+
+fn module_name(id: &str) -> &str {
+    prism_common::config::BAR_MODULES.iter().find(|(m, _)| *m == id).map_or(id, |(_, name)| name)
+}
+
+fn modules_off(bar: &prism_common::config::BarConfig) -> Vec<&'static str> {
+    prism_common::config::BAR_MODULES.iter().map(|(id, _)| *id).filter(|id| bar.section_of(id).is_none()).collect()
+}
+
+fn stack_height(chips: usize) -> f64 {
+    chips as f64 * (BOARD_CHIP_H + BOARD_CHIP_GAP)
+}
+
+/// Height of the section columns: room for the fullest one, and a little to drop into.
+fn board_columns_height(bar: &prism_common::config::BarConfig) -> f64 {
+    let most = (0..3).map(|s| bar.section(s).len()).max().unwrap_or(0).max(2) + 1;
+    BOARD_HEADER_H + stack_height(most) + BOARD_GAP
+}
+
+fn board_off_height(bar: &prism_common::config::BarConfig) -> f64 {
+    BOARD_HEADER_H + stack_height(modules_off(bar).len().div_ceil(BOARD_OFF_COLUMNS).max(1)) + BOARD_GAP
+}
+
+fn board_height(bar: &prism_common::config::BarConfig) -> f64 {
+    board_columns_height(bar) + BOARD_GAP + board_off_height(bar)
+}
+
+struct Chip {
+    id: String,
+    section: Option<usize>,
+    rect: Rect,
+}
+
+struct ChipDrag {
+    id: String,
+    start: (f64, f64),
+    pos: (f64, f64),
+    /// Where the chip was grabbed, and its size.
+    offset: (f64, f64),
+    size: (f64, f64),
+    moved: bool,
+}
+
+#[derive(Default)]
+struct Board {
+    chips: Vec<Chip>,
+    /// Drop areas: a section, or None for the tray of modules that are off.
+    zones: Vec<(Option<usize>, Rect)>,
+    drag: Option<ChipDrag>,
+}
+
+impl Board {
+    /// Where dropping `id` at `pos` puts it: a section and place, or None for off. The outer
+    /// None means the pointer is not over the board.
+    fn target(&self, pos: (f64, f64), id: &str) -> Option<Option<(usize, usize)>> {
+        let (zone, _) = self.zones.iter().find(|(_, r)| r.contains(pos.0, pos.1))?;
+        Some(zone.map(|section| {
+            let above = self.chips.iter().filter(|c| c.section == Some(section) && c.id != id && c.rect.y + c.rect.h / 2.0 < pos.1).count();
+            (section, above)
+        }))
+    }
+}
+
+fn draw_chip(cr: *mut Cairo, r: Rect, id: &str, alpha: f64, p: &Palette) {
+    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 8.0, (p.fg.0, p.fg.1, p.fg.2, 0.12 * alpha));
+    stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, 8.0, (p.fg.0, p.fg.1, p.fg.2, 0.2 * alpha), 1.0);
+    let st = TextStyle { family: &p.family, px: 13.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, alpha) };
+    draw_in_box(cr, module_name(id), &st, r.x + 12.0, r.y, r.w - 20.0, r.h, Align::Start);
+}
+
+fn draw_zone(cr: *mut Cairo, r: Rect, title: &str, over: bool, p: &Palette) {
+    let tint = if over { 0.14 } else { 0.05 };
+    let accent = if over { p.accent } else { p.fg };
+    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 10.0, (accent.0, accent.1, accent.2, tint));
+    let st = TextStyle { family: &p.family, px: 11.0, bold: true, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) };
+    draw_in_box(cr, title, &st, r.x + 10.0, r.y + 4.0, r.w - 20.0, BOARD_HEADER_H - 6.0, Align::Start);
+}
+
+fn draw_board(cr: *mut Cairo, area: Rect, bar: &prism_common::config::BarConfig, board: &mut Board, p: &Palette) {
+    let dragged = board.drag.as_ref().filter(|d| d.moved).map(|d| (d.id.clone(), d.pos));
+    let over = |r: &Rect| dragged.as_ref().is_some_and(|(_, pos)| r.contains(pos.0, pos.1));
+    let alpha = |id: &str| if dragged.as_ref().is_some_and(|(d, _)| d == id) { 0.3 } else { 1.0 };
+    let col_h = board_columns_height(bar);
+    let col_w = (area.w - 2.0 * BOARD_GAP) / 3.0;
+    for (s, title) in BOARD_SECTIONS.iter().enumerate() {
+        let zone = Rect { x: area.x + s as f64 * (col_w + BOARD_GAP), y: area.y, w: col_w, h: col_h };
+        draw_zone(cr, zone, title, over(&zone), p);
+        board.zones.push((Some(s), zone));
+        for (k, id) in bar.section(s).iter().enumerate() {
+            let rect = Rect { x: zone.x + 8.0, y: zone.y + BOARD_HEADER_H + k as f64 * (BOARD_CHIP_H + BOARD_CHIP_GAP), w: zone.w - 16.0, h: BOARD_CHIP_H };
+            draw_chip(cr, rect, id, alpha(id), p);
+            board.chips.push(Chip { id: id.clone(), section: Some(s), rect });
+        }
+    }
+    let tray = Rect { x: area.x, y: area.y + col_h + BOARD_GAP, w: area.w, h: board_off_height(bar) };
+    draw_zone(cr, tray, "Off", over(&tray), p);
+    board.zones.push((None, tray));
+    let chip_w = (tray.w - 16.0 - (BOARD_OFF_COLUMNS - 1) as f64 * BOARD_CHIP_GAP) / BOARD_OFF_COLUMNS as f64;
+    for (k, id) in modules_off(bar).into_iter().enumerate() {
+        let (col, line) = (k % BOARD_OFF_COLUMNS, k / BOARD_OFF_COLUMNS);
+        let rect = Rect { x: tray.x + 8.0 + col as f64 * (chip_w + BOARD_CHIP_GAP), y: tray.y + BOARD_HEADER_H + line as f64 * (BOARD_CHIP_H + BOARD_CHIP_GAP), w: chip_w, h: BOARD_CHIP_H };
+        draw_chip(cr, rect, id, alpha(id), p);
+        board.chips.push(Chip { id: id.to_string(), section: None, rect });
+    }
+    // Where the dragged module would land.
+    if let Some((id, pos)) = &dragged {
+        if let Some(Some((section, place))) = board.target(*pos, id) {
+            let others: Vec<&Chip> = board.chips.iter().filter(|c| c.section == Some(section) && c.id != *id).collect();
+            let zone = board.zones[section].1;
+            let y = match others.get(place) {
+                Some(c) => c.rect.y - BOARD_CHIP_GAP / 2.0,
+                None => others.last().map_or(zone.y + BOARD_HEADER_H, |c| c.rect.y + c.rect.h + BOARD_CHIP_GAP / 2.0),
+            };
+            fill_rounded_rect(cr, zone.x + 8.0, y - 1.0, zone.w - 16.0, 2.0, 1.0, p.accent);
+        }
+    }
+}
+
+/// The module being dragged, above everything in the list.
+fn draw_dragged_chip(cr: *mut Cairo, board: &Board, p: &Palette) {
+    let Some(d) = board.drag.as_ref().filter(|d| d.moved) else { return };
+    let r = Rect { x: d.pos.0 - d.offset.0, y: d.pos.1 - d.offset.1, w: d.size.0, h: d.size.1 };
+    fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 8.0, (p.accent.0, p.accent.1, p.accent.2, 0.9));
+    let st = TextStyle { family: &p.family, px: 13.0, bold: true, color: (0.0, 0.0, 0.0, 0.85) };
+    draw_in_box(cr, module_name(&d.id), &st, r.x + 12.0, r.y, r.w - 20.0, r.h, Align::Start);
+}
+
 pub struct SettingsView {
     rows: Vec<Row>,
+    /// The bar's module arrangement, as last drawn.
+    board: Board,
     /// The config as it was when the window opened: rows that differ from it are marked
     /// as changed and can be reverted to it.
     baseline: Config,
@@ -624,6 +880,7 @@ impl SettingsView {
             tab_in: crate::ui::SpringValue::new(1.0),
             time_scale: Some(1.0),
             last_tab_rect: None,
+            board: Board::default(),
             content_h: 0.0,
             search: String::new(),
             search_focus: false,
@@ -675,14 +932,31 @@ impl SettingsView {
             changed = true;
             match (result, row) {
                 (Ok(Some(path)), Some(i)) => {
-                    if let Control::Text { set, .. } = &self.rows[i].control {
-                        let home = std::env::var("HOME").unwrap_or_default();
-                        let text = path.to_string_lossy().to_string();
-                        // Keep paths under $HOME portable, as "~/…".
-                        let text = match text.strip_prefix(&format!("{home}/")) {
-                            Some(rest) if !home.is_empty() => format!("~/{rest}"),
-                            _ => text,
-                        };
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let text = path.to_string_lossy().to_string();
+                    // Keep paths under $HOME portable, as "~/…".
+                    let text = match text.strip_prefix(&format!("{home}/")) {
+                        Some(rest) if !home.is_empty() => format!("~/{rest}"),
+                        _ => text,
+                    };
+                    if matches!(self.rows[i].title, WALLPAPER_DAEMON_ROW | VIDEO_WALLPAPER_ROW) {
+                        let before = self.config.clone();
+                        let mut after = before.clone();
+                        if before.wallpaper_daemon != "prism-video" {
+                            after.wallpaper_still_daemon = before.wallpaper_daemon.clone();
+                        }
+                        after.wallpaper_daemon = "prism-video".to_string();
+                        after.wallpaper_video = text;
+                        self.change(before, after);
+                    } else if self.rows[i].title == NOTIFICATION_SOUND_ROW {
+                        let before = self.config.clone();
+                        let mut after = before.clone();
+                        if !after.notification_sounds.contains(&text) {
+                            after.notification_sounds.push(text.clone());
+                        }
+                        after.notification_sound_file = text;
+                        self.change(before, after);
+                    } else if let Control::Text { set, .. } = &self.rows[i].control {
                         let mut after = self.config.clone();
                         if set(&mut after, &text) {
                             self.editing = None;
@@ -745,6 +1019,18 @@ impl SettingsView {
     // ── Drawing ───────────────────────────────────────────────────────
 
     pub fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, theme: &Theme) {
+        if let Ok(mut name) = VIDEO_NAME.lock() {
+            let now = std::path::Path::new(&self.config.wallpaper_video).file_name().map_or_else(String::new, |n| format!("{}.", n.to_string_lossy()));
+            if *name != now {
+                *name = now;
+            }
+        }
+        if let Ok(mut added) = ADDED_SOUNDS.lock() {
+            let now = added_sounds(&self.config);
+            if *added != now {
+                *added = now;
+            }
+        }
         let p = Self::palette(style, theme);
         self.time_scale = style.time_scale();
         self.card = card;
@@ -775,7 +1061,7 @@ impl SettingsView {
         // target is where the selected tab was last frame (the tab list rarely changes).
         let mut tab_rect = None;
         let tab_pill = if self.query().is_empty() {
-            let (ry, rh) = self.last_tab_rect.map_or((ty + 38.0 * self.tab as f64, 38.0), |r| (r.y, r.h));
+            let (ry, rh) = self.last_tab_rect.map_or((ty + TAB_H * self.tab as f64, TAB_H), |r| (r.y, r.h));
             let (py, ph) = self.tab_glide.to(ry, rh, style);
             fill_rounded_rect(cr, sx + 4.0, py, SIDEBAR_W - 8.0, ph, 8.0, (p.fg.0, p.fg.1, p.fg.2, 0.85));
             Some((py, ph))
@@ -787,7 +1073,7 @@ impl SettingsView {
             if !self.tab_matches(i) {
                 continue;
             }
-            let r = Rect { x: sx + 4.0, y: ty, w: SIDEBAR_W - 8.0, h: 38.0 };
+            let r = Rect { x: sx + 4.0, y: ty, w: SIDEBAR_W - 8.0, h: TAB_H };
             let sel = i == self.tab && self.query().is_empty();
             if sel {
                 tab_rect = Some(r);
@@ -801,7 +1087,7 @@ impl SettingsView {
             let fam = if sel { format!("{} Semi-Bold", p.family) } else { p.family.clone() };
             draw_in_box(cr, name, &TextStyle { family: &fam, px: 14.0, bold: false, color }, r.x + 12.0, r.y, r.w - 24.0, r.h, Align::Start);
             self.hits.push((Hit::Tab(i), r));
-            ty += 38.0;
+            ty += TAB_H;
         }
         if tab_rect != self.last_tab_rect {
             self.last_tab_rect = tab_rect;
@@ -877,9 +1163,10 @@ impl SettingsView {
                 continue;
             }
             let sub = row_subtitle(r);
-            let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. }) { list.w } else { text_w }, None) };
+            let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
                 Control::Buttons(_) | Control::Pills { .. } => th + 12.0 + 34.0,
+                Control::BarModules => th + 12.0 + board_height(&self.config.bar),
                 _ => th.max(36.0),
             };
             heights.push(ctl_h + 28.0 + if group_start[k] { GROUP_H } else { 0.0 });
@@ -915,6 +1202,8 @@ impl SettingsView {
         let mut y = list.y - scroll;
         let mut open_combo_anchor = None;
         self.focus_order.clear();
+        self.board.chips.clear();
+        self.board.zones.clear();
         if visible.is_empty() {
             let msg = if searching { format!("No settings match \u{201C}{}\u{201D}", self.search.trim()) } else { "Nothing to configure here".into() };
             draw_in_box(cr, &msg, &TextStyle { family: &p.family, px: 14.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) }, list.x, list.y + 20.0, list.w, 24.0, Align::Center);
@@ -924,7 +1213,7 @@ impl SettingsView {
                 Control::Buttons(btns) => self.focus_order.extend((0..btns.len()).map(|b| Hit::Button(i, b))),
                 Control::Pills { options, .. } => self.focus_order.extend((0..options.len()).map(|b| Hit::Button(i, b))),
                 Control::Text { browse: true, .. } => self.focus_order.extend([Hit::Control(i), Hit::Browse(i)]),
-                Control::Heading | Control::Note => {}
+                Control::Heading | Control::Note | Control::BarModules => {}
                 _ => self.focus_order.push(Hit::Control(i)),
             }
             let mut h = heights[k];
@@ -973,7 +1262,7 @@ impl SettingsView {
             }
             let sub = row_subtitle(r);
             if !sub.is_empty() {
-                let sw = if matches!(r.control, Control::Buttons(_) | Control::Pills { .. }) { list.w } else { text_w };
+                let sw = if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules) { list.w } else { text_w };
                 wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) }, sw, Some((list.x, ry + 24.0)));
             }
             let cx = list.x + list.w - CONTROL_W;
@@ -1050,6 +1339,10 @@ impl SettingsView {
                         bx += w + 10.0;
                     }
                 }
+                Control::BarModules => {
+                    let area = Rect { x: list.x, y: y + h - 14.0 - board_height(&draft.bar), w: list.w, h: board_height(&draft.bar) };
+                    draw_board(cr, area, &draft.bar, &mut self.board, &p);
+                }
                 Control::Heading | Control::Note => {}
             }
             let next_heading = visible.get(k + 1).is_some_and(|&n| matches!(self.rows[n].control, Control::Heading));
@@ -1091,6 +1384,8 @@ impl SettingsView {
         self.control_rects.retain(|(_, r)| r.y + r.h > list.y && r.y < list.y + list.h);
         self.hits.retain(|(h, r)| !matches!(h, Hit::Button(..) | Hit::Reset(_) | Hit::Browse(_)) || (r.y + r.h > list.y && r.y < list.y + list.h));
 
+        draw_dragged_chip(cr, &self.board, &p);
+
         // Open dropdown on top of everything else in the card.
         if let (Some(anchor), Some((ci, dd))) = (open_combo_anchor, self.combo.as_mut()) {
             if let Control::Combo { options, get, fonts, .. } = &self.rows[*ci].control {
@@ -1121,6 +1416,11 @@ impl SettingsView {
 
     /// Pointer motion; returns true if a redraw is needed.
     pub fn motion(&mut self, x: f64, y: f64, pressed: bool) -> bool {
+        if let Some(d) = self.board.drag.as_mut() {
+            d.pos = (x, y);
+            d.moved |= (x - d.start.0).hypot(y - d.start.1) > 4.0;
+            return true;
+        }
         if let (Some(i), true) = (self.drag, pressed) {
             self.set_slider(i, x);
             return true;
@@ -1144,6 +1444,21 @@ impl SettingsView {
     }
 
     pub fn release(&mut self) -> bool {
+        if let Some(d) = self.board.drag.take() {
+            let before = self.config.clone();
+            let mut after = before.clone();
+            if !d.moved {
+                // A click turns the module on (at the end of the right section) or off.
+                let target = if after.bar.section_of(&d.id).is_some() { None } else { Some((2, usize::MAX)) };
+                after.bar.place(&d.id, target);
+            } else if let Some(target) = self.board.target(d.pos, &d.id) {
+                after.bar.place(&d.id, target);
+            }
+            if after.bar != before.bar {
+                self.change(before, after);
+            }
+            return true;
+        }
         if self.drag.take().is_none() {
             return false;
         }
@@ -1220,6 +1535,10 @@ impl SettingsView {
         }
         self.search_focus = false;
         self.focus_visible = false;
+        if let Some(chip) = self.board.chips.iter().find(|c| c.rect.contains(x, y)) {
+            self.board.drag = Some(ChipDrag { id: chip.id.clone(), start: (x, y), pos: (x, y), offset: (x - chip.rect.x, y - chip.rect.y), size: (chip.rect.w, chip.rect.h), moved: false });
+            return Effect::Redraw;
+        }
         let Some(hit) = self.hit_at(x, y) else { return Effect::Redraw };
         if matches!(hit, Hit::Control(_) | Hit::Button(..) | Hit::Browse(_)) {
             self.focus = Some(hit);
@@ -1273,7 +1592,7 @@ impl SettingsView {
                     }
                 }
                 Control::Combo { .. } => self.combo = Some((i, Dropdown::default())),
-                Control::Buttons(_) | Control::Pills { .. } | Control::Heading | Control::Note => {}
+                Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Heading | Control::Note => {}
             },
         }
         Effect::Redraw
@@ -1547,7 +1866,7 @@ impl SettingsView {
                     let dd = Dropdown { hover: options().iter().position(|(_, v)| *v == cur), ..Dropdown::default() };
                     self.combo = Some((i, dd));
                 }
-                Control::Slider { .. } | Control::Buttons(_) | Control::Pills { .. } | Control::Heading | Control::Note => {}
+                Control::Slider { .. } | Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Heading | Control::Note => {}
             },
             _ => {}
         }
@@ -1575,6 +1894,63 @@ impl SettingsView {
         });
     }
 
+    /// Ask for the video to play as the wallpaper. Cancelling leaves everything as it was.
+    fn choose_video(&mut self, row: usize) {
+        if self.picking.is_some() {
+            return;
+        }
+        self.commit_edit();
+        self.combo = None;
+        let current = expand_home(&self.config.wallpaper_video);
+        let start = current.parent().map(|p| p.to_path_buf()).filter(|p| p.is_dir()).unwrap_or_else(|| expand_home("~/Videos"));
+        let tx = self.pick_tx.clone();
+        let w = self.waker.clone();
+        self.picking = Some(row);
+        self.layer_request = Some(true);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::portal::pick_video("Choose Video Wallpaper", Some(&start)));
+            w.wake();
+        });
+    }
+
+    /// The still, palette and greeter copy follow the video wallpaper, off the UI thread.
+    fn video_follow_up(&self, before: &Config, after: &Config) {
+        let (was, now) = (before.video_wallpaper(), after.video_wallpaper());
+        if was == now {
+            return;
+        }
+        let (scheme, mode, daemon, tx, w) = (after.matugen_scheme.clone(), after.matugen_mode.clone(), after.wallpaper_daemon.clone(), self.bg_tx.clone(), self.waker.clone());
+        std::thread::spawn(move || {
+            let result = match &now {
+                Some(video) => prism_common::wallpaper::set_video_wallpaper(video, Some(&scheme), Some(&mode)),
+                None => prism_common::wallpaper::restore_still_wallpaper(&daemon, Some(&scheme), Some(&mode)),
+            };
+            if let Err(e) = result {
+                let _ = tx.send((format!("Video wallpaper: {e}"), false));
+                w.wake();
+            }
+        });
+    }
+
+    /// Ask for a sound file to add to the list of notification sounds.
+    fn add_sound(&mut self, row: usize) {
+        if self.picking.is_some() {
+            return;
+        }
+        self.commit_edit();
+        self.combo = None;
+        let current = expand_home(&self.config.notification_sound_file);
+        let start = current.parent().map(|p| p.to_path_buf()).filter(|p| p.is_dir()).unwrap_or_else(|| expand_home("~/Music"));
+        let tx = self.pick_tx.clone();
+        let w = self.waker.clone();
+        self.picking = Some(row);
+        self.layer_request = Some(true);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::portal::pick_audio("Add Notification Sound", Some(&start)));
+            w.wake();
+        });
+    }
+
     /// True while the window is hidden for a polkit dialog.
     pub fn hidden(&self) -> bool {
         self.hidden
@@ -1588,6 +1964,13 @@ impl SettingsView {
     fn pick_option(&mut self, row: usize, idx: usize) {
         if let Control::Combo { options, set, .. } = &self.rows[row].control {
             if let Some((_, v)) = options().get(idx) {
+                if v == ADD_SOUND {
+                    return self.add_sound(row);
+                }
+                // A video wallpaper starts with choosing the video.
+                if self.rows[row].title == WALLPAPER_DAEMON_ROW && v == "prism-video" && self.config.wallpaper_daemon != "prism-video" {
+                    return self.choose_video(row);
+                }
                 let mut after = self.config.clone();
                 set(&mut after, v);
                 let before = self.config.clone();
@@ -1652,6 +2035,7 @@ impl SettingsView {
             self.message = Some((format!("Save failed: {}", e), false));
             return false;
         }
+        self.video_follow_up(before, after);
         let palette_changed = before.matugen_mode != after.matugen_mode || before.matugen_scheme != after.matugen_scheme;
         self.config = merged;
         self.message = None;
@@ -1695,6 +2079,16 @@ impl SettingsView {
                 self.commit_edit();
                 self.pending_edit_mode = true;
                 return Effect::Close;
+            }
+            Action::ChooseVideoWallpaper => {
+                if let Some(row) = self.rows.iter().position(|r| r.title == VIDEO_WALLPAPER_ROW) {
+                    self.choose_video(row);
+                }
+            }
+            Action::PlayNotificationSound => {
+                self.commit_edit();
+                let file = self.config.notification_sound_file.clone();
+                std::thread::spawn(move || prism_common::sound::play(&file));
             }
             Action::OpenPhone => {
                 self.commit_edit();
@@ -1818,6 +2212,25 @@ fn merge_changes(disk: &mut serde_json::Value, before: &serde_json::Value, after
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sound_list_ends_with_the_way_to_add_one() {
+        *ADDED_SOUNDS.lock().unwrap() = vec!["~/Music/door-bell.ogg".to_string()];
+        let list = sound_options();
+        assert_eq!(list[0], ("Prism Chime".to_string(), String::new()));
+        assert_eq!(list.last().unwrap().1, ADD_SOUND);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[1], ("Door Bell".to_string(), "~/Music/door-bell.ogg".to_string()));
+    }
+
+    #[test]
+    fn a_sound_chosen_before_the_list_existed_stays_selectable() {
+        let mut c = Config::default();
+        c.notification_sound_file = "/tmp/old.wav".into();
+        assert_eq!(added_sounds(&c), ["/tmp/old.wav"]);
+        c.notification_sounds = vec!["/tmp/old.wav".into()];
+        assert_eq!(added_sounds(&c), ["/tmp/old.wav"]);
+    }
     use serde_json::json;
 
     #[test]

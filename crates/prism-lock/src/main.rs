@@ -29,11 +29,12 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use cairo_backend::{self as cb, Cairo, CairoSurface};
+use prism_common::video::VideoStream;
 use prism_common::{Config, Theme};
 use themes::{Fx, Layers, LockTheme};
 use wayland_client::protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-    wl_surface,
+    wl_subcompositor, wl_subsurface, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::ext::session_lock::v1::client::{
@@ -121,6 +122,8 @@ struct Look {
     session_controls: bool,
     font: String,
     wallpaper: Option<String>,
+    /// The video wallpaper, playing on a surface underneath this one.
+    video: Option<String>,
     theme: LockTheme,
 }
 
@@ -152,6 +155,17 @@ impl Look {
             Mode::Lock => cfg.lockscreen_theme.clone(),
             Mode::Greeter => greetd::load_greeter_config().theme,
         });
+        // PRISM_LOCK_VIDEO tries a video without changing the settings.
+        let video = std::env::var("PRISM_LOCK_VIDEO").ok().map(std::path::PathBuf::from).or_else(|| match mode {
+            Mode::Lock => cfg.video_wallpaper(),
+            Mode::Greeter => greetd::load_greeter_config().wallpaper_video.then(|| greetd::get_state_dir().join(prism_common::wallpaper::GREETER_VIDEO)),
+        });
+        let video = video.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned());
+        // Tide recolours the wallpaper itself, which a video does not allow.
+        let design = match LockTheme::from_id(&theme_id) {
+            LockTheme::Tide if video.is_some() => LockTheme::Classic,
+            design => design,
+        };
         Look {
             fg: cb::hex_to_rgba(&theme.on_primary_container, 1.0),
             primary: cb::hex_to_rgba(&theme.primary, 1.0),
@@ -163,7 +177,8 @@ impl Look {
             session_controls: cfg.show_lockscreen_session_controls,
             font,
             wallpaper: candidates.into_iter().find(|p| std::path::Path::new(p).exists()),
-            theme: LockTheme::from_id(&theme_id),
+            video,
+            theme: design,
         }
     }
 
@@ -194,7 +209,29 @@ impl Drop for Buf {
     }
 }
 
+/// The video wallpaper of one screen: a surface under the design, opaque from its first commit
+/// (a picture from the video until the decoder delivers), so nothing behind the lock can show.
+struct LockVideo {
+    surface: wl_surface::WlSurface,
+    subsurface: wl_subsurface::WlSubsurface,
+    _poster: Buf,
+    stream: Option<VideoStream>,
+    buffers: Vec<wl_buffer::WlBuffer>,
+    frame: Option<wl_callback::WlCallback>,
+}
+
+impl Drop for LockVideo {
+    fn drop(&mut self) {
+        self.subsurface.destroy();
+        self.surface.destroy();
+        for b in self.buffers.drain(..) {
+            b.destroy();
+        }
+    }
+}
+
 struct Surf {
+    video: Option<LockVideo>,
     output: Option<u32>,
     surface: wl_surface::WlSurface,
     role: Role,
@@ -239,6 +276,7 @@ struct App {
     mode: Mode,
     look: Look,
     compositor: Option<wl_compositor::WlCompositor>,
+    subcompositor: Option<wl_subcompositor::WlSubcompositor>,
     shm: Option<wl_shm::WlShm>,
     seat: Option<wl_seat::WlSeat>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -674,12 +712,94 @@ impl App {
         }
     }
 
+    /// Put the video surface under screen `i`. Without one the design goes back to the picture,
+    /// because it must never be see-through with nothing beneath it.
+    fn ensure_video(&mut self, i: usize, qh: &QueueHandle<Self>) {
+        if self.look.video.is_none() || self.surfaces[i].video.is_some() {
+            return;
+        }
+        let (w, h) = self.surfaces[i].size;
+        let parts = (self.compositor.clone(), self.subcompositor.clone(), self.shm.clone());
+        let (Some(comp), Some(sub), Some(shm)) = parts else { return self.drop_video() };
+        let Some(poster) = new_buf(&shm, qh, w, h) else { return self.drop_video() };
+        unsafe {
+            let surf = cb::cairo_image_surface_create_for_data(poster.ptr, cb::CAIRO_FORMAT_ARGB32, w, h, w * 4);
+            let cr = cb::cairo_create(surf);
+            let bg = self.look.background;
+            cb::cairo_set_source_rgba(cr, bg.0, bg.1, bg.2, 1.0);
+            cb::cairo_paint(cr);
+            if let Some(p) = &self.look.wallpaper {
+                cb::draw_image_cover(cr, p, 0.0, 0.0, w as f64, h as f64, 0.0);
+            }
+            cb::cairo_destroy(cr);
+            cb::cairo_surface_destroy(surf);
+        }
+        let parent = self.surfaces[i].surface.clone();
+        let surface = comp.create_surface(qh, ());
+        let subsurface = sub.get_subsurface(&surface, &parent, qh, ());
+        subsurface.place_below(&parent);
+        surface.attach(Some(&poster.buffer), 0, 0);
+        surface.damage_buffer(0, 0, w, h);
+        surface.commit();
+        // Frames follow on their own, without redrawing the design.
+        subsurface.set_desync();
+        let file = self.look.video.clone().unwrap_or_default();
+        let stream = VideoStream::open(std::path::Path::new(&file), w, h);
+        let buffers = stream.as_ref().map_or_else(Vec::new, |st| {
+            let pool = shm.create_pool(st.memory().as_fd(), st.pool_size(), qh, ());
+            let list = (0..prism_common::video::SLOTS as i32).map(|slot| pool.create_buffer(slot * st.frame_size(), w, h, w * 4, wl_shm::Format::Argb8888, qh, ())).collect();
+            pool.destroy();
+            list
+        });
+        self.surfaces[i].video = Some(LockVideo { surface, subsurface, _poster: poster, stream, buffers, frame: None });
+    }
+
+    /// No video after all: the designs draw the picture again.
+    fn drop_video(&mut self) {
+        self.look.video = None;
+        for s in self.surfaces.iter_mut() {
+            s.video = None;
+            s.layers = None;
+            if let Some((old, _, _)) = s.background.take() {
+                unsafe { cb::cairo_surface_destroy(old) };
+            }
+        }
+    }
+
+    /// Show the video frames that are due; returns ms until the next one.
+    fn play_videos(&mut self, qh: &QueueHandle<Self>) -> Option<i32> {
+        let now = Instant::now();
+        let mut next: Option<i32> = None;
+        for v in self.surfaces.iter_mut().filter_map(|s| s.video.as_mut()) {
+            let Some(stream) = v.stream.as_mut() else { continue };
+            // A decoder that stops leaves the last frame up.
+            if !stream.pump() {
+                v.stream = None;
+                continue;
+            }
+            if v.frame.is_none() {
+                if let Some(slot) = stream.take_due(now) {
+                    v.surface.attach(Some(&v.buffers[slot as usize]), 0, 0);
+                    v.surface.damage_buffer(0, 0, stream.width, stream.height);
+                    v.frame = Some(v.surface.frame(qh, ()));
+                    v.surface.commit();
+                }
+                if let Some(wait) = stream.due_in(now) {
+                    let ms = wait.as_millis() as i32 + 1;
+                    next = Some(next.map_or(ms, |n| n.min(ms)));
+                }
+            }
+        }
+        next
+    }
+
     fn draw(&mut self, i: usize, qh: &QueueHandle<Self>) {
         let Some(shm) = self.shm.clone() else { return };
         let (w, h) = self.surfaces[i].size;
         if w <= 0 || h <= 0 {
             return;
         }
+        self.ensure_video(i, qh);
         let s = &mut self.surfaces[i];
         let idx = match s.bufs.iter().position(|b| !b.busy) {
             Some(k) => k,
@@ -741,12 +861,18 @@ impl App {
             None => out_cubic(ms_since(self.opened) / FADE_IN_MS),
         };
 
-        // Background colour, wallpaper, then the dark overlays fading in.
+        // Background colour, wallpaper, then the dark overlays fading in. With a video only the
+        // overlays are drawn: the video plays underneath.
         let bgc = l.background;
-        cb::cairo_set_source_rgba(cr, bgc.0, bgc.1, bgc.2, 1.0);
-        cb::cairo_paint(cr);
+        if l.video.is_some() {
+            cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_SOURCE);
+        } else {
+            cb::cairo_set_source_rgba(cr, bgc.0, bgc.1, bgc.2, 1.0);
+            cb::cairo_paint(cr);
+        }
         cb::cairo_set_source_surface(cr, bg, 0.0, 0.0);
         cb::cairo_paint(cr);
+        cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_OVER);
         // `bg` already has the overlays; while fading, blend the plain wallpaper back in.
         let content = ((fade - 0.25) / 0.75).clamp(0.0, 1.0);
         if content <= 0.0 && self.closing.is_none() {
@@ -974,7 +1100,7 @@ impl App {
 
 impl Surf {
     fn new(output: Option<u32>, surface: wl_surface::WlSurface, role: Role) -> Self {
-        Surf { output, surface, role, size: (0, 0), configured: false, bufs: Vec::new(), background: None, layers: None, frame_cb: None, hits: Vec::new() }
+        Surf { video: None, output, surface, role, size: (0, 0), configured: false, bufs: Vec::new(), background: None, layers: None, frame_cb: None, hits: Vec::new() }
     }
 }
 
@@ -1079,12 +1205,14 @@ fn render_background(look: &Look, w: i32, h: i32) -> *mut CairoSurface {
     unsafe {
         let img = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h);
         let cr = cb::cairo_create(img);
-        let bg = look.background;
-        cb::cairo_set_source_rgba(cr, bg.0, bg.1, bg.2, 1.0);
-        cb::cairo_paint(cr);
-        let mut have_wall = false;
-        if let Some(p) = &look.wallpaper {
-            have_wall = cb::draw_image_cover(cr, p, 0.0, 0.0, w as f64, h as f64, 0.0);
+        let mut have_wall = look.video.is_some();
+        if look.video.is_none() {
+            let bg = look.background;
+            cb::cairo_set_source_rgba(cr, bg.0, bg.1, bg.2, 1.0);
+            cb::cairo_paint(cr);
+            if let Some(p) = &look.wallpaper {
+                have_wall = cb::draw_image_cover(cr, p, 0.0, 0.0, w as f64, h as f64, 0.0);
+            }
         }
         if have_wall {
             cb::cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.15);
@@ -1139,6 +1267,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
                 "wl_seat" if app.seat.is_none() => app.seat = Some(reg.bind(name, version.min(5), qh, ())),
                 "ext_session_lock_manager_v1" => app.lock_manager = Some(reg.bind(name, 1, qh, ())),
                 "xdg_wm_base" => app.wm_base = Some(reg.bind(name, 1, qh, ())),
+                "wl_subcompositor" => app.subcompositor = Some(reg.bind(name, 1, qh, ())),
                 "zwlr_layer_shell_v1" => app.layer_shell = Some(reg.bind(name, version.min(4), qh, ())),
                 "wl_output" => {
                     let out: wl_output::WlOutput = reg.bind(name, version.min(3), qh, ());
@@ -1322,6 +1451,9 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
             if s.frame_cb.as_ref() == Some(cb_obj) {
                 s.frame_cb = None;
             }
+            if let Some(v) = s.video.as_mut().filter(|v| v.frame.as_ref() == Some(cb_obj)) {
+                v.frame = None;
+            }
         }
     }
 }
@@ -1329,6 +1461,12 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
 impl Dispatch<wl_buffer::WlBuffer, ()> for App {
     fn event(app: &mut Self, buffer: &wl_buffer::WlBuffer, ev: wl_buffer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let wl_buffer::Event::Release = ev {
+            for v in app.surfaces.iter_mut().filter_map(|s| s.video.as_mut()) {
+                if let (Some(slot), Some(stream)) = (v.buffers.iter().position(|b| b == buffer), v.stream.as_mut()) {
+                    stream.release(slot as u32);
+                    return;
+                }
+            }
             for b in app.surfaces.iter_mut().flat_map(|s| s.bufs.iter_mut()) {
                 if &b.buffer == buffer {
                     b.busy = false;
@@ -1345,7 +1483,7 @@ macro_rules! ignore {
         }
     )*};
 }
-ignore!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface, wl_output::WlOutput, ExtSessionLockManagerV1, ZwlrLayerShellV1);
+ignore!(wl_compositor::WlCompositor, wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface, wl_output::WlOutput, ExtSessionLockManagerV1, ZwlrLayerShellV1);
 
 // ── Main ─────────────────────────────────────────────────────────────────
 
@@ -1466,6 +1604,7 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
         pointer: None,
         lock_manager: None,
         wm_base: None,
+        subcompositor: None,
         layer_shell: None,
         outputs: Vec::new(),
         session_lock: None,
@@ -1590,6 +1729,7 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
             app.fx.sync(app.masks.len(), app.checking, app.failed_at, app.closing.is_some(), Instant::now());
         }
         app.draw_all(&qh);
+        let video_due = app.play_videos(&qh);
 
         queue.flush().map_err(|e| (1, format!("flush: {e}")))?;
         let mut timeout = if app.any_animating() { 8 } else { 1000 };
@@ -1600,12 +1740,16 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
         if let Some((_, at)) = app.repeat {
             timeout = timeout.min(at.saturating_duration_since(Instant::now()).as_millis() as i32 + 1);
         }
+        if let Some(due) = video_due {
+            timeout = timeout.min(due);
+        }
         if let Some(guard) = queue.prepare_read() {
-            let mut fds = [
+            let mut fds = vec![
                 libc::pollfd { fd: guard.connection_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: app.wake_fd, events: libc::POLLIN, revents: 0 },
             ];
-            let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
+            fds.extend(app.surfaces.iter().filter_map(|s| s.video.as_ref()?.stream.as_ref()).map(|v| libc::pollfd { fd: v.fd(), events: libc::POLLIN, revents: 0 }));
+            let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
             if ret > 0 && fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
                 match guard.read() {
                     Ok(_) => {}

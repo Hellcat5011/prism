@@ -9,6 +9,7 @@ members = [
     "crates/prism-rec",
     "crates/prismd",
     "crates/prism-ui",
+    "crates/prism-video",
 ]
 
 [workspace.package]

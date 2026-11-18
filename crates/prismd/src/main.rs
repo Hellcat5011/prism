@@ -293,6 +293,7 @@ fn popup_for(n: &Notification) -> prism_common::NotifOverlayMessage {
 impl notifd::Handler for NotifHandler {
     fn notify(&self, i: notifd::Incoming) -> u32 {
         let Some(state) = self.state.upgrade() else { return 0 };
+        let wants_sound = i.wants_sound();
         let mut n = Notification::new(0, i.app_name, i.summary, i.body);
         n.icon = i.icon;
         n.urgency = i.urgency;
@@ -312,7 +313,9 @@ impl notifd::Handler for NotifHandler {
         };
         // Silent mode keeps critical notifications (QML silentAllowsCritical).
         if !silent || n.urgency >= 2 {
-            send_notif(popup);
+            let lead = if wants_sound { play_notification_sound() } else { std::time::Duration::ZERO };
+            let stored = (!i.transient).then(|| (self.state.clone(), n.id));
+            show_popup(popup, lead.min(POPUP_DELAY), stored);
         }
         n.id
     }
@@ -1298,6 +1301,51 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
         }
         line.clear();
     }
+}
+
+/// The notification sound, once for a burst of notifications arriving together. Returns how
+/// long until the sound is heard.
+fn play_notification_sound() -> std::time::Duration {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let cfg = prism_common::Config::load();
+    if !cfg.notification_sound {
+        return std::time::Duration::ZERO;
+    }
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400)) {
+        return std::time::Duration::ZERO;
+    }
+    *last = Some(std::time::Instant::now());
+    prism_common::sound::play(&cfg.notification_sound_file)
+}
+
+/// A popup waits this long at most for a sound that has to wake the speaker first.
+const POPUP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+struct QueuedPopup {
+    due: std::time::Instant,
+    message: prism_common::NotifOverlayMessage,
+    /// The stored notification it shows: nothing is shown if that was closed meanwhile.
+    stored: Option<(std::sync::Weak<Mutex<DaemonState>>, u32)>,
+}
+
+/// Show a popup after `delay`. Popups always appear in the order they arrived.
+fn show_popup(message: prism_common::NotifOverlayMessage, delay: std::time::Duration, stored: Option<(std::sync::Weak<Mutex<DaemonState>>, u32)>) {
+    static QUEUE: std::sync::OnceLock<std::sync::mpsc::Sender<QueuedPopup>> = std::sync::OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedPopup>();
+        std::thread::spawn(move || {
+            for popup in rx {
+                std::thread::sleep(popup.due.saturating_duration_since(std::time::Instant::now()));
+                let closed = popup.stored.is_some_and(|(state, id)| state.upgrade().is_none_or(|s| lock_state(&s).notifications.get(id).is_none()));
+                if !closed {
+                    send_notif(popup.message);
+                }
+            }
+        });
+        tx
+    });
+    let _ = queue.send(QueuedPopup { due: std::time::Instant::now() + delay, message, stored });
 }
 
 fn main() {

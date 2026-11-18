@@ -296,11 +296,14 @@ impl Layers {
         unsafe {
             let wall = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h);
             let cr = cb::cairo_create(wall);
-            let bg = look.background;
-            cb::cairo_set_source_rgba(cr, bg.0, bg.1, bg.2, 1.0);
-            cb::cairo_paint(cr);
-            if let Some(p) = &look.wallpaper {
-                cb::draw_image_cover(cr, p, 0.0, 0.0, w as f64, h as f64, 0.0);
+            // With a video the wallpaper is clear: the video plays underneath this surface.
+            if look.video.is_none() {
+                let bg = look.background;
+                cb::cairo_set_source_rgba(cr, bg.0, bg.1, bg.2, 1.0);
+                cb::cairo_paint(cr);
+                if let Some(p) = &look.wallpaper {
+                    cb::draw_image_cover(cr, p, 0.0, 0.0, w as f64, h as f64, 0.0);
+                }
             }
             cb::cairo_destroy(cr);
             cb::cairo_surface_flush(wall);
@@ -541,6 +544,20 @@ impl Ctx<'_> {
         self.s.closing.map(|t| self.s.now.saturating_duration_since(t).as_secs_f64())
     }
 
+    /// Bring the wallpaper back over what is drawn, `a` of the way.
+    fn reveal_wallpaper(&self, layers: &Layers, a: f64) {
+        if self.l.video.is_none() {
+            return self.paint_surface(layers.wall, a);
+        }
+        unsafe {
+            cb::cairo_save(self.cr);
+            cb::cairo_set_operator(self.cr, cb::CAIRO_OPERATOR_DEST_OUT);
+            cb::cairo_set_source_rgba(self.cr, 0.0, 0.0, 0.0, a.clamp(0.0, 1.0));
+            cb::cairo_paint(self.cr);
+            cb::cairo_restore(self.cr);
+        }
+    }
+
     fn paint_surface(&self, s: *mut CairoSurface, a: f64) {
         unsafe {
             cb::cairo_set_source_surface(self.cr, s, 0.0, 0.0);
@@ -553,6 +570,12 @@ impl Ctx<'_> {
 pub unsafe fn paint(cr: *mut Cairo, look: &Look, scene: &Scene, fx: &Fx, layers: &Layers, w: i32, h: i32) -> Vec<HitRect> {
     let mut c = Ctx { cr, l: look, s: scene, fx, w: w as f64, h: h as f64, sc: (h as f64 / super::DESIGN_H).max(0.1), hits: Vec::new() };
     unsafe {
+        if look.video.is_some() {
+            // The buffer is reused: what is not drawn this frame must show the video.
+            cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_CLEAR);
+            cb::cairo_paint(cr);
+            cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_OVER);
+        }
         match look.theme {
             LockTheme::Stencil => stencil(&mut c, layers),
             LockTheme::Horizon => horizon(&mut c, layers),
@@ -641,10 +664,12 @@ unsafe fn stencil(c: &mut Ctx, layers: &Layers) {
         cb::text_path(cr, &s.clock, &font);
         cb::cairo_restore(cr);
         cb::cairo_set_source_surface(cr, layers.wall, 0.0, 0.0);
+        cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_SOURCE);
         cb::cairo_set_line_join(cr, 1);
         cb::cairo_fill_preserve(cr);
         cb::cairo_set_line_width(cr, c.sc * zoom * 1.5 * level);
         cb::cairo_stroke(cr);
+        cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_OVER);
         cb::cairo_new_path(cr);
 
         // Text leaves first; the end of the flight is the plain wallpaper.
@@ -658,7 +683,7 @@ unsafe fn stencil(c: &mut Ctx, layers: &Layers) {
             c.preview_banner(ink);
         }
         if fly > 0.8 {
-            c.paint_surface(layers.wall, ((fly - 0.8) / 0.18).clamp(0.0, 1.0));
+            c.reveal_wallpaper(layers, ((fly - 0.8) / 0.18).clamp(0.0, 1.0));
         }
     }
 }
@@ -798,7 +823,7 @@ unsafe fn sentence(c: &mut Ctx, layers: &Layers) {
         c.paint_surface(b, 1.0);
     }
     if let Some(t) = closing {
-        c.paint_surface(layers.wall, progress((0.75, 1.0), t - 0.15));
+        c.reveal_wallpaper(layers, progress((0.75, 1.0), t - 0.15));
     }
     let mut index = 0;
     for (row, words) in [&first, &second].into_iter().enumerate() {
@@ -867,7 +892,9 @@ unsafe fn aperture(c: &mut Ctx, layers: &Layers) {
         cb::cairo_new_path(cr);
         cb::cairo_arc(cr, cx, cy, r, 0.0, tau);
         cb::cairo_set_source_surface(cr, layers.wall, 0.0, 0.0);
+        cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_SOURCE);
         cb::cairo_fill(cr);
+        cb::cairo_set_operator(cr, cb::CAIRO_OPERATOR_OVER);
         // A soft edge: only the thin ring is a gradient.
         let ring = cb::cairo_pattern_create_radial(cx, cy, r - feather, cx, cy, r + 0.5);
         cb::cairo_pattern_add_color_stop_rgba(ring, 0.0, 0.024, 0.024, 0.03, 0.0);
@@ -998,6 +1025,7 @@ mod tests {
             session_controls: true,
             font: "Inter".into(),
             wallpaper: std::env::var("PRISM_LOCK_RENDER_WALL").ok(),
+            video: None,
             theme,
         }
     }

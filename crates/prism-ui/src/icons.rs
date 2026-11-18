@@ -181,6 +181,11 @@ fn base_dirs() -> Vec<PathBuf> {
     v
 }
 
+/// Index the icon files again (apps were installed or removed).
+pub fn refresh() {
+    rebuild();
+}
+
 fn rebuild() {
     let start = current_theme_name();
     let bases = base_dirs();
@@ -225,13 +230,16 @@ fn rebuild() {
 fn index_theme(name: &str, bases: &[PathBuf]) -> Theme {
     let mut dirs = Vec::new();
     let mut icons: HashMap<String, Vec<(usize, PathBuf)>> = HashMap::new();
-    for base in bases {
-        let root = base.join(name);
-        let Ok(text) = std::fs::read_to_string(root.join("index.theme")) else { continue };
-        for (subdir, info) in parse_index(&text) {
-            let di = dirs.len();
-            dirs.push(info);
-            let Ok(rd) = std::fs::read_dir(root.join(&subdir)) else { continue };
+    // A theme has one index.theme, but its icons can be in every base directory: apps installed
+    // for one user put theirs in ~/.local/share/icons/hicolor, which has no index of its own.
+    let Some(text) = bases.iter().find_map(|b| std::fs::read_to_string(b.join(name).join("index.theme")).ok()) else {
+        return Theme { icons, dirs };
+    };
+    for (subdir, info) in parse_index(&text) {
+        let di = dirs.len();
+        dirs.push(info);
+        for base in bases {
+            let Ok(rd) = std::fs::read_dir(base.join(name).join(&subdir)) else { continue };
             for e in rd.flatten() {
                 let p = e.path();
                 let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -316,6 +324,20 @@ fn watch(on_change: impl Fn()) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icons_are_found_in_a_base_directory_without_an_index() {
+        let root = std::env::temp_dir().join(format!("prism-icons-test-{}", std::process::id()));
+        let (system, user) = (root.join("system"), root.join("user"));
+        std::fs::create_dir_all(system.join("hicolor/48x48/apps")).unwrap();
+        std::fs::create_dir_all(user.join("hicolor/48x48/apps")).unwrap();
+        std::fs::write(system.join("hicolor/index.theme"), "[Icon Theme]\nDirectories=48x48/apps\n[48x48/apps]\nSize=48\nType=Fixed\n").unwrap();
+        std::fs::write(user.join("hicolor/48x48/apps/local-app.png"), b"").unwrap();
+        let theme = index_theme("hicolor", &[user, system]);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(theme.dirs.len(), 1);
+        assert!(theme.icons.contains_key("local-app"));
+    }
 
     #[test]
     fn parses_index_dirs() {

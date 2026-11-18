@@ -53,11 +53,8 @@ pub const ANIM_MED_MS: f64 = 98.0;
 pub const ENTER_SCALE: f64 = 0.94;
 /// Scale a card shrinks to while it fades out (without a surface that can shrink).
 pub const EXIT_SCALE: f64 = 0.96;
-/// Collapse to origin: a card opened from a button grows from, and every card collapses to,
-/// this fraction of its size. The surface itself is scaled, so the compositor's blur
-/// contracts with the card instead of staying behind while it fades.
-pub const ORIGIN_SCALE: f64 = 0.3;
-/// Collapsing cards shrink all the way to their origin...
+/// Closing cards shrink all the way into their centre. The surface itself is scaled, so the
+/// compositor's blur contracts with the card instead of staying behind while it fades...
 pub const COLLAPSE_SCALE: f64 = 0.0;
 /// ...and stay opaque until they are this small: the blur under a card can only be shrunk,
 /// not faded, so the content must not fade out ahead of it.
@@ -65,28 +62,13 @@ const COLLAPSE_FADE_BELOW: f64 = 0.3;
 /// Opening cards are opaque by this fraction of the way in (the blur appears with them).
 const ENTER_OPAQUE_AT: f64 = 0.35;
 
-thread_local! {
-    /// Screen point a card is being opened from (a desktop shortcut button) and when.
-    static OPEN_ORIGIN: std::cell::Cell<Option<(f64, f64, Instant)>> = const { std::cell::Cell::new(None) };
-}
-
-/// Record where the next card opens from (logical screen px).
-pub fn set_open_origin(x: f64, y: f64) {
-    OPEN_ORIGIN.with(|o| o.set(Some((x, y, Instant::now()))));
-}
-
-/// The recorded origin if it is fresh (the open request round-trips through prismd).
-pub fn take_open_origin() -> Option<(f64, f64)> {
-    OPEN_ORIGIN.with(|o| o.take()).filter(|(_, _, t)| t.elapsed().as_millis() < 1500).map(|(x, y, _)| (x, y))
-}
-
 /// Card motion springs: (response in seconds, damping ratio), as in SwiftUI / Android. A
 /// damping ratio below 1 settles with a slight, natural overshoot; 1 never overshoots.
-const SPRING_ENTER_SCALE: (f64, f64) = (0.38, 0.86);
-const SPRING_ENTER_SLIDE: (f64, f64) = (0.34, 0.86);
-const SPRING_EXIT: (f64, f64) = (0.26, 1.0);
+const SPRING_ENTER_SCALE: (f64, f64) = (0.22, 0.9);
+const SPRING_ENTER_SLIDE: (f64, f64) = (0.22, 0.9);
+const SPRING_EXIT: (f64, f64) = (0.16, 1.0);
 /// Slides out at about the pace they came in (a faster exit read as a mismatch).
-const SPRING_EXIT_SLIDE: (f64, f64) = (0.30, 1.0);
+const SPRING_EXIT_SLIDE: (f64, f64) = (0.20, 1.0);
 
 #[derive(Clone, Debug)]
 pub struct Style {
@@ -411,7 +393,7 @@ impl Transition {
                 ty: 0.0,
                 scale: self.min_scale + (1.0 - self.min_scale) * shown,
                 // A collapse keeps the card opaque until it is small; a plain shrink fades.
-                alpha: if self.min_scale < ORIGIN_SCALE + 1e-9 { (shown / COLLAPSE_FADE_BELOW).clamp(0.0, 1.0) } else { shown },
+                alpha: if self.min_scale <= COLLAPSE_SCALE + 1e-9 { (shown / COLLAPSE_FADE_BELOW).clamp(0.0, 1.0) } else { shown },
                 // The dim trails the card so the screen does not flash back.
                 shown: shown.sqrt(),
                 done,
@@ -437,10 +419,10 @@ impl Transition {
 // row in `staggered`; the card re-renders its content while any row is still moving.
 
 /// Delay between rows and how many rows get their own delay (later rows share the last).
-const STAGGER_STEP_MS: f64 = 22.0;
+const STAGGER_STEP_MS: f64 = 12.0;
 const STAGGER_ROWS: usize = 10;
 /// Fade/rise of one row, and how far it rises.
-const STAGGER_ROW_MS: f64 = 260.0;
+const STAGGER_ROW_MS: f64 = 140.0;
 const STAGGER_RISE: f64 = 12.0;
 
 thread_local! {
@@ -892,6 +874,20 @@ mod tests {
         assert!(w[1] >= 110.0 && w[0] >= 50.0 && w[2] >= 60.0);
         assert!(widths_fit(&[50.0, 110.0, 60.0], 250.0, 6.0));
         assert!(!widths_fit(&[100.0, 110.0, 60.0], 250.0, 6.0));
+    }
+
+    #[test]
+    fn cards_arrive_quickly() {
+        let style = Style::new(&Config::default(), &Theme::default());
+        let settled = |motion, ms| {
+            let mut enter = Transition::enter(motion, &style);
+            enter.start = Some(Instant::now() - std::time::Duration::from_millis(ms));
+            enter.sample().done
+        };
+        for motion in [Motion::Scale, Motion::SlideLeft { distance: 500.0 }] {
+            assert!(!settled(motion, 60));
+            assert!(settled(motion, 300));
+        }
     }
 
     #[test]

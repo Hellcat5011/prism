@@ -18,11 +18,16 @@
 // so edit mode, settings and theme changes apply live without polling.
 // ─────────────────────────────────────────────────────────────────────────
 
+pub mod bar;
 pub mod dbus;
+pub mod dock;
 pub mod edit;
 pub mod layout;
+pub mod panel;
+pub mod sysmon;
 pub mod text;
 pub mod widgets;
+pub mod windows;
 
 use std::os::fd::{AsFd, FromRawFd};
 use std::time::Instant;
@@ -167,6 +172,9 @@ enum PointerOn {
     Widget(WidgetId),
     Menu,
     Catcher,
+    Panel(panel::PanelId),
+    /// The strip along the screen edge that brings a hidden dock back.
+    Strip,
 }
 
 struct Desk {
@@ -181,6 +189,14 @@ struct Desk {
     viewporter: Option<WpViewporter>,
     output_mode: (i32, i32),
     output_scale: i32,
+    /// The output the widgets, bar and dock are on, and its name.
+    output: Option<wl_output::WlOutput>,
+    output_name: String,
+    waker: Waker,
+    windows: windows::Windows,
+    panels: panel::Panels,
+    /// The next context menu opens beside its anchor: true to the right, false to the left.
+    menu_beside: Option<bool>,
     /// Bumped on every config reload.
     config_seq: u64,
 
@@ -271,7 +287,7 @@ impl Desktop {
         let qh = queue.handle();
         crate::phone_client::start(waker.clone());
         crate::device_battery::start(waker.clone());
-        let dbus = dbus::spawn(waker);
+        let dbus = dbus::spawn(waker.clone());
 
         let config = Config::load();
         PHONE_SYNC.store(config.phone_enabled, std::sync::atomic::Ordering::Relaxed);
@@ -294,6 +310,12 @@ impl Desktop {
             viewporter: None,
             output_mode: (0, 0),
             output_scale: 1,
+            output: None,
+            output_name: String::new(),
+            waker,
+            windows: windows::Windows::default(),
+            panels: panel::Panels::default(),
+            menu_beside: None,
             config_seq: 0,
             config,
             theme,
@@ -344,6 +366,7 @@ impl Desktop {
         d.sync_time(true, &qh);
         d.load_depth_mask();
         d.reconcile(&qh);
+        d.sync_panels(&qh);
         Some(Desktop {
             queue,
             state: d,
@@ -410,13 +433,15 @@ impl Desktop {
             d.mark(WidgetId::Clock, &qh);
         }
         d.sync_time(false, &qh);
+        let panels = d.panels_tick(&qh);
         // Wake at the next wall-clock second (analog clock) or minute.
         let ms_to_second = 1000 - now.millis as i32 + 15;
-        if d.has(WidgetId::AnalogClock) || phone_playing {
+        let next = if d.has(WidgetId::AnalogClock) || phone_playing {
             ms_to_second
         } else {
             ((59 - now.second as i32) * 1000 + ms_to_second).max(50)
-        }
+        };
+        panels.map_or(next, |p| p.min(next))
     }
 }
 
@@ -509,6 +534,9 @@ impl Desk {
         }
         self.load_depth_mask();
         self.reconcile(qh);
+        self.sync_panels(qh);
+        self.mark_panel(panel::PanelId::Bar, qh);
+        self.mark_panel(panel::PanelId::Dock, qh);
     }
 
     fn load_depth_mask(&mut self) {
@@ -627,6 +655,7 @@ impl Desk {
                 }
                 self.media = m;
                 self.mark(WidgetId::Mpris, qh);
+                self.mark_panel(panel::PanelId::Bar, qh);
             }
             DbusEvent::Tray(items) => {
                 for ic in self.tray_icons.drain(..) {
@@ -637,6 +666,7 @@ impl Desk {
                 self.tray_icons = items.iter().map(|it| TrayIcon { surface: it.pixmap.as_ref().and_then(pixmap_surface) }).collect();
                 let count_changed = self.tray.len() != items.len();
                 self.tray = items;
+                self.mark_panel(panel::PanelId::Bar, qh);
                 if count_changed {
                     self.reconcile(qh);
                 } else {
@@ -886,6 +916,7 @@ impl Desk {
                     }
                 }
             }
+            PointerOn::Panel(id) => self.panel_motion(id, qh),
             PointerOn::Menu => {
                 let hover = self.menu.as_ref().and_then(|m| {
                     m.rows.iter().find(|(_, r)| r.contains(self.ptr_pos.0, self.ptr_pos.1)).map(|(k, _)| *k)
@@ -910,8 +941,11 @@ impl Desk {
                 if let Some(k) = pick {
                     let e = &m.entries[k];
                     if e.enabled && !e.separator && !e.is_submenu {
-                        let _ = self.dbus.cmds.send(DbusCmd::TrayMenuClick { key: m.key.clone(), id: e.id });
+                        let (key, id) = (m.key.clone(), e.id);
                         self.close_menu();
+                        if !self.dock_menu_pick(&key, id, qh) {
+                            let _ = self.dbus.cmds.send(DbusCmd::TrayMenuClick { key, id });
+                        }
                     }
                 }
             }
@@ -967,20 +1001,11 @@ impl Desk {
                         });
                     }
                     Hit::PhoneCard => {
-                        if let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Phone) {
-                            crate::ui::set_open_origin(w.rect.x + w.rect.w / 2.0, w.rect.y + w.rect.h / 2.0);
-                        }
                         if let Ok(c) = std::process::Command::new("prism-ctl").args(["phone", "toggle"]).spawn() {
                             crate::reap(c);
                         }
                     }
                     Hit::Shortcut(k) => {
-                        // The card opens out of this button (collapse to origin, ui.rs).
-                        if let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Shortcuts) {
-                            if let Some((_, r)) = w.hits.iter().find(|(h, _)| *h == Hit::Shortcut(k)) {
-                                crate::ui::set_open_origin(w.rect.x + r.x + r.w / 2.0, w.rect.y + r.y + r.h / 2.0);
-                            }
-                        }
                         let args: &[&str] = match k {
                             0 => &["launcher", "toggle"],
                             1 => &["phone", "toggle"],
@@ -994,16 +1019,21 @@ impl Desk {
                     }
                 }
             }
-            PointerOn::None => {}
+            PointerOn::Panel(id) => self.panel_click(id, button, qh),
+            PointerOn::None | PointerOn::Strip => {}
         }
     }
 
     fn tray_click(&mut self, k: usize, button: u32, _qh: &QueueHandle<Self>) {
-        let Some(item) = self.tray.get(k).cloned() else { return };
         let Some(i) = self.widget_at(WidgetId::Tray) else { return };
         let wrect = self.widgets[i].rect;
         let icon = self.widgets[i].hits.iter().find(|(h, _)| *h == Hit::Tray(k)).map(|(_, r)| *r).unwrap_or_default();
-        let screen_icon = Rect { x: wrect.x + icon.x, y: wrect.y + icon.y, w: icon.w, h: icon.h };
+        self.tray_click_at(k, button, Rect { x: wrect.x + icon.x, y: wrect.y + icon.y, w: icon.w, h: icon.h });
+    }
+
+    /// Click on tray item `k`, whose icon is at `screen_icon`.
+    fn tray_click_at(&mut self, k: usize, button: u32, screen_icon: Rect) {
+        let Some(item) = self.tray.get(k).cloned() else { return };
         let (x, y) = ((screen_icon.x + screen_icon.w / 2.0) as i32, (screen_icon.y + screen_icon.h) as i32);
         const BTN_LEFT: u32 = 0x110;
         const BTN_RIGHT: u32 = 0x111;
@@ -1050,6 +1080,10 @@ impl Desk {
             if y < 4.0 {
                 y = sh - height - 4.0;
             }
+        }
+        if let Some(right) = self.menu_beside.take() {
+            x = if right { anchor.x + anchor.w + 8.0 } else { anchor.x - width - 8.0 };
+            y = (anchor.y + anchor.h / 2.0 - height / 2.0).clamp(4.0, (sh - height - 4.0).max(4.0));
         }
         x = x.round();
         y = y.max(4.0).round();
@@ -1102,23 +1136,33 @@ impl Desk {
     // ── Tray tooltip ──────────────────────────────────────────────────
 
     fn show_tip(&mut self, k: usize, qh: &QueueHandle<Self>) {
+        let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Tray) else { return self.hide_tip() };
+        let Some((_, r)) = w.hits.iter().find(|(h, _)| *h == Hit::Tray(k)) else { return self.hide_tip() };
+        let icon = Rect { x: w.rect.x + r.x, y: w.rect.y + r.y, w: r.w, h: r.h };
+        self.show_tray_tip(k, icon, None, qh);
+    }
+
+    /// Tooltip of tray item `k`, whose icon is at `icon`.
+    fn show_tray_tip(&mut self, k: usize, icon: Rect, beside: Option<bool>, qh: &QueueHandle<Self>) {
         let Some(item) = self.tray.get(k).cloned() else { return self.hide_tip() };
-        if self.tip.as_ref().is_some_and(|t| t.key == item.key && t.text == item.tooltip) {
+        self.open_tip(item.key, item.tooltip, icon, beside, qh);
+    }
+
+    /// A tooltip next to `icon`; `beside` puts it to the icon's right (true) or left (false).
+    fn open_tip(&mut self, key: String, text: (String, String), icon: Rect, beside: Option<bool>, qh: &QueueHandle<Self>) {
+        if self.tip.as_ref().is_some_and(|t| t.key == key && t.text == text) {
             return;
         }
         self.hide_tip();
-        if self.menu.is_some() || (item.tooltip.0.is_empty() && item.tooltip.1.is_empty()) {
+        if self.menu.is_some() || (text.0.is_empty() && text.1.is_empty()) {
             return;
         }
         let (Some(comp), Some(ls)) = (self.compositor.clone(), self.layer_shell.clone()) else { return };
-        let Some(w) = self.widgets.iter().find(|w| w.id == WidgetId::Tray) else { return };
-        let Some((_, r)) = w.hits.iter().find(|(h, _)| *h == Hit::Tray(k)) else { return };
-        let icon = Rect { x: w.rect.x + r.x, y: w.rect.y + r.y, w: r.w, h: r.h };
         let probe = unsafe { cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1) };
         let pcr = unsafe { cairo_create(probe) };
         let (title_f, body_f) = (format!("{} Bold 13px", self.look.family), format!("{} 12px", self.look.family));
-        let (tw, th) = crate::cairo_backend::measure_pango_text(pcr, &item.tooltip.0, &title_f, 320, Some(2));
-        let (bw, bh) = if item.tooltip.1.is_empty() { (0, 0) } else { crate::cairo_backend::measure_pango_text(pcr, &item.tooltip.1, &body_f, 320, Some(6)) };
+        let (tw, th) = crate::cairo_backend::measure_pango_text(pcr, &text.0, &title_f, 320, Some(2));
+        let (bw, bh) = if text.1.is_empty() { (0, 0) } else { crate::cairo_backend::measure_pango_text(pcr, &text.1, &body_f, 320, Some(6)) };
         unsafe {
             cairo_destroy(pcr);
             cairo_surface_destroy(probe);
@@ -1126,10 +1170,14 @@ impl Desk {
         let width = (tw.max(bw) as f64 + 24.0).clamp(60.0, 344.0).round();
         let height = (th as f64 + if bh > 0 { bh as f64 + 4.0 } else { 0.0 } + 16.0).round();
         let (sw, sh) = self.screen;
-        let x = (icon.x + icon.w / 2.0 - width / 2.0).clamp(4.0, (sw - width - 4.0).max(4.0)).round();
+        let mut x = (icon.x + icon.w / 2.0 - width / 2.0).clamp(4.0, (sw - width - 4.0).max(4.0)).round();
         let mut y = icon.y + icon.h + 8.0;
         if y + height > sh - 4.0 {
             y = icon.y - height - 8.0;
+        }
+        if let Some(right) = beside {
+            x = (if right { icon.x + icon.w + 8.0 } else { icon.x - width - 8.0 }).round();
+            y = (icon.y + icon.h / 2.0 - height / 2.0).clamp(4.0, (sh - height - 4.0).max(4.0));
         }
         let rect = Rect { x, y: y.max(4.0).round(), w: width, h: height };
         let surface = comp.create_surface(qh, ());
@@ -1139,7 +1187,7 @@ impl Desk {
         layer.set_size(width as u32, height as u32);
         layer.set_margin(rect.y as i32, 0, 0, rect.x as i32);
         surface.commit();
-        self.tip = Some(Tip { key: item.key, text: item.tooltip, rect, surface, layer, buf: None });
+        self.tip = Some(Tip { key, text, rect, surface, layer, buf: None });
     }
 
     fn hide_tip(&mut self) {
@@ -1393,9 +1441,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Desk {
                     d.pointer = Some(seat.get_pointer(qh, ()));
                     d.seat = Some(seat);
                 }
-                "wl_output" if d.output_mode.0 == 0 => {
-                    let _o: wl_output::WlOutput = reg.bind(name, version.min(3), qh, ());
+                "wl_output" if d.output.is_none() => {
+                    d.output = Some(reg.bind(name, version.min(4), qh, ()));
                 }
+                "zwlr_foreign_toplevel_manager_v1" => {
+                    let _manager: wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1 = reg.bind(name, version.min(3), qh, ());
+                }
+                "ext_workspace_manager_v1" => d.windows.workspace_manager = Some(reg.bind(name, 1, qh, ())),
                 "wp_cursor_shape_manager_v1" => d.cursor_mgr = Some(reg.bind(name, 1, qh, ())),
                 "wp_single_pixel_buffer_manager_v1" => d.single_pixel = Some(reg.bind(name, 1, qh, ())),
                 "wp_viewporter" => d.viewporter = Some(reg.bind(name, 1, qh, ())),
@@ -1418,10 +1470,13 @@ impl Dispatch<wl_output::WlOutput, ()> for Desk {
                 d.output_scale = factor;
                 d.update_screen();
             }
-            wl_output::Event::Done
-                if !d.widgets.is_empty() => {
+            wl_output::Event::Name { name } => d.output_name = name,
+            wl_output::Event::Done => {
+                if !d.widgets.is_empty() {
                     d.reconcile(qh);
                 }
+                d.sync_panels(qh);
+            }
             _ => {}
         }
     }
@@ -1559,6 +1614,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 d.ptr_pos = (surface_x, surface_y);
                 d.ptr_on = if let Some(w) = d.widgets.iter().find(|w| w.surface == surface) {
                     PointerOn::Widget(w.id)
+                } else if d.panels.bar.as_ref().is_some_and(|p| p.owns(&surface)) {
+                    PointerOn::Panel(panel::PanelId::Bar)
+                } else if d.panels.dock.as_ref().is_some_and(|p| p.owns(&surface)) {
+                    PointerOn::Panel(panel::PanelId::Dock)
+                } else if d.panels.strip.as_ref().is_some_and(|s| s.owns(&surface)) {
+                    PointerOn::Strip
                 } else if d.menu.as_ref().map(|m| m.surface == surface).unwrap_or(false) {
                     PointerOn::Menu
                 } else if d.menu.as_ref().map(|m| m.catcher == surface).unwrap_or(false) {
@@ -1567,6 +1628,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                     PointerOn::None
                 };
                 d.hover_hit = None;
+                d.panels.hover = None;
+                d.panel_pointer();
                 d.on_motion(qh);
             }
             wl_pointer::Event::Leave { .. } => {
@@ -1575,6 +1638,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 d.ptr_on = PointerOn::None;
                 d.hover_hit = None;
                 d.pressed = false;
+                d.panel_pointer();
+                if let PointerOn::Panel(id) = prev {
+                    d.panel_left(id, qh);
+                }
                 if let PointerOn::Widget(id) = prev {
                     if matches!(id, WidgetId::Tray | WidgetId::Shortcuts) {
                         d.mark(id, qh);
@@ -1600,6 +1667,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
             }
             wl_pointer::Event::Axis { axis: WEnum::Value(wl_pointer::Axis::VerticalScroll), value, .. } if d.ptr_on == PointerOn::Menu => {
                 d.scroll_menu(value * 2.0, qh);
+            }
+            wl_pointer::Event::Axis { axis: WEnum::Value(wl_pointer::Axis::VerticalScroll), value, .. } if d.ptr_on == PointerOn::Panel(panel::PanelId::Bar) => {
+                d.panel_scroll(value);
             }
             _ => {}
         }

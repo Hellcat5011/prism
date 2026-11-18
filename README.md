@@ -32,6 +32,12 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   one after another, selection highlights glide between rows, lists scroll smoothly (touchpad scrolling follows
   the fingers and keeps its momentum), and switches and hover states animate. Cards cast a soft drop shadow
   (can be turned off). Animations can be slowed down, sped up or turned off.
+- **Video wallpapers**: the built-in wallpaper can loop a video, also on the lock screen and greeter.
+- **Bar**: a panel on any screen edge in three styles (full width, floating, islands), with workspaces, clock, system
+  monitor, tray, media player and launcher, notification and power buttons. Drag modules between left, center and right
+  in Settings.
+- **Dock**: pinned and running apps on the bottom, left or right edge. Right-click an app to pin or remove it. It can
+  stay up, auto-hide, or hide only while windows are on screen, and hovering the screen edge brings it back.
 - **Desktop widgets**: clock, analog clock, calendar, media player, phone, device batteries, system tray and shortcuts on the bottom layer,
   arranged in an on-screen edit mode. Widgets can be "sent to the background" so the wallpaper's foreground
   (a neural depth mask) passes in front of them.

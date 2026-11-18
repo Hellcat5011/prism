@@ -95,9 +95,16 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub power_shutdown: bool,
 
-    /// "prism" (built-in, prism-ui draws the background), "awww" or "swww".
+    /// "prism" (built-in, prism-ui draws the background), "prism-video" (built-in, playing
+    /// `wallpaper_video`), "awww" or "swww".
     #[serde(default = "default_wallpaper_daemon")]
     pub wallpaper_daemon: String,
+    /// The video the "prism-video" daemon plays.
+    #[serde(default)]
+    pub wallpaper_video: String,
+    /// The daemon in use before the video one: choosing a picture goes back to it.
+    #[serde(default = "default_wallpaper_daemon")]
+    pub wallpaper_still_daemon: String,
     /// Built-in daemon transition: random, fade, wipe, grow or none.
     #[serde(default = "default_wallpaper_transition")]
     pub wallpaper_transition: String,
@@ -143,6 +150,21 @@ pub struct Config {
 
     #[serde(default)]
     pub desktop_layout: DesktopLayoutConfig,
+    /// Play a sound when a notification arrives.
+    #[serde(default = "default_true")]
+    pub notification_sound: bool,
+    /// The sound to play; empty for Prism's built-in chime.
+    #[serde(default)]
+    pub notification_sound_file: String,
+    /// Sound files the user added to the list of notification sounds.
+    #[serde(default)]
+    pub notification_sounds: Vec<String>,
+    /// The panel along a screen edge (Settings > Bar).
+    #[serde(default)]
+    pub bar: BarConfig,
+    /// The app dock (Settings > Dock). Pinned apps live in dock.json next to this file.
+    #[serde(default)]
+    pub dock: DockConfig,
 
     // ── Global UI (applies to every Prism card) ────────────────────────
     /// Enter/exit and in-card animations. Off = instant.
@@ -615,6 +637,140 @@ fn default_max_results() -> u32 { 20 }
 fn default_depth_threshold() -> u32 { 30 }
 fn default_depth_feather() -> u32 { 8 }
 
+/// Every module the bar can show: config id and the name shown in Settings.
+pub const BAR_MODULES: [(&str, &str); 8] = [
+    ("launcher", "Launcher"),
+    ("workspaces", "Workspaces"),
+    ("mpris", "Media Player"),
+    ("clock", "Clock"),
+    ("sysmon", "System Monitor"),
+    ("tray", "System Tray"),
+    ("notifications", "Notifications"),
+    ("power", "Power"),
+];
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct BarConfig {
+    pub enabled: bool,
+    /// top, bottom, left or right.
+    pub position: String,
+    /// full (edge to edge), floating (one rounded panel) or islands (one pill per section).
+    pub style: String,
+    pub thickness: u32,
+    /// Gap to the screen edges in the floating and islands styles.
+    pub gap: u32,
+    pub radius: u32,
+    pub opacity: f32,
+    /// Windows stay clear of the bar.
+    pub reserve_space: bool,
+    pub left: Vec<String>,
+    pub center: Vec<String>,
+    pub right: Vec<String>,
+    /// numbers, dots or pills.
+    pub workspace_style: String,
+    pub workspace_hide_empty: bool,
+    /// strftime format.
+    pub clock_format: String,
+    pub clock_date: bool,
+    pub sysmon_cpu: bool,
+    pub sysmon_memory: bool,
+    pub sysmon_temperature: bool,
+    pub media_title: bool,
+}
+
+impl Default for BarConfig {
+    fn default() -> Self {
+        let list = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        BarConfig {
+            enabled: false,
+            position: "top".into(),
+            style: "floating".into(),
+            thickness: 40,
+            gap: 8,
+            radius: 14,
+            opacity: 0.8,
+            reserve_space: true,
+            left: list(&["launcher", "workspaces"]),
+            center: list(&["clock"]),
+            right: list(&["mpris", "sysmon", "tray", "notifications", "power"]),
+            workspace_style: "numbers".into(),
+            workspace_hide_empty: false,
+            clock_format: "%H:%M".into(),
+            clock_date: true,
+            sysmon_cpu: true,
+            sysmon_memory: true,
+            sysmon_temperature: false,
+            media_title: true,
+        }
+    }
+}
+
+impl BarConfig {
+    /// The modules of a section: 0 left, 1 center, 2 right.
+    pub fn section(&self, section: usize) -> &[String] {
+        match section {
+            0 => &self.left,
+            1 => &self.center,
+            _ => &self.right,
+        }
+    }
+
+    fn section_mut(&mut self, section: usize) -> &mut Vec<String> {
+        match section {
+            0 => &mut self.left,
+            1 => &mut self.center,
+            _ => &mut self.right,
+        }
+    }
+
+    /// Move `id` to place `index` of `section`; None turns the module off.
+    pub fn place(&mut self, id: &str, target: Option<(usize, usize)>) {
+        for s in 0..3 {
+            self.section_mut(s).retain(|m| m != id);
+        }
+        if let Some((section, index)) = target {
+            let list = self.section_mut(section);
+            let index = index.min(list.len());
+            list.insert(index, id.to_string());
+        }
+    }
+
+    /// The section a module is in; None while it is off.
+    pub fn section_of(&self, id: &str) -> Option<usize> {
+        (0..3).find(|&s| self.section(s).iter().any(|m| m == id))
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct DockConfig {
+    pub enabled: bool,
+    /// bottom, left or right.
+    pub position: String,
+    pub icon_size: u32,
+    /// off, always, or smart (hidden only while windows are on screen).
+    pub autohide: String,
+    /// Windows may go behind the dock instead of staying clear of it.
+    pub windows_behind: bool,
+    pub gap: u32,
+    pub opacity: f32,
+}
+
+impl Default for DockConfig {
+    fn default() -> Self {
+        DockConfig {
+            enabled: false,
+            position: "bottom".into(),
+            icon_size: 48,
+            autohide: "off".into(),
+            windows_behind: false,
+            gap: 8,
+            opacity: 0.8,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -651,6 +807,8 @@ impl Default for Config {
             power_reboot: default_true(),
             power_shutdown: default_true(),
             wallpaper_daemon: default_wallpaper_daemon(),
+            wallpaper_video: String::new(),
+            wallpaper_still_daemon: default_wallpaper_daemon(),
             wallpaper_transition: default_wallpaper_transition(),
             wallpaper_dir: default_wallpaper_dir(),
             wallpaper_filters_enabled: default_wallpaper_filters_enabled(),
@@ -666,6 +824,11 @@ impl Default for Config {
             widget_clock_visible: true,
             widget_calendar_visible: true,
             desktop_layout: DesktopLayoutConfig::default(),
+            notification_sound: true,
+            notification_sound_file: String::new(),
+            notification_sounds: Vec::new(),
+            bar: BarConfig::default(),
+            dock: DockConfig::default(),
             animations_enabled: true,
             animation_speed: default_animation_speed(),
             dim_enabled: true,
@@ -751,6 +914,23 @@ impl Config {
         }
     }
 
+    /// The daemon that shows pictures: the current one, or the last one used before a video.
+    pub fn still_daemon(&self) -> &str {
+        match self.wallpaper_daemon.as_str() {
+            "prism-video" if self.wallpaper_still_daemon != "prism-video" && !self.wallpaper_still_daemon.is_empty() => &self.wallpaper_still_daemon,
+            "prism-video" => "prism",
+            daemon => daemon,
+        }
+    }
+
+    /// The video wallpaper in use, if the built-in video daemon is selected and has one.
+    pub fn video_wallpaper(&self) -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        (self.wallpaper_daemon == "prism-video" && !self.wallpaper_video.trim().is_empty())
+            .then(|| crate::sound::expand(self.wallpaper_video.trim(), &home))
+            .filter(|p| p.is_file())
+    }
+
     /// What the greeter (another user, no access to this config) reads from its state directory.
     fn greeter_snapshot(&self) -> serde_json::Value {
         serde_json::json!({
@@ -758,6 +938,7 @@ impl Config {
             "theme": if self.greeter_theme == "mirror" { &self.lockscreen_theme } else { &self.greeter_theme },
             "rememberLastUser": self.remember_last_user,
             "defaultSession": self.default_session,
+            "wallpaperVideo": self.video_wallpaper().is_some(),
         })
     }
 
@@ -832,6 +1013,43 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_picture_goes_back_to_the_daemon_used_before_the_video() {
+        let mut c = Config::default();
+        assert_eq!(c.still_daemon(), "prism");
+        c.wallpaper_daemon = "awww".into();
+        assert_eq!(c.still_daemon(), "awww");
+        c.wallpaper_daemon = "prism-video".into();
+        c.wallpaper_still_daemon = "swww".into();
+        assert_eq!(c.still_daemon(), "swww");
+        c.wallpaper_still_daemon = "prism-video".into();
+        assert_eq!(c.still_daemon(), "prism");
+    }
+
+    #[test]
+    fn a_bar_module_is_in_one_place_at_a_time() {
+        let mut bar = BarConfig::default();
+        bar.place("clock", Some((0, 1)));
+        assert_eq!(bar.left, ["launcher", "clock", "workspaces"]);
+        assert!(bar.center.is_empty());
+        assert_eq!(bar.section_of("clock"), Some(0));
+        bar.place("clock", None);
+        assert_eq!(bar.section_of("clock"), None);
+        // Past the end means last.
+        bar.place("clock", Some((1, 9)));
+        assert_eq!(bar.center, ["clock"]);
+    }
+
+    #[test]
+    fn configs_from_before_the_bar_and_dock_load_with_both_off() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.bar.enabled && !cfg.dock.enabled);
+        assert_eq!(cfg.bar.thickness, 40);
+        let cfg: Config = serde_json::from_str(r#"{"bar":{"enabled":true}}"#).unwrap();
+        assert!(cfg.bar.enabled);
+        assert_eq!(cfg.bar.position, "top");
+    }
 
     #[test]
     fn test_desktop_layout_defaults() {

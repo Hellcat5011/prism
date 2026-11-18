@@ -41,6 +41,9 @@ pub struct DesktopApp {
     pub keywords: Vec<String>,
     pub terminal: bool,
     pub no_display: bool,
+    /// StartupWMClass: the app id its windows report, when that differs from the file name.
+    #[serde(default)]
+    pub wm_class: Option<String>,
 }
 
 impl DesktopApp {
@@ -61,6 +64,7 @@ impl DesktopApp {
         let mut categories: Vec<String> = Vec::new();
         let mut keywords: Vec<String> = Vec::new();
         let mut terminal = false;
+        let mut wm_class: Option<String> = None;
         let mut no_display = false;
         let mut is_application = false;
 
@@ -95,6 +99,7 @@ impl DesktopApp {
                     "Exec" => exec = Some(val.to_string()),
                     "Icon" => icon = Some(val.to_string()),
                     "Terminal" => terminal = val.eq_ignore_ascii_case("true"),
+                    "StartupWMClass" => wm_class = Some(val.to_string()),
                     "NoDisplay" => no_display = val.eq_ignore_ascii_case("true"),
                     "Type" => is_application = val.eq_ignore_ascii_case("Application"),
                     "Keywords" => {
@@ -126,6 +131,7 @@ impl DesktopApp {
             categories,
             keywords,
             terminal,
+            wm_class,
             no_display,
         })
     }

@@ -186,36 +186,101 @@ pub fn set_wallpaper_filtered(
             .output();
     }
 
-    // Invoke matugen if installed
-    let scheme_str = scheme.unwrap_or("scheme-smart");
-    let mode_str = mode.unwrap_or("smart");
-
-    let has_matugen = Command::new("matugen")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if has_matugen {
-        let theme_source = if filter.is_monochrome() { image_path } else { shown.as_path() };
-        let _ = Command::new("matugen")
-            .args([
-                "image",
-                theme_source.to_str().unwrap_or(""),
-                "-m",
-                mode_str,
-                "-t",
-                scheme_str,
-                "--source-color-index",
-                "0",
-            ])
-            .output();
-    }
+    let theme_source = if filter.is_monochrome() { image_path } else { shown.as_path() };
+    run_matugen(theme_source, scheme, mode);
 
     // Best-effort greeter wallpaper synchronization
     sync_greeter_wallpaper(&wa_jpg);
 
     Ok(())
+}
+
+/// Derive the colour palette from `image`, if matugen is installed.
+fn run_matugen(image: &Path, scheme: Option<&str>, mode: Option<&str>) {
+    let has_matugen = Command::new("matugen").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if has_matugen {
+        let _ = Command::new("matugen")
+            .args([
+                "image",
+                image.to_str().unwrap_or(""),
+                "-m",
+                mode.unwrap_or("smart"),
+                "-t",
+                scheme.unwrap_or("scheme-smart"),
+                "--source-color-index",
+                "0",
+            ])
+            .output();
+    }
+}
+
+/// Name of the greeter's copy of the video wallpaper in its state directory.
+pub const GREETER_VIDEO: &str = "wallpaper-video";
+
+/// Make `video` the wallpaper: a picture from it becomes the still the lock screen, previews and
+/// palette work from (no filter applies), and the greeter gets its own copy of the video.
+pub fn set_video_wallpaper(video: &Path, scheme: Option<&str>, mode: Option<&str>) -> Result<(), String> {
+    let home = std::env::var("HOME").map(PathBuf::from).map_err(|_| "HOME environment variable not set".to_string())?;
+    let dir = home.join(".cache/prism");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let frame = dir.join("video-frame.ppm");
+    crate::video::extract_still(video, &frame)?;
+    let (wa_jpg, wa_thumb) = (home.join(".wa.jpg"), home.join(".wa-thumb.jpg"));
+    let saved = crate::pixbuf::save_jpeg_filtered(&frame, &wa_jpg, 1920, 95, Filter::Normal)
+        .and_then(|_| crate::pixbuf::save_jpeg_filtered(&frame, &wa_thumb, 960, 90, Filter::Normal));
+    let _ = fs::remove_file(&frame);
+    saved?;
+    run_matugen(&wa_jpg, scheme, mode);
+    sync_greeter_wallpaper(&wa_jpg);
+    sync_greeter_video(Some(video));
+    Ok(())
+}
+
+/// A picture was chosen while a video plays: go back to the daemon used before the video.
+pub fn leave_video_wallpaper() -> Result<(), String> {
+    let mut cfg = crate::Config::load();
+    if cfg.wallpaper_daemon != "prism-video" {
+        return Ok(());
+    }
+    cfg.wallpaper_daemon = cfg.still_daemon().to_string();
+    cfg.save().map_err(|e| e.to_string())?;
+    sync_greeter_video(None);
+    Ok(())
+}
+
+/// Back from a video to the still wallpaper it replaced.
+pub fn restore_still_wallpaper(daemon: &str, scheme: Option<&str>, mode: Option<&str>) -> Result<(), String> {
+    sync_greeter_video(None);
+    match displayed_wallpaper() {
+        Some(path) => set_wallpaper(&path, Some(daemon), scheme, mode),
+        None => Ok(()),
+    }
+}
+
+/// Give the greeter (another user) its own copy of the video, or take it away.
+pub fn sync_greeter_video(video: Option<&Path>) {
+    for dir in ["/var/lib/greetd/prism", "/var/lib/greetd/quickshell-greeter"].iter().map(Path::new).filter(|d| d.is_dir()) {
+        let target = dir.join(GREETER_VIDEO);
+        let Some(video) = video else {
+            let _ = fs::remove_file(&target);
+            continue;
+        };
+        // Already copied: the same size, and not older than the original.
+        let current = fs::metadata(video).ok().zip(fs::metadata(&target).ok()).is_some_and(|(from, to)| {
+            from.len() == to.len() && from.modified().ok() <= to.modified().ok()
+        });
+        if current {
+            continue;
+        }
+        let tmp = dir.join(format!("{GREETER_VIDEO}.{}.tmp", std::process::id()));
+        if fs::copy(video, &tmp).is_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644));
+            if fs::rename(&tmp, &target).is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+    }
 }
 
 /// Copies the given wallpaper file to greetd state directories if accessible
