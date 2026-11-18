@@ -16,6 +16,20 @@ pub trait CardView {
     fn motion(&mut self, x: f64, y: f64) -> bool;
     /// Left click inside the card.
     fn click(&mut self, x: f64, y: f64, shift: bool) -> Effect;
+    /// The left button went up.
+    fn release(&mut self) -> Effect {
+        Effect::None
+    }
+    /// A key went down, before `key` handles it (raw code, the one `key_release` reports).
+    fn key_down(&mut self, _key: u32) {}
+    /// A key went up (raw code).
+    fn key_release(&mut self, _key: u32) -> Effect {
+        Effect::None
+    }
+    /// The keyboard or pointer left the card.
+    fn focus_lost(&mut self) -> Effect {
+        Effect::None
+    }
     /// Wheel; true when a redraw is needed.
     fn scroll(&mut self, _delta: f64) -> bool {
         false

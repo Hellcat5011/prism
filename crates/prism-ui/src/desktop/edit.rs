@@ -91,6 +91,8 @@ struct Edit {
     look: Look,
     theme: Theme,
     tray_count: usize,
+    /// Wallpaper foreground mask: widgets sent to the background pass behind it, as on the desktop.
+    depth_mask: Option<String>,
     /// "Default" + installed font families (the dropdown's options).
     fonts: Vec<String>,
 
@@ -123,6 +125,7 @@ impl EditSession {
         let theme = Theme::load();
         let style = Style::new(&config, &theme);
         set_global_font(&style.font_family);
+        let depth_mask = super::active_depth_mask(&config);
         let mut e = Edit {
             compositor: None,
             shm: None,
@@ -142,6 +145,7 @@ impl EditSession {
             look: Look::new(&style, &theme),
             theme,
             tray_count: registered_tray_items(),
+            depth_mask,
             fonts: std::iter::once("Default".to_string()).chain(crate::uikit::font_families()).collect(),
             actions: Vec::new(),
             hover: None,
@@ -267,10 +271,16 @@ impl Edit {
         let (sw, sh) = self.screen();
         let look = self.look.clone();
         self.actions.clear();
-        // 1. Wallpaper (the current one, as set by Prism), else the theme background.
+        // 1. Wallpaper (the current one, as set by Prism), else the theme background. Cropped to
+        // cover the screen like the real wallpaper, so the depth mask lines up with it.
         let home = std::env::var("HOME").unwrap_or_default();
         let wp = format!("{}/.wa.jpg", home);
-        let painted = cached_image(&wp, sw as i32, sh as i32, false).map(|img| paint_cached(cr, img, 0.0, 0.0)).is_some();
+        let painted = cached_image_cover(&wp, sw as i32, sh as i32)
+            .map(|img| {
+                let (iw, ih) = image_size(img);
+                paint_cached(cr, img, (sw - iw) / 2.0, (sh - ih) / 2.0)
+            })
+            .is_some();
         if !painted {
             let bg = hex_to_rgba(&self.theme.background, 1.0);
             unsafe {
@@ -290,6 +300,16 @@ impl Edit {
             unsafe {
                 cairo_save(cr);
                 cairo_translate(cr, r.x, r.y);
+            }
+            // Drawn apart so that the cut only removes the widget, never the wallpaper under it.
+            // The edit chrome stays on top: a widget fully behind the scenery can still be grabbed.
+            let depth_mask = self.depth_mask.as_deref().filter(|_| p.send_to_background);
+            if depth_mask.is_some() {
+                unsafe {
+                    cairo_rectangle(cr, 0.0, 0.0, r.w, r.h);
+                    cairo_clip(cr);
+                    cairo_push_group(cr);
+                }
             }
             match id {
                 WidgetId::Clock => draw_clock(cr, r.w, r.h, &p, &look, &now),
@@ -327,6 +347,17 @@ impl Edit {
                 WidgetId::Phone => {
                     let st = crate::phone_client::snapshot().1;
                     super::widgets::draw_phone(cr, r.w, r.h, &p, &look, st.as_ref(), None);
+                }
+                WidgetId::Batteries => {
+                    let devices = crate::device_battery::snapshot();
+                    super::widgets::draw_batteries(cr, r.w, r.h, &p, &look, devices.as_deref());
+                }
+            }
+            if let Some(path) = depth_mask {
+                super::cut_depth_mask(cr, path, (sw, sh), r, 1.0);
+                unsafe {
+                    cairo_pop_group_to_source(cr);
+                    cairo_paint(cr);
                 }
             }
             unsafe { cairo_restore(cr) };

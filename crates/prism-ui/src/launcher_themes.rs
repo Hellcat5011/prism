@@ -945,7 +945,7 @@ fn deck_cover(pose: &Pose) -> Option<(f64, f64)> {
 }
 
 /// The screen around a covered box centred on (x, y): what is left to paint of the card behind.
-fn deck_uncovered(x: f64, y: f64, w: f64, h: f64) -> [Rect; 4] {
+pub(crate) fn deck_uncovered(x: f64, y: f64, w: f64, h: f64) -> [Rect; 4] {
     const FAR: f64 = 8000.0;
     [
         Rect { x: x - FAR, y: y - FAR, w: 2.0 * FAR, h: FAR - h },
@@ -956,11 +956,11 @@ fn deck_uncovered(x: f64, y: f64, w: f64, h: f64) -> [Rect; 4] {
 }
 
 /// A picture drawn once and then only moved around.
-struct Sprite(*mut cb::CairoSurface);
+pub(crate) struct Sprite(*mut cb::CairoSurface);
 
 impl Sprite {
     /// Draws a sprite of `w` by `h` design px at `k` device px each.
-    fn new(w: f64, h: f64, k: f64, draw: impl FnOnce(*mut Cairo)) -> Sprite {
+    pub(crate) fn new(w: f64, h: f64, k: f64, draw: impl FnOnce(*mut Cairo)) -> Sprite {
         unsafe {
             let surface = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, (w * k).ceil() as i32, (h * k).ceil() as i32);
             let cr = cb::cairo_create(surface);
@@ -974,13 +974,37 @@ impl Sprite {
 
     /// Paints the sprite centred on the origin. Bilinear: cairo's default filter is far slower
     /// on a scaled or rotated picture. `rough` is quicker still, for cards passing at the back.
-    fn paint(&self, cr: *mut Cairo, w: f64, h: f64, k: f64, alpha: f64, rough: bool) {
+    pub(crate) fn paint(&self, cr: *mut Cairo, w: f64, h: f64, k: f64, alpha: f64, rough: bool) {
         unsafe {
             cb::cairo_save(cr);
             cb::cairo_scale(cr, 1.0 / k, 1.0 / k);
             cb::cairo_set_source_surface(cr, self.0, -(w * k).ceil() / 2.0, -(h * k).ceil() / 2.0);
             cb::cairo_pattern_set_filter(cb::cairo_get_source(cr), if rough { CAIRO_FILTER_FAST } else { cb::CAIRO_FILTER_BILINEAR });
             cb::cairo_paint_with_alpha(cr, alpha);
+            cb::cairo_restore(cr);
+        }
+    }
+}
+
+impl Sprite {
+    /// Paints the sprite with its corner at the origin, one sprite pixel to one screen pixel.
+    pub(crate) fn paint_corner(&self, cr: *mut Cairo, k: f64, alpha: f64) {
+        unsafe {
+            cb::cairo_save(cr);
+            cb::cairo_scale(cr, 1.0 / k, 1.0 / k);
+            cb::cairo_set_source_surface(cr, self.0, 0.0, 0.0);
+            cb::cairo_paint_with_alpha(cr, alpha);
+            cb::cairo_restore(cr);
+        }
+    }
+
+    /// Paints the sprite pixel for pixel with its corner at (x, y).
+    pub(crate) fn paint_at(&self, cr: *mut Cairo, x: f64, y: f64, k: f64) {
+        unsafe {
+            cb::cairo_save(cr);
+            cb::cairo_scale(cr, 1.0 / k, 1.0 / k);
+            cb::cairo_set_source_surface(cr, self.0, (x * k).round(), (y * k).round());
+            cb::cairo_paint(cr);
             cb::cairo_restore(cr);
         }
     }

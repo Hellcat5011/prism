@@ -25,7 +25,7 @@ Targets & Commands:
   clipboard [toggle|open|close]
   emoji [search <query>|copy <glyph>|list|toggle]
   colorpicker [pick|toggle]
-  power [lock|logout|suspend|reboot|shutdown|toggle]
+  power [lock|logout|suspend|sleep|hibernate|reboot|shutdown|toggle]
   desktop [edit|open|close|reset|status]
   edit-mode [open|close|reset|status]
   network [status|toggle-wifi]
@@ -201,6 +201,8 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 Some("lock") => PowerAction::Lock,
                 Some("logout") | Some("exit") => PowerAction::Logout,
                 Some("suspend") => PowerAction::Suspend,
+                Some("sleep") => PowerAction::Sleep,
+                Some("hibernate") => PowerAction::Hibernate,
                 Some("reboot") | Some("restart") => PowerAction::Reboot,
                 Some("shutdown") | Some("poweroff") => PowerAction::Shutdown,
                 Some("open") => PowerAction::Open,

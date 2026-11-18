@@ -73,6 +73,27 @@ pub struct Config {
     /// Launcher design: classic, slices, spectrum or deck.
     #[serde(default = "default_launcher_theme")]
     pub launcher_theme: String,
+    /// Power menu design: glide, split, shutters, orbit or cards.
+    #[serde(default = "default_power_theme")]
+    pub power_theme: String,
+    /// Logout, Reboot and Shutdown run only after being held for a second.
+    #[serde(default = "default_true")]
+    pub power_hold_to_confirm: bool,
+    /// Actions the power menu offers.
+    #[serde(default = "default_true")]
+    pub power_lock: bool,
+    #[serde(default = "default_true")]
+    pub power_logout: bool,
+    #[serde(default = "default_true")]
+    pub power_suspend: bool,
+    #[serde(default = "default_true")]
+    pub power_sleep: bool,
+    #[serde(default = "default_true")]
+    pub power_hibernate: bool,
+    #[serde(default = "default_true")]
+    pub power_reboot: bool,
+    #[serde(default = "default_true")]
+    pub power_shutdown: bool,
 
     /// "prism" (built-in, prism-ui draws the background), "awww" or "swww".
     #[serde(default = "default_wallpaper_daemon")]
@@ -420,6 +441,13 @@ pub struct DesktopLayoutConfig {
     pub shortcuts: WidgetPosition,
     #[serde(default = "default_phone_widget")]
     pub phone: WidgetPosition,
+    #[serde(default = "default_batteries_widget")]
+    pub batteries: WidgetPosition,
+}
+
+/// Batteries widget (connected headphones, speakers, controllers, ...): hidden until enabled.
+pub fn default_batteries_widget() -> WidgetPosition {
+    WidgetPosition { x: 30.0, y: -390.0, w: 320.0, h: 180.0, visible: false, transparent_bg: false, send_to_background: false, vertical: false, hide_date: false, font_family: String::new(), shortcuts: ShortcutsConfig::default() }
 }
 
 /// Phone widget (battery, status, media, find my phone): hidden until enabled.
@@ -535,6 +563,7 @@ impl DesktopLayoutConfig {
                 shortcuts: ShortcutsConfig::default(),
             },
             phone: default_phone_widget(),
+            batteries: default_batteries_widget(),
         }
     }
 }
@@ -549,6 +578,7 @@ impl Default for DesktopLayoutConfig {
             tray: default_tray_widget(),
             shortcuts: default_shortcuts_widget(),
             phone: default_phone_widget(),
+            batteries: default_batteries_widget(),
         }
     }
 }
@@ -574,6 +604,7 @@ fn default_night_temp() -> u32 { 4500 }
 fn default_lockscreen_theme() -> String { "classic".to_string() }
 fn default_greeter_theme() -> String { "mirror".to_string() }
 fn default_launcher_theme() -> String { "classic".to_string() }
+fn default_power_theme() -> String { "glide".to_string() }
 fn default_wallpaper_daemon() -> String { "prism".to_string() }
 fn default_wallpaper_transition() -> String { "random".to_string() }
 fn default_wallpaper_dir() -> String { "~/Pictures/Wallpapers".to_string() }
@@ -610,6 +641,15 @@ impl Default for Config {
             lockscreen_theme: default_lockscreen_theme(),
             greeter_theme: default_greeter_theme(),
             launcher_theme: default_launcher_theme(),
+            power_theme: default_power_theme(),
+            power_hold_to_confirm: default_true(),
+            power_lock: default_true(),
+            power_logout: default_true(),
+            power_suspend: default_true(),
+            power_sleep: default_true(),
+            power_hibernate: default_true(),
+            power_reboot: default_true(),
+            power_shutdown: default_true(),
             wallpaper_daemon: default_wallpaper_daemon(),
             wallpaper_transition: default_wallpaper_transition(),
             wallpaper_dir: default_wallpaper_dir(),

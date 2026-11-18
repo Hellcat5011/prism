@@ -10,6 +10,7 @@ mod displays;
 mod capture;
 mod cairo_backend;
 mod desktop;
+mod device_battery;
 mod icons;
 mod clipboard;
 mod emoji;
@@ -58,6 +59,16 @@ fn reap(child: std::process::Child) {
 /// User data tag for the full-screen dim ("scrim") layer surface, so its configure events are
 /// handled separately from the card surface.
 struct ScrimTag;
+/// User data tag for the blurred surface under the power menu's scrim.
+struct BackdropTag;
+
+/// Clear full-screen surface the compositor blurs what is behind (see `prism-scrim-blur`).
+struct Backdrop {
+    surface: wl_surface::WlSurface,
+    layer: ZwlrLayerSurfaceV1,
+    viewport: Option<WpViewport>,
+    buffer: Option<wl_buffer::WlBuffer>,
+}
 
 
 use prism_common::apps::{load_all_desktop_apps, DesktopApp};
@@ -134,6 +145,7 @@ struct UiState {
     /// Full-screen dim behind modal cards: 1x1 single-pixel buffer scaled by wp_viewporter,
     /// committed once, never redrawn, on an un-blurred namespace.
     scrim_surface: Option<wl_surface::WlSurface>,
+    backdrop: Option<Backdrop>,
     scrim_layer: Option<ZwlrLayerSurfaceV1>,
     scrim_viewport: Option<WpViewport>,
     scrim_buffer: Option<wl_buffer::WlBuffer>,
@@ -296,6 +308,37 @@ impl Dispatch<WpViewporter, ()> for UiState {
 }
 impl Dispatch<WpViewport, ()> for UiState {
     fn event(_: &mut Self, _: &WpViewport, _: <WpViewport as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<ZwlrLayerSurfaceV1, BackdropTag> for UiState {
+    fn event(
+        state: &mut Self,
+        layer_surface: &ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _: &BackdropTag,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+                layer_surface.ack_configure(serial);
+                let (Some(mgr), Some(vp)) = (state.single_pixel_mgr.clone(), state.viewporter.clone()) else { return };
+                let Some(b) = state.backdrop.as_mut() else { return };
+                let viewport = b.viewport.get_or_insert_with(|| vp.get_viewport(&b.surface, qh, ()));
+                viewport.set_destination(width.max(1) as i32, height.max(1) as i32);
+                if b.buffer.is_none() {
+                    // Barely above zero: Mango does not blur behind a fully clear buffer.
+                    let buffer = mgr.create_u32_rgba_buffer(0, 0, 0, u32::MAX / 255, qh, ());
+                    b.surface.attach(Some(&buffer), 0, 0);
+                    b.surface.damage_buffer(0, 0, 1, 1);
+                    b.buffer = Some(buffer);
+                }
+                b.surface.commit();
+            }
+            zwlr_layer_surface_v1::Event::Closed => state.exit_requested = true,
+            _ => {}
+        }
+    }
 }
 
 impl Dispatch<ZwlrLayerSurfaceV1, ScrimTag> for UiState {
@@ -484,6 +527,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                 if state.wallpaper.as_mut().map(|v| v.leave()).unwrap_or(false) {
                     state.render_and_commit(qh);
                 }
+                if let Some(eff) = state.view.as_mut().map(|v| v.focus_lost()) {
+                    state.apply_search_effect(eff, qh);
+                }
             }
             wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
                 let (ox, oy) = state.pointer_origin();
@@ -603,6 +649,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                             let eff = v.release();
                             state.apply_nc_effect(eff, qh);
                         }
+                        if let Some(eff) = state.view.as_mut().map(|v| v.release()) {
+                            state.apply_search_effect(eff, qh);
+                        }
                     }
                     _ => {}
                 }
@@ -702,6 +751,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for UiState {
                 state.repeat_delay = delay;
             }
             wl_keyboard::Event::Key { key, state: WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => {
+                if let Some(v) = state.view.as_mut() {
+                    v.key_down(key);
+                }
                 state.handle_key(key, qh);
                 // Hold-to-repeat (clients repeat keys themselves on Wayland).
                 let repeats = state.xkb_state.as_ref().map(|x| x.get_keymap().key_repeats(xkbcommon::xkb::Keycode::new(key + 8))).unwrap_or(false);
@@ -712,8 +764,16 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for UiState {
                 if state.repeat.map(|(k, _)| k == key).unwrap_or(false) {
                     state.repeat = None;
                 }
+                if let Some(eff) = state.view.as_mut().map(|v| v.key_release(key)) {
+                    state.apply_search_effect(eff, qh);
+                }
             }
-            wl_keyboard::Event::Leave { .. } => state.repeat = None,
+            wl_keyboard::Event::Leave { .. } => {
+                state.repeat = None;
+                if let Some(eff) = state.view.as_mut().map(|v| v.focus_lost()) {
+                    state.apply_search_effect(eff, qh);
+                }
+            }
             _ => {}
         }
     }
@@ -1044,7 +1104,8 @@ impl UiState {
             let k = pose.scale;
             (cx + (x + pose.tx * s - cx) * k, cy + (y + pose.ty * s - cy) * k, w * k, h * k)
         };
-        let floating = matches!(self.mode, UiMode::Launcher) && launcher_themes::floating(&self.config.launcher_theme);
+        let floating = (matches!(self.mode, UiMode::Launcher) && launcher_themes::floating(&self.config.launcher_theme))
+            || (matches!(self.mode, UiMode::Power) && power::floating(&self.config.power_theme));
         let enabled = self.style.shadows && !self.settings_hidden() && !floating;
         let (radius, alpha) = (self.style.radius, pose.alpha);
         match self.shadow.as_mut() {
@@ -1090,8 +1151,8 @@ impl UiState {
             UiMode::Phone => centered(phone::CARD_W, phone::CARD_H),
             UiMode::Prompt => centered(prompt::CARD_W, self.view.as_ref().and_then(|v| v.height()).unwrap_or(300.0)),
             UiMode::Power => {
-                let w = power::card_w(sw);
-                (((sw - w) / 2.0).round() as i32, ((sh - power::CARD_H) / 2.0).round() as i32, w as i32, power::CARD_H as i32)
+                let (w, h) = power::card_size(&self.config, sw, sh);
+                centered(w, h)
             }
             UiMode::Keybinds => {
                 let (w, h) = keybinds::card_size(sw, sh);
@@ -1671,6 +1732,8 @@ impl Preloader {
         self.running = true;
         let (tx, waker) = (self.tx.clone(), self.waker.clone());
         let spawned = std::thread::Builder::new().name("prism-preload".into()).spawn(move || {
+            // Asks logind what the power menu can offer, ahead of the first open.
+            let _ = prism_common::power::support();
             let apps = load_all_desktop_apps();
             let mut seen = std::collections::HashSet::new();
             for app in &apps {
@@ -1864,6 +1927,7 @@ impl Overlay {
             shadow: None,
             shadow_pending: None,
             scrim_surface: None,
+            backdrop: None,
             scrim_layer: None,
             scrim_viewport: None,
             scrim_buffer: None,
@@ -1913,7 +1977,7 @@ impl Overlay {
             UiMode::Spotlight => {
                 state.view = Some(Box::new(spotlight::SpotlightView::new(std::mem::take(&mut state.apps), state.config.clone(), waker.clone())))
             }
-            UiMode::Power => state.view = Some(Box::new(power::PowerView::new())),
+            UiMode::Power => state.view = Some(Box::new(power::PowerView::new(&state.config))),
             UiMode::Clipboard => state.view = Some(Box::new(clipboard::ClipboardView::new(ClipboardStore::load().items))),
             UiMode::Emoji => state.view = Some(Box::new(emoji::EmojiView::new(res.emojis()))),
             UiMode::Keybinds => state.view = Some(Box::new(keybinds::KeybindsView::new(waker.clone()))),
@@ -1935,6 +1999,22 @@ impl Overlay {
                 | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt
         );
         if uses_card_surface {
+            // The power menu blurs the whole screen behind its dim. Mapped first so it stays below
+            // the scrim, and separate from it: Mango's blur breaks on a surface with a subsurface
+            // (the card shadow).
+            if matches!(state.mode, UiMode::Power) && state.style.blur && state.single_pixel_mgr.is_some() && state.viewporter.is_some() {
+                let surface = comp.create_surface(&qh, ());
+                let layer = layer_shell.get_layer_surface(&surface, None, Layer::Top, "prism-scrim-blur".to_string(), &qh, BackdropTag);
+                layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+                layer.set_exclusive_zone(-1);
+                layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+                layer.set_size(0, 0);
+                surface.commit();
+                state.backdrop = Some(Backdrop { surface, layer, viewport: None, buffer: None });
+                while state.backdrop.as_ref().is_some_and(|b| b.buffer.is_none()) && !state.exit_requested {
+                    event_queue.blocking_dispatch(&mut state).map_err(|e| e.to_string())?;
+                }
+            }
             // The scrim's configure reports the logical screen size the card is laid out in. It
             // is on the Top layer so it is always below the card (Overlay).
             let scrim = comp.create_surface(&qh, ());
@@ -1966,6 +2046,7 @@ impl Overlay {
             // The carousel has no card background; it must not be blurred.
             UiMode::Wallpaper => (Layer::Overlay, "prism-wallpaper", Anchor::Top | Anchor::Left, KeyboardInteractivity::Exclusive),
             UiMode::Launcher if launcher_themes::floating(&state.config.launcher_theme) => (Layer::Overlay, "prism-wallpaper", Anchor::Top | Anchor::Left, KeyboardInteractivity::Exclusive),
+            UiMode::Power if power::floating(&state.config.power_theme) => (Layer::Overlay, "prism-wallpaper", Anchor::Top | Anchor::Left, KeyboardInteractivity::Exclusive),
             _ => (Layer::Overlay, "prism-modal", Anchor::Top | Anchor::Left, KeyboardInteractivity::Exclusive),
         };
         // Blurred card namespaces get a "-solid" twin when blur is turned off (see ui::Style::namespace).
@@ -2169,6 +2250,16 @@ impl Overlay {
         }
         if let Some(b) = s.scrim_buffer.take() {
             b.destroy();
+        }
+        if let Some(b) = s.backdrop.take() {
+            if let Some(v) = b.viewport {
+                v.destroy();
+            }
+            b.layer.destroy();
+            b.surface.destroy();
+            if let Some(buffer) = b.buffer {
+                buffer.destroy();
+            }
         }
         if let Some(d) = s.cursor_shape_device.take() {
             d.destroy();

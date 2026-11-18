@@ -229,6 +229,25 @@ struct Desk {
     depth_fade: Option<Instant>,
 }
 
+/// The wallpaper foreground mask in use, if the depth effect is on.
+fn active_depth_mask(config: &Config) -> Option<String> {
+    config.depth_enabled.then(prism_common::depth::current_mask).flatten().map(|p| p.display().to_string())
+}
+
+/// Cut the wallpaper's foreground out of a widget drawn at (0, 0) of `cr`: the screen-sized mask,
+/// cropped to the widget's `rect` on the screen, is removed with DEST_OUT.
+fn cut_depth_mask(cr: *mut Cairo, path: &str, (sw, sh): (f64, f64), rect: Rect, alpha: f64) {
+    let Some(img) = cached_image_cover(path, sw.round() as i32, sh.round() as i32) else { return };
+    let (iw, ih) = image_size(img);
+    unsafe {
+        cairo_save(cr);
+        cairo_set_operator(cr, CAIRO_OPERATOR_DEST_OUT);
+        cairo_set_source_surface(cr, img, (sw - iw) / 2.0 - rect.x, (sh - ih) / 2.0 - rect.y);
+        cairo_paint_with_alpha(cr, alpha);
+        cairo_restore(cr);
+    }
+}
+
 /// QML DepthService maskFade duration.
 const DEPTH_FADE_MS: f64 = 200.0;
 
@@ -242,6 +261,8 @@ pub struct Desktop {
     icon_gen: u64,
     /// phone_client generation the Phone widget was last drawn for.
     phone_seen: u64,
+    /// device_battery generation the Batteries widget was last drawn for.
+    batteries_seen: u64,
 }
 
 impl Desktop {
@@ -249,6 +270,7 @@ impl Desktop {
         let mut queue: EventQueue<Desk> = conn.new_event_queue();
         let qh = queue.handle();
         crate::phone_client::start(waker.clone());
+        crate::device_battery::start(waker.clone());
         let dbus = dbus::spawn(waker);
 
         let config = Config::load();
@@ -330,6 +352,7 @@ impl Desktop {
             last_minute: now.minute,
             icon_gen: crate::icons::generation(),
             phone_seen: 0,
+            batteries_seen: 0,
         })
     }
 
@@ -370,6 +393,11 @@ impl Desktop {
         if phone_gen != self.phone_seen || phone_playing {
             self.phone_seen = phone_gen;
             d.mark(WidgetId::Phone, &qh);
+        }
+        let batteries_gen = crate::device_battery::generation();
+        if batteries_gen != self.batteries_seen {
+            self.batteries_seen = batteries_gen;
+            d.mark(WidgetId::Batteries, &qh);
         }
         let now = LocalTime::now();
         if now.minute != self.last_minute {
@@ -484,11 +512,7 @@ impl Desk {
     }
 
     fn load_depth_mask(&mut self) {
-        let mask = if self.config.depth_enabled {
-            prism_common::depth::current_mask().map(|p| p.display().to_string())
-        } else {
-            None
-        };
+        let mask = active_depth_mask(&self.config);
         if mask != self.depth_mask {
             eprintln!("[prism-desktop] depth mask: {}", mask.as_deref().unwrap_or("none"));
             self.depth_fade = mask.as_ref().map(|_| Instant::now());
@@ -501,9 +525,6 @@ impl Desk {
     /// Returns true while the mask is still fading in.
     fn apply_depth_mask(&mut self, cr: *mut Cairo, rect: Rect) -> bool {
         let Some(path) = &self.depth_mask else { return false };
-        let (sw, sh) = self.screen;
-        let Some(img) = cached_image_cover(path, sw.round() as i32, sh.round() as i32) else { return false };
-        let (iw, ih) = image_size(img);
         let k = match self.depth_fade {
             Some(t) => {
                 let dur = self.style.duration_ms(DEPTH_FADE_MS);
@@ -517,13 +538,7 @@ impl Desk {
         };
         // InOutQuad, as the QML Behavior.
         let a = if k < 0.5 { 2.0 * k * k } else { 1.0 - (-2.0 * k + 2.0).powi(2) / 2.0 };
-        unsafe {
-            cairo_save(cr);
-            cairo_set_operator(cr, CAIRO_OPERATOR_DEST_OUT);
-            cairo_set_source_surface(cr, img, (sw - iw) / 2.0 - rect.x, (sh - ih) / 2.0 - rect.y);
-            cairo_paint_with_alpha(cr, a);
-            cairo_restore(cr);
-        }
+        cut_depth_mask(cr, path, self.screen, rect, a);
         self.depth_fade.is_some()
     }
 
@@ -724,6 +739,10 @@ impl Desk {
                 };
                 let st = crate::phone_client::snapshot().1;
                 draw_phone(cr, w, h, &p, &self.look, st.as_ref(), hovered)
+            }
+            WidgetId::Batteries => {
+                let devices = crate::device_battery::snapshot();
+                draw_batteries(cr, w, h, &p, &self.look, devices.as_deref())
             }
         };
         // Only widgets sent to the background pass behind the wallpaper scenery (QML DepthMask).

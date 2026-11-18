@@ -29,6 +29,7 @@ pub struct Look {
     pub primary: Rgba,
     pub secondary: Rgba,
     pub background: Rgba,
+    pub error: Rgba,
     pub family: String,
 }
 
@@ -40,6 +41,7 @@ impl Look {
             primary: hex_to_rgba(&theme.primary, 1.0),
             secondary: hex_to_rgba(&theme.secondary, 1.0),
             background: hex_to_rgba(&theme.background, 1.0),
+            error: hex_to_rgba(&theme.error, 1.0),
             family: style.font_family.clone(),
         }
     }
@@ -922,4 +924,110 @@ pub fn draw_phone(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Loo
         }
     }
     hits
+}
+
+// ── Batteries ─────────────────────────────────────────────────────────────
+
+/// One device: icon, name, level and a battery. Sized to the cell it is given.
+fn draw_battery_cell(cr: *mut Cairo, cell: Rect, family: &str, look: &Look, d: &crate::device_battery::DeviceBattery) {
+    let size = cell.h.min(36.0);
+    let cy = cell.y + cell.h / 2.0;
+    // Low shows in the shape of the badge too: the error colour can be close to the card's.
+    let (badge, glyph) = if d.low() {
+        (look.fg, (look.card.0, look.card.1, look.card.2, 1.0))
+    } else {
+        ((look.primary.0, look.primary.1, look.primary.2, 0.18), look.fg)
+    };
+    fill_circle(cr, cell.x + size / 2.0, cy, size / 2.0, badge);
+    let i = size * 0.58;
+    crate::svg::draw_path(cr, d.icon, cell.x + (size - i) / 2.0, cy - i / 2.0, i, glyph, Some(2.0));
+
+    // The battery, at the right end of the cell.
+    let (gw, gh) = (42.0, 22.0);
+    let gx = cell.x + cell.w - gw - 4.0;
+    draw_battery_gauge(cr, gx, cy - gh / 2.0, gw, gh, look, d);
+
+    let tx = cell.x + size + 10.0;
+    let tw = (gx - tx - 10.0).max(10.0);
+    let top = cy - 18.0;
+    draw_in_box(cr, &d.name, &TextStyle { family, px: 13.0, bold: false, color: look.fg }, tx, top, tw, 18.0, Align::Start);
+    let percent = TextStyle { family, px: 13.0, bold: true, color: look.fg };
+    draw_in_box(cr, &format!("{}%", d.percent), &percent, tx, top + 18.0, tw, 18.0, Align::Start);
+}
+
+/// A battery filled as far as the device's level, with a bolt across it while charging. `w` is
+/// the body; the terminal sticks out to its right.
+fn draw_battery_gauge(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64, look: &Look, d: &crate::device_battery::DeviceBattery) {
+    const LINE: f64 = 1.5;
+    const INSET: f64 = 3.0;
+    let outline = (look.fg.0, look.fg.1, look.fg.2, 0.75);
+    unsafe {
+        rounded_rect_path(cr, x, y, w, h, 5.0);
+        cairo_set_source_rgba(cr, outline.0, outline.1, outline.2, outline.3);
+        cairo_set_line_width(cr, LINE);
+        cairo_stroke(cr);
+    }
+    fill_rounded_rect(cr, x + w + 1.5, y + h * 0.3, 2.5, h * 0.4, 1.0, outline);
+
+    let inner = w - 2.0 * INSET;
+    if d.percent > 0 {
+        // Never thinner than its own corners, so a nearly empty battery still shows a sliver.
+        let filled = (inner * d.percent as f64 / 100.0).max(4.0);
+        let colour = if d.low() { look.error } else { look.primary };
+        fill_rounded_rect(cr, x + INSET, y + INSET, filled, h - 2.0 * INSET, 2.5, colour);
+    }
+    if d.charging {
+        // Outlined in the card's colour so it reads over the fill and over the empty part alike.
+        let b = h - 4.0;
+        let (bx, by) = (x + (w - b) / 2.0, y + 2.0);
+        let halo = (look.card.0, look.card.1, look.card.2, 1.0);
+        crate::svg::draw_path(cr, crate::device_battery::ICON_CHARGING, bx, by, b, halo, Some(5.0));
+        crate::svg::draw_path(cr, crate::device_battery::ICON_CHARGING, bx, by, b, look.fg, None);
+    }
+}
+
+/// Batteries widget: every connected device that reports a level, in as many columns and rows
+/// as the widget has room for. `devices` is None while UPower cannot be reached.
+pub fn draw_batteries(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, devices: Option<&[crate::device_battery::DeviceBattery]>) -> Hits {
+    const PAD: f64 = 12.0;
+    const GAP: f64 = 8.0;
+    const CELL_W: f64 = 180.0;
+    const CELL_H: f64 = 40.0;
+    draw_background(cr, w, h, look, p.transparent_bg);
+    let family = look.family_for(&p.font_family);
+    let muted = (look.fg.0, look.fg.1, look.fg.2, 0.65);
+    let reachable = devices.is_some();
+    let devices = devices.unwrap_or_default();
+    if devices.is_empty() {
+        let msg = if reachable { "No devices reporting battery" } else { "UPower is not available" };
+        draw_in_box(cr, msg, &TextStyle { family: &family, px: 14.0, bold: true, color: muted }, PAD, 0.0, w - 2.0 * PAD, h, Align::Center);
+        return Hits::new();
+    }
+    let (iw, ih) = (w - 2.0 * PAD, h - 2.0 * PAD);
+    let cols = (((iw + GAP) / (CELL_W + GAP)).floor() as usize).max(1);
+    let rows = (((ih + GAP) / (CELL_H + GAP)).floor() as usize).max(1);
+    let capacity = cols * rows;
+    // The last place says how many did not fit.
+    let shown = if devices.len() > capacity { capacity - 1 } else { devices.len() };
+    let slots = if devices.len() > capacity { capacity } else { shown };
+    let cols = cols.min(slots.max(1));
+    let used_rows = slots.div_ceil(cols);
+    let cell_w = (iw - GAP * (cols - 1) as f64) / cols as f64;
+    let total = used_rows as f64 * CELL_H + (used_rows - 1) as f64 * GAP;
+    let top = (h - total) / 2.0;
+    let cell = |i: usize| Rect {
+        x: PAD + (i % cols) as f64 * (cell_w + GAP),
+        y: top + (i / cols) as f64 * (CELL_H + GAP),
+        w: cell_w,
+        h: CELL_H,
+    };
+    for (i, d) in crate::device_battery::fitting(devices, shown).into_iter().enumerate() {
+        draw_battery_cell(cr, cell(i), &family, look, d);
+    }
+    if shown < devices.len() {
+        let r = cell(shown);
+        let more = format!("+{} more", devices.len() - shown);
+        draw_in_box(cr, &more, &TextStyle { family: &family, px: 13.0, bold: true, color: muted }, r.x, r.y, r.w, r.h, Align::Center);
+    }
+    Hits::new()
 }

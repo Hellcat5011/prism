@@ -2,11 +2,11 @@
 //! `prism_capture` (cursor excluded unless configured), then a full-screen overlay shows the
 //! frozen frame of the output it lands on. Modes:
 //!
-//! * Region: drag a rectangle; move it by dragging inside, resize by its handles; Enter, the
-//!   Capture button or a double click takes it.
+//! * Region: drag a rectangle; move it by dragging inside, resize by its handles; Enter, Space,
+//!   the Capture button or a double click takes it.
 //! * Window: a list of open windows (ext-foreign-toplevel-list) with search; picking one
 //!   captures that window's own buffer (also when covered).
-//! * Screen: click or Enter takes the whole output.
+//! * Screen: click, Enter or Space takes the whole output.
 //!
 //! The result (an `Image` in buffer pixels, never resampled) is saved as PNG, put on the
 //! clipboard and announced by `finish`.
@@ -428,7 +428,7 @@ impl State {
             Kind::Window => self.paint_windows(cr, w, h),
             Kind::Screen => {
                 cb::stroke_rounded_rect(cr, 2.0, 2.0, w - 4.0, h - 4.0, 0.0, (1.0, 1.0, 1.0, 0.8), 3.0);
-                hint(cr, w, h * 0.42, "Click or press Enter to capture this screen");
+                hint(cr, w, h * 0.42, "Click or press Enter or Space to capture this screen");
             }
         }
         self.paint_bar(cr, w, h);
@@ -439,7 +439,7 @@ impl State {
 
     unsafe fn paint_region(&mut self, cr: *mut Cairo, w: f64, h: f64) {
         let Some(r) = self.sel else {
-            hint(cr, w, h * 0.42, "Drag to select an area · Enter or a click on Screen takes everything · Esc cancels");
+            hint(cr, w, h * 0.42, "Drag to select an area · Enter, Space or a click on Screen takes everything · Esc cancels");
             return;
         };
         cb::stroke_rounded_rect(cr, r.x - 0.5, r.y - 0.5, r.w + 1.0, r.h + 1.0, 0.0, WHITE, 1.5);
@@ -709,7 +709,7 @@ impl State {
                     self.outcome = Some(Outcome::Cancelled);
                 }
             }
-            0xff0d | 0xff8d => {
+            _ if confirms(sym, self.kind, &self.query) => {
                 if self.kind == Kind::Region && self.sel.is_none() {
                     self.kind = Kind::Screen;
                 }
@@ -743,6 +743,11 @@ impl State {
         }
         self.dirty = true;
     }
+}
+
+/// Enter takes the capture, and so does Space unless it is typing a window search.
+fn confirms(sym: u32, kind: Kind, query: &str) -> bool {
+    matches!(sym, 0xff0d | 0xff8d) || (sym == 0x20 && (kind != Kind::Window || query.is_empty()))
 }
 
 fn handles(r: Rect) -> [(f64, f64); 8] {
@@ -992,6 +997,18 @@ ignore_events!(wl_shm_pool::WlShmPool, WpCursorShapeDeviceV1);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn space_confirms_except_inside_a_window_search() {
+        for kind in [Kind::Region, Kind::Window, Kind::Screen] {
+            assert!(confirms(0xff0d, kind, ""));
+            assert!(confirms(0x20, kind, ""));
+        }
+        assert!(confirms(0x20, Kind::Region, "left over"));
+        assert!(!confirms(0x20, Kind::Window, "fire"));
+        assert!(confirms(0xff0d, Kind::Window, "fire"));
+        assert!(!confirms(0x72, Kind::Region, ""));
+    }
 
     #[test]
     fn handles_and_kinds() {

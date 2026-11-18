@@ -32,7 +32,7 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   one after another, selection highlights glide between rows, lists scroll smoothly (touchpad scrolling follows
   the fingers and keeps its momentum), and switches and hover states animate. Cards cast a soft drop shadow
   (can be turned off). Animations can be slowed down, sped up or turned off.
-- **Desktop widgets**: clock, analog clock, calendar, media player, phone, system tray and shortcuts on the bottom layer,
+- **Desktop widgets**: clock, analog clock, calendar, media player, phone, device batteries, system tray and shortcuts on the bottom layer,
   arranged in an on-screen edit mode. Widgets can be "sent to the background" so the wallpaper's foreground
   (a neural depth mask) passes in front of them.
 - **System tray**: StatusNotifierItem host with tooltips and dbusmenu context menus (scrollable when long).
@@ -41,6 +41,9 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   **Sentence** (the time and your notifications as a sentence), **Aperture** (a circular window that opens as you
   type) and **Tide** (colour splashes that fill the greyscale wallpaper on unlock). The greeter mirrors the lock
   screen or uses its own design, and clicking the user or session cycles through them.
+- **Power menu**: five large designs (**Glide Bar**, **Split Panel**, **Shutters**, **Orbit** and **Floating
+  Cards**). Choose which actions appear: Lock, Logout, Suspend, Sleep, Hibernate, Reboot and Shutdown (Sleep and
+  Hibernate only where the computer supports them). Logout, Reboot and Shutdown can require a one-second hold.
 - **Theming**: Material You palette from [matugen](https://github.com/InioX/matugen), applied live everywhere.
 - **Wallpaper filters**: pick Color Pop, Pop Art, Synthwave, Noir or Vivid with small previews when applying a
   wallpaper. The filter shows on the desktop, lock screen and greeter alike, and can be turned off.
@@ -260,7 +263,7 @@ Run `prism-ctl --help` for the full list. The common ones:
 | `prism-ctl screenshot toggle` | Capture overlay (`screenshot screen` for the whole screen at once) |
 | `prism-ctl screenshot record` | Start or stop recording (`screenshot stop` to stop) |
 | `prism-ctl phone toggle` | Phone card (`phone pair`, `phone ring`, `phone send <file>...`) |
-| `prism-ctl power toggle` | Power menu |
+| `prism-ctl power toggle` | Power menu (`power suspend`, `sleep`, `hibernate`, `reboot`, `shutdown` run one directly) |
 | `prism-ctl keybinds toggle` | Keybind viewer |
 | `prism-ctl lock lock` | Lock the session |
 | `prism-ctl osd volume +5` / `-5` / `mute` | Volume with OSD |

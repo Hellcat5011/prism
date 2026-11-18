@@ -8,11 +8,49 @@ pub enum PowerAction {
     Lock,
     Logout,
     Suspend,
+    /// Hybrid sleep: suspends with a copy of memory on disk.
+    Sleep,
+    Hibernate,
     Reboot,
     Shutdown,
     Toggle,
     Open,
     Close,
+}
+
+/// The sleep states this computer can enter, as logind reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerSupport {
+    pub suspend: bool,
+    pub sleep: bool,
+    pub hibernate: bool,
+}
+
+/// logind's answer to `CanSuspend` and friends: "challenge" means allowed after asking.
+fn logind_allows(answer: &str) -> bool {
+    matches!(answer, "yes" | "challenge")
+}
+
+fn ask_logind() -> Option<PowerSupport> {
+    let conn = zbus::blocking::Connection::system().ok()?;
+    let can = |method: &str| -> Option<bool> {
+        let reply = conn.call_method(Some("org.freedesktop.login1"), "/org/freedesktop/login1", Some("org.freedesktop.login1.Manager"), method, &()).ok()?;
+        Some(logind_allows(&reply.body().deserialize::<String>().ok()?))
+    };
+    Some(PowerSupport { suspend: can("CanSuspend")?, sleep: can("CanHybridSleep")?, hibernate: can("CanHibernate")? })
+}
+
+/// What this computer supports. Asked once; without an answer only suspend is offered.
+pub fn support() -> PowerSupport {
+    static SUPPORT: std::sync::OnceLock<PowerSupport> = std::sync::OnceLock::new();
+    *SUPPORT.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(ask_logind());
+        });
+        let unknown = PowerSupport { suspend: true, sleep: false, hibernate: false };
+        rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten().unwrap_or(unknown)
+    })
 }
 
 /// Detect the active Wayland compositor and return its graceful quit command
@@ -106,6 +144,30 @@ pub fn execute_power(action: PowerAction) -> Result<String, String> {
                 Err("systemctl suspend failed".to_string())
             }
         }
+        PowerAction::Sleep => {
+            let status = Command::new("systemctl")
+                .arg("hybrid-sleep")
+                .status()
+                .map_err(|e| format!("Failed to run systemctl hybrid-sleep: {}", e))?;
+
+            if status.success() {
+                Ok("Going to sleep...".to_string())
+            } else {
+                Err("systemctl hybrid-sleep failed".to_string())
+            }
+        }
+        PowerAction::Hibernate => {
+            let status = Command::new("systemctl")
+                .arg("hibernate")
+                .status()
+                .map_err(|e| format!("Failed to run systemctl hibernate: {}", e))?;
+
+            if status.success() {
+                Ok("Hibernating system...".to_string())
+            } else {
+                Err("systemctl hibernate failed".to_string())
+            }
+        }
         PowerAction::Reboot => {
             let status = Command::new("systemctl")
                 .arg("reboot")
@@ -139,6 +201,12 @@ pub fn execute_power(action: PowerAction) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logind_answers_are_understood() {
+        assert!(logind_allows("yes") && logind_allows("challenge"));
+        assert!(!logind_allows("na") && !logind_allows("no") && !logind_allows(""));
+    }
 
     #[test]
     fn test_detect_compositor_logout_fallback() {
