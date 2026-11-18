@@ -1,4 +1,4 @@
-//! Alternative launcher designs, chosen with `launcher_theme` (Settings > UI). Classic stays in
+//! Alternative launcher designs, chosen with `launcher_theme` (Settings > Launcher). Classic stays in
 //! launcher.rs; everything else about the themes is in this file.
 //!
 //! * Slices: the wallpaper cut into strips, one app each; the selected strip opens wide.

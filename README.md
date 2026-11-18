@@ -122,7 +122,7 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 | `brightnessctl` or `ddcutil` | Brightness (laptop backlight or external monitor) |
 | `matugen` | Palette from the wallpaper |
 | `awww` or `swww` | Only when chosen instead of the built-in wallpaper daemon |
-| `bluez-obex` | Receiving files over Bluetooth (Settings > Services) |
+| `bluez-obex` | Receiving files over Bluetooth (Settings > Connections) |
 | `plocate` | File search (`pkexec updatedb` to rebuild the index) |
 | `wtype` | Pasting emoji into the focused app |
 | `NetworkManager`, `BlueZ` | Network and Bluetooth pages |
@@ -131,7 +131,7 @@ Clipboard (ext-data-control), media control (MPRIS, `prism-ctl media play-pause|
 keys), notifications and wallpaper resizing are built in; wl-clipboard, playerctl, libnotify and ImageMagick
 are not needed. Also built in, each switched on in Settings: the wallpaper daemon (Wallpaper tab, replaces
 awww/swww), monitor resolution, scale, rotation and adaptive sync (Display tab, replaces wlr-randr), and under
-Services an MPRIS bridge for MPD (mpd-mpris), the polkit agent (polkit-gnome), Wi-Fi/VPN password prompts
+the System and Connections tabs an MPRIS bridge for MPD (mpd-mpris), the polkit agent (polkit-gnome), Wi-Fi/VPN password prompts
 (nm-applet; with optional saving of VPN user names and passwords), Bluetooth file receiving (blueman) and
 Network / Bluetooth tray icons (VPN, device and send-file menus). The Control Centre has a VPN page (connect,
 filter, bulk import of .ovpn / WireGuard files through `nmcli`), Bluetooth devices have a Send button, and its
