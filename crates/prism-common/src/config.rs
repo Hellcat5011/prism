@@ -70,7 +70,7 @@ pub struct Config {
     /// Greeter design: one of the lock screen designs, or "mirror" to follow the lock screen.
     #[serde(default = "default_greeter_theme")]
     pub greeter_theme: String,
-    /// Launcher design: classic, slices, marquee or prose.
+    /// Launcher design: classic or slices.
     #[serde(default = "default_launcher_theme")]
     pub launcher_theme: String,
 
