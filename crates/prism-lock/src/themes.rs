@@ -137,6 +137,31 @@ pub struct Fx {
     closing: bool,
     /// Stencil: the point inside a digit that the unlock flies through.
     pivot: Cell<Option<(f64, f64)>>,
+    /// Sentence: what it says without notifications, chosen once per lock.
+    idle_line: &'static str,
+}
+
+/// Sentence: the second line when no notifications are waiting.
+const IDLE_LINES: [&str; 14] = [
+    "You don't have any pending notifications.",
+    "You're all caught up.",
+    "All quiet for now.",
+    "No news is good news.",
+    "All clear, take your time.",
+    "Everything's taken care of.",
+    "You're free to relax.",
+    "A perfectly peaceful moment.",
+    "All good here.",
+    "Enjoy the calm.",
+    "Peace and quiet, just for you.",
+    "Not a single thing to worry about.",
+    "Time to breathe.",
+    "Welcome back, all is well.",
+];
+
+/// The idle line for a random `seed`.
+fn idle_line(seed: u64) -> &'static str {
+    IDLE_LINES[(noise(seed, 11) * IDLE_LINES.len() as f64) as usize % IDLE_LINES.len()]
 }
 
 /// A repeatable 0..1 number for (`seed`, `i`).
@@ -158,6 +183,7 @@ impl Fx {
             shut: Spring::new(1.0, now, SPRING_REOPEN),
             splashes: Vec::new(),
             rng,
+            idle_line: idle_line(rng),
             failed_at: None,
             closing: false,
             pivot: Cell::new(None),
@@ -741,7 +767,7 @@ unsafe fn sentence(c: &mut Ctx, layers: &Layers) {
             v.push((format!("{}.", s.user.to_lowercase()), Word::User));
             v
         }
-        (Mode::Lock, _) if s.notifications == 0 => plain("and nothing needs you."),
+        (Mode::Lock, _) if s.notifications == 0 => plain(c.fx.idle_line),
         (Mode::Lock, _) => {
             let mut v = plain("and you have");
             v.push((s.notifications.to_string(), Word::Value));
@@ -1054,6 +1080,13 @@ mod tests {
             }
             drop(fx);
         }
+    }
+
+    #[test]
+    fn every_idle_line_can_be_chosen() {
+        let seen: std::collections::HashSet<&str> = (0..2000).map(idle_line).collect();
+        assert_eq!(seen.len(), IDLE_LINES.len());
+        assert!(IDLE_LINES.contains(&"You don't have any pending notifications."));
     }
 
     #[test]
