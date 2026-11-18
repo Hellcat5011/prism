@@ -23,7 +23,24 @@ type Props = HashMap<String, OwnedValue>;
 
 pub struct Bus {
     conn: Connection,
+    /// Connection settings by path: (type, id, wifi ssid, vpn service). Re-read when the list
+    /// of paths changes or after a minute.
+    profiles: std::sync::Mutex<ProfileCache>,
 }
+
+/// (paths as listed, profiles by path, when read).
+type ProfileCache = (Vec<String>, HashMap<String, Profile>, Option<std::time::Instant>);
+
+#[derive(Clone, Default)]
+struct Profile {
+    kind: String,
+    id: String,
+    ssid: String,
+    service: String,
+}
+
+const PPD: &str = "org.freedesktop.UPower.PowerProfiles";
+const PPD_PATH: &str = "/org/freedesktop/UPower/PowerProfiles";
 
 // ── Small value helpers ──────────────────────────────────────────────────
 
@@ -113,7 +130,7 @@ fn ipv6_text(b: &[u8]) -> Option<String> {
 
 impl Bus {
     pub fn system() -> Option<Bus> {
-        Connection::system().ok().map(|conn| Bus { conn })
+        Connection::system().ok().map(|conn| Bus { conn, profiles: Default::default() })
     }
 
     // ── Network ─────────────────────────────────────────────────────
@@ -135,32 +152,85 @@ impl Bus {
     }
 
     /// Saved Wi-Fi profiles: SSID text to settings path.
-    fn known_wifi(&self) -> Vec<(String, String)> {
+    /// Saved connection profiles (cached; see `profiles`).
+    fn profiles(&self) -> Vec<(String, Profile)> {
         let Ok(msg) = self.conn.call_method(Some(NM), NM_SETTINGS, Some("org.freedesktop.NetworkManager.Settings"), "ListConnections", &())
         else {
             return Vec::new();
         };
-        let paths: Vec<OwnedObjectPath> = msg.body().deserialize().unwrap_or_default();
-        let mut out = Vec::new();
-        for p in paths {
-            let Ok(m) = self.conn.call_method(Some(NM), p.as_str(), Some("org.freedesktop.NetworkManager.Settings.Connection"), "GetSettings", &())
-            else {
-                continue;
-            };
-            let Ok(settings) = m.body().deserialize::<HashMap<String, Props>>() else { continue };
-            let is_wifi = settings.get("connection").map(|c| str_of(c, "type") == "802-11-wireless").unwrap_or(false);
-            if !is_wifi {
-                continue;
+        let paths: Vec<String> = msg.body().deserialize::<Vec<OwnedObjectPath>>().unwrap_or_default().into_iter().map(|p| p.to_string()).collect();
+        let mut cache = self.profiles.lock().unwrap();
+        let fresh = cache.2.is_some_and(|t| t.elapsed() < Duration::from_secs(60));
+        if !(fresh && cache.0 == paths) {
+            let mut map = HashMap::new();
+            for p in &paths {
+                if let Some(old) = cache.1.get(p).filter(|_| fresh) {
+                    map.insert(p.clone(), old.clone());
+                    continue;
+                }
+                let Ok(m) = self.conn.call_method(Some(NM), p.as_str(), Some("org.freedesktop.NetworkManager.Settings.Connection"), "GetSettings", &())
+                else {
+                    continue;
+                };
+                let Ok(settings) = m.body().deserialize::<HashMap<String, Props>>() else { continue };
+                let c = settings.get("connection");
+                let ssid = settings.get("802-11-wireless").and_then(|w| w.get("ssid")).map(|v| String::from_utf8_lossy(&bytes_of(v)).into_owned()).unwrap_or_default();
+                let service = settings.get("vpn").map(|v| str_of(v, "service-type")).unwrap_or_default();
+                map.insert(p.clone(), Profile { kind: c.map(|c| str_of(c, "type")).unwrap_or_default(), id: c.map(|c| str_of(c, "id")).unwrap_or_default(), ssid, service });
             }
-            let ssid = settings
-                .get("802-11-wireless")
-                .and_then(|w| w.get("ssid"))
-                .map(|v| String::from_utf8_lossy(&bytes_of(v)).into_owned())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| settings.get("connection").map(|c| str_of(c, "id")).unwrap_or_default());
-            out.push((ssid, p.to_string()));
+            *cache = (paths.clone(), map, Some(std::time::Instant::now()));
         }
-        out
+        paths.iter().filter_map(|p| cache.1.get(p).map(|x| (p.clone(), x.clone()))).collect()
+    }
+
+    fn known_wifi(&self) -> Vec<(String, String)> {
+        self.profiles()
+            .into_iter()
+            .filter(|(_, x)| x.kind == "802-11-wireless")
+            .map(|(p, x)| (if x.ssid.is_empty() { x.id } else { x.ssid }, p))
+            .collect()
+    }
+
+    /// VPN and WireGuard profiles with their state.
+    pub fn refresh_vpns(&self, n: &mut NetState) {
+        use crate::nc::model::{Vpn, VpnState};
+        let nm = get_all(&self.conn, NM, NM_PATH, NM);
+        let mut active: HashMap<String, (String, u32)> = HashMap::new();
+        for a in paths_of(&nm, "ActiveConnections") {
+            let ap = get_all(&self.conn, NM, &a, "org.freedesktop.NetworkManager.Connection.Active");
+            if let Some(c) = path_of(&ap, "Connection") {
+                active.insert(c, (a, u32_of(&ap, "State")));
+            }
+        }
+        let mut vpns: Vec<Vpn> = self
+            .profiles()
+            .into_iter()
+            .filter(|(_, x)| x.kind == "vpn" || x.kind == "wireguard")
+            .map(|(p, x)| {
+                let (act, st) = active.get(&p).cloned().map(|(a, s)| (Some(a), s)).unwrap_or((None, 0));
+                let state = match st {
+                    1 => VpnState::Connecting,
+                    2 => VpnState::On,
+                    3 => VpnState::Disconnecting,
+                    _ => VpnState::Off,
+                };
+                let kind = if x.kind == "wireguard" { "wireguard".to_string() } else { x.service.rsplit('.').next().unwrap_or("vpn").to_string() };
+                Vpn { name: x.id, path: p, kind, state, active: act }
+            })
+            .collect();
+        vpns.sort_by(|a, b| (a.state == VpnState::Off).cmp(&(b.state == VpnState::Off)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        n.vpns = vpns;
+    }
+
+    pub fn vpn_up(&self, path: &str) -> Result<(), String> {
+        let conn = OwnedObjectPath::try_from(path).map_err(|e| e.to_string())?;
+        let root = OwnedObjectPath::try_from("/").unwrap();
+        self.conn.call_method(Some(NM), NM_PATH, Some(NM), "ActivateConnection", &(conn, root.clone(), root)).map(|_| ()).map_err(|e| short_error(&e))
+    }
+
+    pub fn vpn_down(&self, active: &str) -> Result<(), String> {
+        let a = OwnedObjectPath::try_from(active).map_err(|e| e.to_string())?;
+        self.conn.call_method(Some(NM), NM_PATH, Some(NM), "DeactivateConnection", &(a,)).map(|_| ()).map_err(|e| short_error(&e))
     }
 
     fn details(&self, dev: &Props) -> DevDetails {
@@ -392,6 +462,24 @@ impl Bus {
         bt.devices = if bt.powered { devices } else { Vec::new() };
     }
 
+    /// power-profiles-daemon: (active profile, available profiles in its order), or None when
+    /// the daemon is not running.
+    pub fn power_profile(&self) -> Option<(String, Vec<String>)> {
+        let p = get_all(&self.conn, PPD, PPD_PATH, PPD);
+        let active = str_of(&p, "ActiveProfile");
+        if active.is_empty() {
+            return None;
+        }
+        let list: Vec<std::collections::HashMap<String, zbus::zvariant::OwnedValue>> =
+            p.get("Profiles").and_then(|v| v.try_clone().ok()).and_then(|v| v.try_into().ok()).unwrap_or_default();
+        let profiles = list.iter().map(|d| str_of(d, "Profile")).filter(|s| !s.is_empty()).collect();
+        Some((active, profiles))
+    }
+
+    pub fn set_power_profile(&self, profile: &str) -> Result<(), String> {
+        set_prop(&self.conn, PPD, PPD_PATH, PPD, "ActiveProfile", Value::from(profile))
+    }
+
     pub fn set_bluetooth(&self, on: bool) -> Result<(), String> {
         let a = self.adapter_path().ok_or("No Bluetooth adapter")?;
         set_prop(&self.conn, BLUEZ, &a, "org.bluez.Adapter1", "Powered", Value::from(on))
@@ -465,14 +553,28 @@ impl Bus {
 
     /// Watch NetworkManager / BlueZ signals; `on_change` runs (debounced to 300 ms) on changes.
     pub fn watch(on_change: impl Fn() -> bool + Send + 'static) {
+        Self::watch_services(&[NM, BLUEZ], on_change);
+    }
+
+    /// NetworkManager signals only (VPN and connection state).
+    pub fn watch_network(on_change: impl Fn() -> bool + Send + 'static) {
+        Self::watch_services(&[NM], on_change);
+    }
+
+    /// BlueZ signals only.
+    pub fn watch_bluetooth(on_change: impl Fn() -> bool + Send + 'static) {
+        Self::watch_services(&[BLUEZ], on_change);
+    }
+
+    /// Call `on_change` (debounced 300 ms) whenever one of `services` signals; stops when it
+    /// returns false.
+    fn watch_services(services: &[&'static str], on_change: impl Fn() -> bool + Send + 'static) {
+        let services = services.to_vec();
         std::thread::Builder::new()
             .name("prism-nc-signals".into())
             .spawn(move || {
                 let Ok(conn) = Connection::system() else { return };
-                let rules = [
-                    MatchRule::builder().msg_type(MsgType::Signal).sender(NM).map(|b| b.build()),
-                    MatchRule::builder().msg_type(MsgType::Signal).sender(BLUEZ).map(|b| b.build()),
-                ];
+                let rules: Vec<_> = services.iter().map(|s| MatchRule::builder().msg_type(MsgType::Signal).sender(*s).map(|b| b.build())).collect();
                 let (tx, rx) = std::sync::mpsc::channel::<()>();
                 for rule in rules.into_iter().flatten() {
                     let Ok(mut it) = MessageIterator::for_match_rule(rule, &conn, Some(64)) else { continue };

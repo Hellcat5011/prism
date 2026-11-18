@@ -20,14 +20,17 @@ mod cairo_backend;
 mod greetd;
 #[allow(dead_code)]
 mod svg;
+mod themes;
 
 use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::process::exit;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use cairo_backend::{self as cb, Cairo, CairoSurface};
 use prism_common::{Config, Theme};
+use themes::{Fx, Layers, LockTheme};
 use wayland_client::protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
     wl_surface,
@@ -64,6 +67,10 @@ const HOVER_MS: f64 = 150.0;
 const USER_HOVER_SCALE: f64 = 1.04;
 const SESSION_HOVER_SCALE: f64 = 1.08;
 const INACTIVITY: Duration = Duration::from_secs(15);
+/// Horizon: the part of each second (s) in which the marker steps along the line.
+const HORIZON_TICK: f64 = 0.4;
+/// Notifications waiting, for the Sentence design on the lock screen.
+static NOTIFICATIONS: AtomicUsize = AtomicUsize::new(0);
 const MASK_FONT: &str = "CaskaydiaCove Nerd Font";
 const MASK_GLYPHS: [char; 4] = ['\u{f0d7}', '\u{f0d8}', '\u{f0d9}', '\u{f0da}'];
 /// Greeter: the last slot of the user list, where a name not in the list is typed (QML newUserSentinel).
@@ -108,10 +115,13 @@ struct Look {
     error: Rgba,
     outline: Rgba,
     background: Rgba,
+    /// primary_container: the solid colour of the Stencil design (`fg` reads on it).
+    container: Rgba,
     right: bool,
     session_controls: bool,
     font: String,
     wallpaper: Option<String>,
+    theme: LockTheme,
 }
 
 impl Look {
@@ -137,16 +147,23 @@ impl Look {
         if mode == Mode::Greeter {
             right = greetd::load_greeter_config().lockscreen_alignment == "right";
         }
+        // PRISM_LOCK_THEME tries a design without changing the settings.
+        let theme_id = std::env::var("PRISM_LOCK_THEME").unwrap_or_else(|_| match mode {
+            Mode::Lock => cfg.lockscreen_theme.clone(),
+            Mode::Greeter => greetd::load_greeter_config().theme,
+        });
         Look {
             fg: cb::hex_to_rgba(&theme.on_primary_container, 1.0),
             primary: cb::hex_to_rgba(&theme.primary, 1.0),
             error: cb::hex_to_rgba(&theme.error, 1.0),
             outline: cb::hex_to_rgba(&theme.outline_variant, 0.4),
             background: cb::hex_to_rgba(&theme.background, 1.0),
+            container: cb::hex_to_rgba(&theme.primary_container, 1.0),
             right,
             session_controls: cfg.show_lockscreen_session_controls,
             font,
             wallpaper: candidates.into_iter().find(|p| std::path::Path::new(p).exists()),
+            theme: LockTheme::from_id(&theme_id),
         }
     }
 
@@ -186,6 +203,8 @@ struct Surf {
     bufs: Vec<Buf>,
     /// Wallpaper + overlays rendered once per size.
     background: Option<(*mut CairoSurface, i32, i32)>,
+    /// The same for the other designs (themes.rs).
+    layers: Option<Layers>,
     frame_cb: Option<wl_callback::WlCallback>,
     /// Hit rectangles from the last draw: (what, x, y, w, h).
     hits: Vec<(Hit, f64, f64, f64, f64)>,
@@ -200,7 +219,7 @@ impl Drop for Surf {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Hit {
+pub(crate) enum Hit {
     User,
     Field,
     Go,
@@ -268,6 +287,7 @@ struct App {
     done: bool,
     /// Greeter started without greetd (no GREETD_SOCK): a closable preview window.
     preview: bool,
+    fx: Fx,
     /// The Nerd Font with the mask glyphs is installed for this user (not for `greeter`).
     mask_font_ok: bool,
     error: Option<String>,
@@ -293,6 +313,39 @@ impl App {
             || self.session_anim.as_ref().is_some_and(|(t, _)| ms_since(*t) < 2.0 * NAME_HALF_MS)
             || ms_since(self.user_grow.2) < HOVER_MS
             || ms_since(self.session_grow.2) < HOVER_MS
+            || (self.look.theme != LockTheme::Classic && self.fx.animating(Instant::now()))
+            || (self.look.theme == LockTheme::Horizon && second_of_minute().1 < HORIZON_TICK)
+    }
+
+    /// What the designs in themes.rs show this frame.
+    fn scene(&self) -> themes::Scene {
+        let (hour, minute) = local_now();
+        let hour = if hour % 12 == 0 { 12 } else { hour % 12 };
+        themes::Scene {
+            mode: self.mode,
+            now: Instant::now(),
+            opened: self.opened,
+            closing: self.closing,
+            clock: format!("{hour:02}:{minute:02}"),
+            date: date_label(),
+            weekday: weekday_name(),
+            second: second_of_minute(),
+            user: self.shown_user(),
+            entering_user: self.entering_user,
+            typed_name: if self.entering_user { self.text.clone() } else { String::new() },
+            typed: self.masks.len(),
+            status: self.status.clone(),
+            status_error: self.status_error,
+            caps_lock: self.xkb.as_ref().is_some_and(|x| x.mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_EFFECTIVE)),
+            notifications: NOTIFICATIONS.load(Ordering::Relaxed),
+            session: match self.mode {
+                Mode::Greeter => self.session_name(),
+                Mode::Lock => session_label().to_uppercase(),
+            },
+            power_buttons: self.look.session_controls,
+            hover: self.hover,
+            preview: self.preview,
+        }
     }
 
     fn set_password_mode(&mut self, on: bool) {
@@ -415,6 +468,11 @@ impl App {
             return;
         }
         if self.text.is_empty() {
+            return;
+        }
+        if self.preview && self.text == "unlock" {
+            // Preview: plays the unlock animation of the design (nothing is checked).
+            self.closing = Some(Instant::now());
             return;
         }
         if self.preview {
@@ -540,9 +598,11 @@ impl App {
             _ => {}
         }
         if !self.password_mode && !self.entering_user {
-            // The first key only opens the password field (as QML).
+            // Classic: the first key only opens the password field (as QML).
             self.set_password_mode(true);
-            return;
+            if self.look.theme == LockTheme::Classic {
+                return;
+            }
         }
         if ctrl {
             if text == "\u{15}" || sym.raw() == 0x75 {
@@ -632,25 +692,38 @@ impl App {
             },
             None => return,
         };
-        if !matches!(s.background, Some((_, bw, bh)) if bw == w && bh == h) {
+        let classic = self.look.theme == LockTheme::Classic;
+        if classic && !matches!(s.background, Some((_, bw, bh)) if bw == w && bh == h) {
             if let Some((old, _, _)) = s.background.take() {
                 unsafe { cb::cairo_surface_destroy(old) };
             }
             s.background = Some((render_background(&self.look, w, h), w, h));
         }
-        let bg = s.background.unwrap().0;
+        if !classic && s.layers.as_ref().is_none_or(|l| l.size != (w, h)) {
+            s.layers = Some(Layers::render(&self.look, w, h));
+        }
+        let bg = s.background.map(|b| b.0);
         let ptr = s.bufs[idx].ptr;
         s.bufs[idx].busy = true;
         let hits = unsafe {
             let surf = cb::cairo_image_surface_create_for_data(ptr, cb::CAIRO_FORMAT_ARGB32, w, h, w * 4);
             let cr = cb::cairo_create(surf);
-            let hits = self.paint(cr, bg, w, h);
+            let hits = match (bg, self.surfaces[i].layers.as_ref()) {
+                (Some(bg), _) if classic => self.paint(cr, bg, w, h),
+                (_, Some(layers)) => themes::paint(cr, &self.look, &self.scene(), &self.fx, layers, w, h),
+                _ => Vec::new(),
+            };
             cb::cairo_destroy(cr);
             cb::cairo_surface_destroy(surf);
             hits
         };
         let s = &mut self.surfaces[i];
         s.hits = hits;
+        // The row re-centres when a name changes: what is under the pointer may be something else.
+        if !classic {
+            self.update_hover();
+        }
+        let s = &mut self.surfaces[i];
         s.surface.attach(Some(&s.bufs[idx].buffer), 0, 0);
         s.surface.damage_buffer(0, 0, w, h);
         s.frame_cb = Some(s.surface.frame(qh, ()));
@@ -901,7 +974,7 @@ impl App {
 
 impl Surf {
     fn new(output: Option<u32>, surface: wl_surface::WlSurface, role: Role) -> Self {
-        Surf { output, surface, role, size: (0, 0), configured: false, bufs: Vec::new(), background: None, frame_cb: None, hits: Vec::new() }
+        Surf { output, surface, role, size: (0, 0), configured: false, bufs: Vec::new(), background: None, layers: None, frame_cb: None, hits: Vec::new() }
     }
 }
 
@@ -983,6 +1056,17 @@ fn local_now() -> (i32, i32) {
 }
 
 /// QML "dddd / MMMM d" in upper case.
+/// Second of the minute and the fraction of the current second.
+fn second_of_minute() -> (u32, f64) {
+    let frac = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as f64 / 1e9).unwrap_or(0.0);
+    (local_tm().tm_sec.clamp(0, 59) as u32, frac)
+}
+
+fn weekday_name() -> String {
+    const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    DAYS[local_tm().tm_wday.clamp(0, 6) as usize].to_string()
+}
+
 fn date_label() -> String {
     let tm = local_tm();
     const DAYS: [&str; 7] = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
@@ -1363,9 +1447,18 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
     let user_idx = users.iter().position(|u| *u == user).unwrap_or(users.len());
     let entering_user = mode == Mode::Greeter && user.is_empty();
     let now = Instant::now();
+    let look = Look::load(mode);
+    let theme = look.theme;
+    if mode == Mode::Lock && theme == LockTheme::Sentence {
+        // Off the event path: the history file can be large.
+        std::thread::spawn(|| loop {
+            NOTIFICATIONS.store(prism_common::notifications::NotificationStore::load().notifications.len(), Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(15));
+        });
+    }
     let mut app = App {
         mode,
-        look: Look::load(mode),
+        look,
         compositor: None,
         shm: None,
         seat: None,
@@ -1398,7 +1491,8 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
         text: String::new(),
         masks: Vec::new(),
         // The greeter starts in the field; the lock starts with the badge (QML).
-        password_mode: mode == Mode::Greeter,
+        // The other designs have no badge to open: they take the password right away.
+        password_mode: mode == Mode::Greeter || theme != LockTheme::Classic,
         box_anim: if mode == Mode::Greeter { (1.0, 1.0, now) } else { (0.0, 0.0, now) },
         last_input: now,
         checking: false,
@@ -1409,6 +1503,7 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
         closing: None,
         done: false,
         preview: mode == Mode::Greeter && std::env::var_os("GREETD_SOCK").is_none(),
+        fx: Fx::new(theme, now),
         mask_font_ok: font_installed(MASK_FONT),
         error: None,
         auth_tx,
@@ -1469,7 +1564,7 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
             break;
         }
         if let Some(t) = app.closing {
-            if ms_since(t) >= FADE_OUT_MS {
+            if ms_since(t) >= app.look.theme.closing_ms() {
                 break;
             }
         }
@@ -1491,10 +1586,17 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
                 app.set_password_mode(false);
             }
         }
+        if app.look.theme != LockTheme::Classic {
+            app.fx.sync(app.masks.len(), app.checking, app.failed_at, app.closing.is_some(), Instant::now());
+        }
         app.draw_all(&qh);
 
         queue.flush().map_err(|e| (1, format!("flush: {e}")))?;
         let mut timeout = if app.any_animating() { 8 } else { 1000 };
+        if app.look.theme == LockTheme::Horizon {
+            // Wake for the next step of the marker.
+            timeout = timeout.min(((1.0 - second_of_minute().1) * 1000.0) as i32 + 1);
+        }
         if let Some((_, at)) = app.repeat {
             timeout = timeout.min(at.saturating_duration_since(Instant::now()).as_millis() as i32 + 1);
         }

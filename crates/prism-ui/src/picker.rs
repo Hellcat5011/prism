@@ -9,7 +9,6 @@
 //! wl-copy (so it lands in clipboard history) and posts a notification; right-click, Escape
 //! or Q cancels.
 
-use std::process::{Command, Stdio};
 
 use wayland_client::protocol::{wl_buffer, wl_callback, wl_keyboard, wl_pointer, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
@@ -244,17 +243,14 @@ impl State {
         let hex = self.hex();
         self.done = true;
         std::thread::spawn(move || {
-            // Plain wl-copy (no self-copy lock): the colour belongs in clipboard history.
-            if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-                use std::io::Write;
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(hex.as_bytes());
-                }
-                let _ = child.wait();
+            // Kept in the clipboard history.
+            prism_common::wlclip::copy_text(&hex, true);
+            if let Ok(conn) = zbus::blocking::Connection::session() {
+                const D: &str = "org.freedesktop.Notifications";
+                let hints: std::collections::HashMap<&str, zbus::zvariant::Value> = std::collections::HashMap::new();
+                let body = format!("Copied {hex} to clipboard");
+                let _ = conn.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Prism", 0u32, "color-picker", "Color Picker", body.as_str(), Vec::<&str>::new(), hints, -1i32));
             }
-            let _ = Command::new("notify-send")
-                .args(["-a", "Prism", "-i", "color-picker", "Color Picker", &format!("Copied {hex} to clipboard")])
-                .status();
         });
     }
 

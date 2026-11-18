@@ -4,9 +4,10 @@ use std::os::fd::{AsFd, FromRawFd};
 use std::path::Path;
 use std::process::{exit, Command};
 
+mod background;
 mod caffeinate;
+mod displays;
 mod capture;
-mod clip_owner;
 mod cairo_backend;
 mod desktop;
 mod icons;
@@ -20,7 +21,10 @@ mod phone;
 mod phone_client;
 mod picker;
 mod rec_indicator;
+mod nm_agent;
+mod polkit_agent;
 mod power;
+mod prompt;
 mod portal;
 mod settings;
 mod shadow;
@@ -28,6 +32,7 @@ mod spotlight;
 mod toasts;
 mod status;
 mod svg;
+mod tray;
 mod ui;
 mod uikit;
 mod view;
@@ -87,6 +92,8 @@ enum UiMode {
     Power,
     Keybinds,
     Phone,
+    /// Password / secret prompt for the polkit and NetworkManager agents (prompt.rs).
+    Prompt,
 }
 
 struct UiState {
@@ -502,6 +509,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                     }
                     return;
                 }
+                if let Some(v) = state.wallpaper.as_mut() {
+                    let (redraw, over) = v.motion(px, py);
+                    state.set_cursor_shape(qh, if over { CursorShape::Pointer } else { CursorShape::Default });
+                    if redraw {
+                        state.render_and_commit(qh);
+                    }
+                    return;
+                }
 
                 state.set_cursor_shape(qh, CursorShape::Default);
             }
@@ -564,7 +579,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                             let is_modal = matches!(
                                 state.mode,
                                 UiMode::Launcher | UiMode::Spotlight | UiMode::Clipboard | UiMode::Emoji |
-                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone
+                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt
                             );
 
                             if is_modal && cw > 0 && ch > 0
@@ -1065,6 +1080,7 @@ impl UiState {
             }
             UiMode::Clipboard => centered(clipboard::CARD_W, clipboard::CARD_H),
             UiMode::Phone => centered(phone::CARD_W, phone::CARD_H),
+            UiMode::Prompt => centered(prompt::CARD_W, self.view.as_ref().and_then(|v| v.height()).unwrap_or(300.0)),
             UiMode::Power => {
                 let w = power::card_w(sw);
                 (((sw - w) / 2.0).round() as i32, ((sh - power::CARD_H) / 2.0).round() as i32, w as i32, power::CARD_H as i32)
@@ -1399,7 +1415,7 @@ impl UiState {
                         is_animating |= v.animating();
                     }
                 }
-                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Phone => {
+                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt => {
                     let card = self.design_card();
                     self.card_bounds = self.desired_card_rect();
                     let (style, theme) = (self.style.clone(), self.theme.clone());
@@ -1691,6 +1707,13 @@ fn parse_mode(args: &[String]) -> UiMode {
     }
 }
 
+/// Start or stop the agents that prompt through prompt.rs.
+fn apply_agents(cfg: &prism_common::Config) {
+    polkit_agent::apply(cfg);
+    nm_agent::apply(cfg);
+    tray::apply(cfg);
+}
+
 fn mode_from_name(name: &str) -> Option<UiMode> {
     Some(match name {
         "notif" | "notif-center" | "notifications" => UiMode::NotificationCenter,
@@ -1720,6 +1743,7 @@ fn mode_name(mode: &UiMode) -> &'static str {
         UiMode::Power => "power",
         UiMode::Keybinds => "keybinds",
         UiMode::Phone => "phone",
+        UiMode::Prompt => "prompt",
         UiMode::NotificationCenter => "notif-center",
         UiMode::Osd { .. } => "osd",
         UiMode::Desktop => "desktop",
@@ -1777,7 +1801,7 @@ impl Overlay {
                 &style,
             )),
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Phone => Some(Transition::enter(Motion::Scale, &style)),
+            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
         // Opened from a desktop shortcut: grow out of the button (needs a scalable surface).
@@ -1885,6 +1909,10 @@ impl Overlay {
             UiMode::Emoji => state.view = Some(Box::new(emoji::EmojiView::new(res.emojis()))),
             UiMode::Keybinds => state.view = Some(Box::new(keybinds::KeybindsView::new(waker.clone()))),
             UiMode::Phone => state.view = Some(Box::new(phone::PhoneView::new(waker.clone()))),
+            UiMode::Prompt => match prompt::next_view() {
+                Some(v) => state.view = Some(Box::new(v)),
+                None => return Err("no prompt queued".into()),
+            },
             _ => {}
         }
         if matches!(state.mode, UiMode::Settings) {
@@ -1895,7 +1923,7 @@ impl Overlay {
         let uses_card_surface = matches!(
             state.mode,
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone
+                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt
         );
         if uses_card_surface {
             // The scrim's configure reports the logical screen size the card is laid out in. It
@@ -1985,6 +2013,10 @@ impl Overlay {
         self.state.exit_requested = true;
     }
 
+    fn is_prompt(&self) -> bool {
+        matches!(self.state.mode, UiMode::Prompt)
+    }
+
     /// Timers, background data and the exit transition. Returns the next deadline (ms, -1 =
     /// none) or None once the overlay has finished and should be torn down.
     fn tick(&mut self) -> Option<i32> {
@@ -2027,6 +2059,9 @@ impl Overlay {
         }
         if state.view.as_mut().map(|v| v.poll()).unwrap_or(false) {
             state.render_and_commit(&qh);
+        }
+        if state.view.as_ref().is_some_and(|v| v.wants_close()) {
+            state.exit_requested = true;
         }
 
         let mut timeout_ms: i32 = -1;
@@ -2265,9 +2300,13 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut picker: Option<picker::Picker> = None;
     let mut shooter: Option<capture::Overlay> = None;
     let mut indicator: Option<rec_indicator::Indicator> = None;
-    // Clipboard owner for screenshots (ext-data-control), made on first use.
-    let mut clip: Option<clip_owner::ClipOwner> = None;
+    // Built-in wallpaper daemon (Settings > Wallpaper > Wallpaper Daemon = Built-in).
+    let mut background = if daemon { background::Background::new(&conn, &globals, waker.clone()) } else { None };
+    let mut config_seq = desktop.as_ref().map(|d| d.config_seq()).unwrap_or(0);
+    let mut keep_desktop = prism_common::Config::load().wallpaper_keep_desktop;
     if daemon {
+        prompt::init(waker.clone());
+        apply_agents(&prism_common::Config::load());
         let mut p = Preloader::new(waker.clone());
         p.start();
         res.preload = Some(p);
@@ -2277,10 +2316,23 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     }
     loop {
         res.take_preloaded();
+        // Agent prompts (polkit, network secrets): one card at a time, above everything.
+        if prompt::pending() && !overlays.iter().any(|o| o.is_prompt()) {
+            match Overlay::open(&conn, &globals, UiMode::Prompt, &mut res, &waker) {
+                Ok(o) => overlays.push(o),
+                Err(e) => eprintln!("[prism-ui] cannot open prompt: {e}"),
+            }
+        }
         // 1. Commands
         for cmd in cmd_rx.try_iter() {
             if let prism_common::UiCommand::Caffeinate(on) = cmd {
                 caffeinate.set(on, &globals);
+                continue;
+            }
+            if let prism_common::UiCommand::Wallpaper(path) = &cmd {
+                if let Some(b) = background.as_mut() {
+                    b.show(path);
+                }
                 continue;
             }
             if let prism_common::UiCommand::ColorPicker(what) = &cmd {
@@ -2328,10 +2380,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                     A::Screen { save, clipboard } => {
                         let mut cfg = cfg.clone();
                         cfg.capture_copy_to_clipboard &= *clipboard;
-                        if clip.is_none() && cfg.capture_copy_to_clipboard {
-                            clip = globals.seat.as_ref().and_then(|s| clip_owner::ClipOwner::new(&conn, s));
-                        }
-                        let r = capture::capture_screen_now(&conn, None, cfg.capture_cursor).and_then(|img| capture::finish(img, &cfg, *save, clip.as_mut()));
+                        let r = capture::capture_screen_now(&conn, None, cfg.capture_cursor).and_then(|img| capture::finish(img, &cfg, *save));
                         if let Err(e) = r {
                             eprintln!("[prism-ui] screenshot: {e}");
                         }
@@ -2406,10 +2455,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 });
             }
             if let capture::Outcome::Image(img) = outcome {
-                if clip.is_none() && cfg.capture_copy_to_clipboard {
-                    clip = globals.seat.as_ref().and_then(|s| clip_owner::ClipOwner::new(&conn, s));
-                }
-                if let Err(e) = capture::finish(img, &cfg, true, clip.as_mut()) {
+                if let Err(e) = capture::finish(img, &cfg, true) {
                     eprintln!("[prism-ui] screenshot: {e}");
                 }
             }
@@ -2456,6 +2502,20 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             ok &= t.dispatch();
         }
         ok &= caffeinate.dispatch();
+        if let Some(b) = background.as_mut() {
+            ok &= b.dispatch();
+            if let Some(seq) = desktop.as_ref().map(|d| d.config_seq()).filter(|s| *s != config_seq) {
+                config_seq = seq;
+                let cfg = prism_common::Config::load();
+                b.apply_config(&cfg);
+                apply_agents(&cfg);
+                if cfg.wallpaper_keep_desktop != keep_desktop {
+                    keep_desktop = cfg.wallpaper_keep_desktop;
+                    wallpaper::reapply_filter(&cfg);
+                }
+                ok &= b.dispatch();
+            }
+        }
         if let Some(p) = picker.as_mut() {
             ok &= p.dispatch();
         }
@@ -2464,9 +2524,6 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         }
         if let Some(i) = indicator.as_mut() {
             ok &= i.dispatch();
-        }
-        if let Some(c) = clip.as_mut() {
-            ok &= c.dispatch();
         }
         if !ok {
             eprintln!("[prism-ui] Wayland connection error (protocol error: {:?})", conn.protocol_error());
@@ -2516,6 +2573,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             t.dispatch();
         }
         caffeinate.dispatch();
+        if let Some(b) = background.as_mut() {
+            b.dispatch();
+        }
         if let Some(p) = picker.as_mut() {
             p.dispatch();
         }
@@ -2524,9 +2584,6 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         }
         if let Some(i) = indicator.as_mut() {
             i.dispatch();
-        }
-        if let Some(c) = clip.as_mut() {
-            c.dispatch();
         }
     }
     for o in overlays.drain(..) {
@@ -2601,7 +2658,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

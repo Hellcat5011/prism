@@ -7,15 +7,38 @@ use crate::tls::{self, Tls};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, TryRecvError};
 use std::time::{Duration, Instant};
+
+/// Connections still in their handshake. Anyone on the LAN can start these, so their number
+/// (each is a thread) is limited; a link gives its slot back once it is up.
+static HANDSHAKES: AtomicUsize = AtomicUsize::new(0);
+const MAX_HANDSHAKES: usize = 16;
+
+pub struct Slot;
+
+impl Slot {
+    pub fn take() -> Option<Slot> {
+        // The slot is built first: its Drop gives the count back when over the limit.
+        let slot = Slot;
+        (HANDSHAKES.fetch_add(1, Ordering::SeqCst) < MAX_HANDSHAKES).then_some(slot)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        HANDSHAKES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// We open the TCP connection after the peer's UDP identity (`peer`): send our identity in plain
 /// text, act as the TLS server, and send our identity again inside TLS. The peer (TLS client)
 /// sends nothing more about itself; its UDP identity is what we go by (kdeconnectd 26.08 does
 /// the same).
-pub fn connect_out(shared: Shared, addr: SocketAddr, peer: PeerInfo) {
-    let run = || -> io::Result<()> {
+pub fn connect_out(shared: Shared, addr: SocketAddr, peer: PeerInfo, slot: Slot) {
+    let mut slot = Some(slot);
+    let mut run = || -> io::Result<()> {
         let mut sock = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
         tls::keepalive(&sock);
         let ident = shared.lock().unwrap().identity_packet(true);
@@ -24,6 +47,7 @@ pub fn connect_out(shared: Shared, addr: SocketAddr, peer: PeerInfo) {
         let mut t = Tls::handshake(sock, &cfg, true)?;
         let ident = shared.lock().unwrap().identity_packet(false);
         t.write_all(ident.to_line().as_bytes())?;
+        drop(slot.take());
         run_secure(&shared, t, addr, peer.clone(), false)
     };
     if let Err(e) = run() {
@@ -33,7 +57,8 @@ pub fn connect_out(shared: Shared, addr: SocketAddr, peer: PeerInfo) {
 
 /// The peer opened the TCP connection: read its plain-text identity, act as the TLS client, and
 /// take the identity it sends again inside TLS (falling back to the plain-text one).
-pub fn accept_in(shared: Shared, mut sock: TcpStream) {
+pub fn accept_in(shared: Shared, mut sock: TcpStream, slot: Slot) {
+    let mut slot = Some(slot);
     let addr = match sock.peer_addr() {
         Ok(a) => a,
         Err(_) => return,
@@ -49,6 +74,7 @@ pub fn accept_in(shared: Shared, mut sock: TcpStream) {
         }
         let cfg = shared.lock().unwrap().tls.clone();
         let t = Tls::handshake(sock.try_clone()?, &cfg, false)?;
+        drop(slot.take());
         run_secure(&shared, t, addr, info, true)
     };
     if let Err(e) = run() {

@@ -240,10 +240,10 @@ fn save_image_data(v: &OwnedValue) -> Option<String> {
     if w <= 0 || h <= 0 || w > 4096 || h > 4096 || bits != 8 || !(3..=4).contains(&channels) || (alpha && channels != 4) {
         return None;
     }
-    let (w, h, stride, ch) = (w as usize, h as usize, stride as usize, channels as usize);
-    if data.len() < stride * (h - 1) + w * ch {
+    if !image_fits(w, h, stride, channels, data.len()) {
         return None;
     }
+    let (w, h, stride, ch) = (w as usize, h as usize, stride as usize, channels as usize);
     let mut rgba = Vec::with_capacity(w * h * 4);
     for y in 0..h {
         let row = &data[y * stride..y * stride + w * ch];
@@ -258,6 +258,13 @@ fn save_image_data(v: &OwnedValue) -> Option<String> {
     let path = dir.join(format!("{stamp}.png"));
     prism_common::clipboard::write_private(&path, &encode_png(w as u32, h as u32, &rgba)).ok()?;
     Some(path.to_string_lossy().into_owned())
+}
+
+/// Do rows of `stride` bytes hold `w` pixels each, and `h` of them fit in `len` bytes? The values
+/// come from any client on the session bus. `w`, `h` and `channels` are already positive.
+fn image_fits(w: i32, h: i32, stride: i32, channels: i32, len: usize) -> bool {
+    let row = w as i64 * channels as i64;
+    stride as i64 >= row && (stride as i64 * (h as i64 - 1) + row) as u64 <= len as u64
 }
 
 /// Keep the image cache small: the newest 200 files.
@@ -367,5 +374,20 @@ mod tests {
         assert_eq!(n.desktop_entry, "firefox");
         assert_eq!(n.actions, vec![("default".into(), "Open".into()), ("reply".into(), "Reply".into())]);
         assert_eq!(n.icon.as_deref(), Some("firefox"));
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::image_fits;
+
+    #[test]
+    fn rejects_rows_that_do_not_fit() {
+        assert!(image_fits(2, 2, 8, 4, 16));
+        assert!(image_fits(2, 2, 10, 4, 18));
+        assert!(!image_fits(2, 2, 8, 4, 15));
+        assert!(!image_fits(1, 2, -1, 3, 8));
+        assert!(!image_fits(4, 1, 3, 4, 1024));
+        assert!(!image_fits(4096, 4096, i32::MAX, 4, 1024));
     }
 }

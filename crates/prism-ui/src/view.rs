@@ -42,6 +42,10 @@ pub trait CardView {
     fn wake_in(&self) -> Option<std::time::Duration> {
         None
     }
+    /// The view finished on its own (background result): close the card.
+    fn wants_close(&self) -> bool {
+        false
+    }
     /// Card height when it is content-sized (spotlight); None for the fixed size.
     fn height(&self) -> Option<f64> {
         None

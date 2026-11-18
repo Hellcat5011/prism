@@ -4,9 +4,11 @@ use crate::font::{FONT_DATA, FONT_HEIGHT, FONT_WIDTH};
 pub fn hex_to_argb(hex: &str, alpha: u8) -> u32 {
     let clean = hex.trim_start_matches('#');
     if clean.len() >= 6 {
-        let r = u8::from_str_radix(&clean[0..2], 16).unwrap_or(0);
-        let g = u8::from_str_radix(&clean[2..4], 16).unwrap_or(0);
-        let b = u8::from_str_radix(&clean[4..6], 16).unwrap_or(0);
+        // By checked range: a malformed palette may hold non-ASCII text.
+        let byte = |at: usize| clean.get(at..at + 2).and_then(|h| u8::from_str_radix(h, 16).ok()).unwrap_or(0);
+        let r = byte(0);
+        let g = byte(2);
+        let b = byte(4);
         ((alpha as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
     } else {
         ((alpha as u32) << 24) | 0x00FFFFFF

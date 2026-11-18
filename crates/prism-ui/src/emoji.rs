@@ -121,14 +121,7 @@ fn is_terminal(app: &str) -> bool {
 /// and send the paste shortcut to it. Runs on its own thread after the picker has closed.
 fn copy_and_paste(emoji: String, target: Option<Target>, paste: bool) {
     std::thread::spawn(move || {
-        prism_common::clipboard::touch_self_copy_lock();
-        if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(emoji.as_bytes());
-            }
-            let _ = child.wait();
-        }
+        prism_common::wlclip::copy_text(&emoji, false);
         let Some((id, app)) = target.filter(|_| paste) else { return };
         let lower = app.to_lowercase();
         if ["nautilus", "thunar", "org.kde.dolphin", "pcmanfm", "nemo"].iter().any(|b| lower.contains(b)) {

@@ -333,13 +333,28 @@ impl Capturer {
 
     fn wait(&mut self, done: impl Fn(&Pending) -> bool) -> Result<(), String> {
         let deadline = Instant::now() + TIMEOUT;
-        while !done(&self.state.pending) {
-            if Instant::now() > deadline {
+        loop {
+            self.queue.dispatch_pending(&mut self.state).map_err(|e| e.to_string())?;
+            if done(&self.state.pending) {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
                 return Err("capture timed out".into());
             }
-            self.queue.blocking_dispatch(&mut self.state).map_err(|e| e.to_string())?;
+            self.queue.flush().map_err(|e| e.to_string())?;
+            // Poll with the time left: a compositor that stays silent must not hang the caller.
+            let Some(guard) = self.queue.prepare_read() else { continue };
+            use std::os::fd::AsRawFd;
+            let mut fds = [libc::pollfd { fd: guard.connection_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            if unsafe { libc::poll(fds.as_mut_ptr(), 1, left.as_millis().min(i32::MAX as u128) as i32 + 1) } > 0 {
+                match guard.read() {
+                    Ok(_) => {}
+                    Err(wayland_client::backend::WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
         }
-        Ok(())
     }
 
     fn capture_source(&mut self, source: &src::ExtImageCaptureSourceV1, cursor: bool) -> Result<Image, String> {

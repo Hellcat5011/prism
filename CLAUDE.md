@@ -32,13 +32,19 @@ Workspace crates (`crates/`):
 * `prism-common`: shared library. `Config` (`~/.config/prism/config.json`, serde with per-field defaults), `Theme`
   (matugen palette, `~/.config/prism/colors.json` with fallback to the QML path), IPC types (`IpcCommand` for
   prism-ctl to prismd, `UiCommand` for prismd to prism-ui), and helpers that shell out (wpctl, brightnessctl/ddcutil,
-  playerctl, matugen; nmcli/bluetoothctl only for prism-ctl's network/bluetooth commands).
+  matugen; nmcli/bluetoothctl only for prism-ctl's network/bluetooth commands). `wlclip.rs` is the clipboard
+  (ext-data-control on its own thread and Wayland connection: copy, paste, watch; Prism's copies that must stay
+  out of the history offer `application/x-prism-self`), `media.rs` is MPRIS over zbus, `pixbuf.rs` resizes
+  images (gdk-pixbuf), `outputs.rs` is wlr-output-management (list outputs, apply `Config::outputs`).
 
 * `prismd`: background daemon. IPC socket `$XDG_RUNTIME_DIR/prism.sock`, idle monitor, gamma/blue light, clipboard
   watchers, notification store, and the notification server (`notifd.rs`: org.freedesktop.Notifications via
   zbus; actions, urgency, image hints; signals back to apps). The old Python bridge is gone (killed if running).
   It supervises one resident `prism-ui daemon` and forwards UI requests to it via `send_ui()` over
-  `$XDG_RUNTIME_DIR/prism-ui.sock`; it never spawns per-window processes.
+  `$XDG_RUNTIME_DIR/prism-ui.sock`; it never spawns per-window processes. Built-in replacements for helper
+  daemons, each behind a config switch: `mpd.rs` (MPRIS bridge for MPD, `org.mpris.MediaPlayer2.mpd`), `obex.rs`
+  (org.bluez.obex.Agent1: Bluetooth file receiving, asks through a notification), `displays.rs` (applies
+  `Config::outputs` at login; a later change reverts after 15 s unless kept).
 
 * `prism-ctl`: CLI that sends `IpcCommand`s to prismd (used by compositor keybinds).
 
@@ -61,7 +67,7 @@ Workspace crates (`crates/`):
   (xdg-output geometry) and windows (`ext_foreign_toplevel_list_v1`), one-shot and streaming capture with
   `ext_image_copy_capture_v1` (screencopy fallback for outputs), pixels as cairo ARGB32 at buffer size.
   prism-ui's `capture.rs` is the overlay (freeze, region/window/screen, Screenshot/Record), PNG via cairo,
-  clipboard via `clip_owner.rs` (ext-data-control, no wl-copy); `rec_indicator.rs` is the recording pill (a
+  clipboard via `prism_common::wlclip`; `rec_indicator.rs` is the recording pill (a
   compact dot when it would be in the picture). The colour picker uses it too (no grim).
 
 * `prism-rec`: recorder, started by prismd (`recording.rs`) only while recording, with a JSON `RecordJob`;
@@ -74,7 +80,10 @@ Workspace crates (`crates/`):
   surfaces are created right after `lock()`. prismd supervises it: a lock client that exits non-zero is
   restarted so the locked session always has a prompt (exit 3 = compositor cannot lock). Test locking only in
   a nested Mango (`mango -c <empty conf>`, then `WAYLAND_DISPLAY=wayland-1 prism-lock`), never on the live
-  session. `prism-lock --check-auth` checks PAM from a terminal. A nested Mango rewrites `WAYLAND_DISPLAY` in the systemd user environment and,
+  session. `prism-lock --check-auth` checks PAM from a terminal. Designs other than Classic are in `themes.rs` (Stencil, Horizon, Sentence, Aperture, Tide; `lockscreen_theme`, and
+  `greeter_theme` whose "mirror" is resolved into the greeter snapshot). They draw with cairo on wl_shm, so they run under cage too:
+  `PRISM_LOCK_THEME=tide cage -s -- prism-lock --greeter` is a preview (typing `unlock` plays the unlock animation), and
+  `PRISM_LOCK_RENDER_DIR=<dir> cargo test --release -p prism-lock every_design -- --nocapture` writes each state as PNG with frame times. A nested Mango rewrites `WAYLAND_DISPLAY` in the systemd user environment and,
   when it exits, stops `mango-session.target` (and with it prismd). Afterwards run
   `systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP && systemctl --user start mango-session.target prismd`.
 
@@ -90,11 +99,20 @@ Wayland fd, a `Waker` pipe (worker threads wake the loop) and the desktop's inot
 The modal cards implement `view::CardView` (`launcher.rs`, `spotlight.rs`, `power.rs`, `clipboard.rs`,
 `emoji.rs`, `keybinds.rs`) and are held as `UiState::view`; `settings.rs` (`SettingsView`, rows bound to
 `Config` via fn getters/setters, live apply + undo), `wallpaper.rs` and `nc/` (notification center;
-`nc/model.rs` holds the network/Bluetooth state, `nc/dbus.rs` fills it from NetworkManager and BlueZ over the
-system bus, with a pairing agent and signal-driven refreshes) have their own fields. `launcher.rs` also has
+`nc/model.rs` holds the network/Bluetooth/VPN state, `nc/dbus.rs` fills it from NetworkManager and BlueZ over the
+system bus, with a pairing agent and signal-driven refreshes and a cache of connection profiles; tabs are ids
+`TAB_*`, the shown tiles come from `nc_tiles`) have their own fields. `launcher.rs` also has
 the shared `Query` text input. Add new screens as views, not as `UiMode` match arms.
 
-Not overlays: `osd.rs` (UiState view whose layer surface slides by margin), `toasts.rs` (notification popups:
+Agents that need a password (`polkit_agent.rs`: polkit AuthenticationAgent, checks via
+`/run/polkit/agent-helper.socket`; `nm_agent.rs`: NetworkManager SecretAgent) queue requests in `prompt.rs`; the run
+loop opens them one at a time as `UiMode::Prompt` cards (answers and verdicts over channels, Retry keeps the card
+open). `displays.rs` caches the output list for Settings > Display. `tray.rs` serves the Network and Bluetooth
+StatusNotifierItems with com.canonical.dbusmenu menus built on open.
+
+Not overlays: `background.rs` (built-in wallpaper daemon: a `prism-background` Background-layer surface per output,
+images decoded off-thread at the output's pixel size, spring transitions; between transitions only the shown
+buffer is kept), `osd.rs` (UiState view whose layer surface slides by margin), `toasts.rs` (notification popups:
 own event queue, one surface per popup; action buttons sized by `ui::fit_widths`; notifications with
 `preview` (hint `x-prism-preview`, sent by screenshots) show their image large above the actions, here and in the
 NC), `caffeinate.rs` (idle inhibitor), `svg.rs` (SVG path icons, the QML
@@ -156,7 +174,7 @@ system tray (acts as `org.kde.StatusNotifierWatcher`, dbusmenu context menus). `
 * Mango layer rules live in the user's `~/.config/mango/user/wrules.conf` (template in `deploy/prism-mango.conf`).
   Every matching `layer_rule` overwrites all options, `layer_name` is an unanchored regex, and options need explicit
   values (`no_blur:1`). Prism namespaces: prism-modal, prism-notification, prism-osd (blurred, with `-solid`
-  twins), prism-scrim, prism-desktop, prism-desktop-edit, prism-wallpaper (not blurred).
+  twins), prism-scrim, prism-desktop, prism-desktop-edit, prism-wallpaper, prism-background (not blurred).
 
 * Matugen writes the palette via `[templates.prism-rust]` in `~/.config/matugen/config.toml`
   (template copy: `deploy/matugen/prism-colors.json`).

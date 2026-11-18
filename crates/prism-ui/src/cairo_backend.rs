@@ -38,6 +38,7 @@ extern "C" {
     pub fn cairo_create(target: *mut CairoSurface) -> *mut Cairo;
     pub fn cairo_destroy(cr: *mut Cairo);
     pub fn cairo_surface_destroy(surface: *mut CairoSurface);
+    pub fn cairo_surface_reference(surface: *mut CairoSurface) -> *mut CairoSurface;
 
     pub fn cairo_set_source_rgba(cr: *mut Cairo, r: f64, g: f64, b: f64, a: f64);
     pub fn cairo_set_operator(cr: *mut Cairo, op: i32);
@@ -271,6 +272,12 @@ pub fn cached_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option
     }
 }
 
+/// `cached_image` for callers that keep the surface across draws: the result stays valid when
+/// the cache is cleared, and the caller releases it with `cairo_surface_destroy`.
+pub fn owned_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option<*mut CairoSurface> {
+    cached_image(path, w, h, preserve_aspect).map(|s| unsafe { cairo_surface_reference(s) })
+}
+
 /// Decode `path` scaled to *cover* (w, h) keeping its aspect ratio (QML PreserveAspectCrop);
 /// the result is at least as large as the box and is meant to be drawn centred and clipped.
 pub fn cached_image_cover(path: &str, w: i32, h: i32) -> Option<*mut CairoSurface> {
@@ -411,9 +418,11 @@ fn apply_global_font(spec: &str) -> String {
 pub fn hex_to_rgba(hex: &str, alpha: f64) -> (f64, f64, f64, f64) {
     let clean = hex.trim_start_matches('#');
     if clean.len() >= 6 {
-        let r = u8::from_str_radix(&clean[0..2], 16).unwrap_or(0) as f64 / 255.0;
-        let g = u8::from_str_radix(&clean[2..4], 16).unwrap_or(0) as f64 / 255.0;
-        let b = u8::from_str_radix(&clean[4..6], 16).unwrap_or(0) as f64 / 255.0;
+        // By checked range: a malformed palette may hold non-ASCII text.
+        let byte = |at: usize| clean.get(at..at + 2).and_then(|h| u8::from_str_radix(h, 16).ok()).unwrap_or(0);
+        let r = byte(0) as f64 / 255.0;
+        let g = byte(2) as f64 / 255.0;
+        let b = byte(4) as f64 / 255.0;
         (r, g, b, alpha)
     } else {
         (1.0, 1.0, 1.0, alpha)
@@ -1105,5 +1114,19 @@ mod tests {
         insert_decoded(d);
         let hit = cached_image(path, 32, 32, true).expect("cache hit");
         assert!(image_size(hit).0 <= 32.0);
+    }
+
+    #[test]
+    fn owned_image_outlives_the_cache() {
+        extern "C" {
+            fn cairo_surface_get_reference_count(surface: *mut CairoSurface) -> u32;
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/settings-gear.svg");
+        let img = owned_image(path, 48, 48, true).expect("decode");
+        unsafe { assert_eq!(cairo_surface_get_reference_count(img), 2) };
+        IMAGE_CACHE.with(|c| c.borrow_mut().clear());
+        unsafe { assert_eq!(cairo_surface_get_reference_count(img), 1) };
+        assert!(image_size(img).0 <= 48.0);
+        unsafe { cairo_surface_destroy(img) };
     }
 }

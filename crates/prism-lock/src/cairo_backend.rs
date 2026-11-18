@@ -70,6 +70,10 @@ extern "C" {
     pub fn pango_cairo_show_layout(cr: *mut Cairo, layout: *mut PangoLayout);
 
     pub fn g_object_unref(object: *mut c_void);
+    pub fn pango_cairo_layout_path(cr: *mut Cairo, layout: *mut PangoLayout);
+    pub fn cairo_in_fill(cr: *mut Cairo, x: f64, y: f64) -> i32;
+    pub fn cairo_pattern_create_radial(cx0: f64, cy0: f64, radius0: f64, cx1: f64, cy1: f64, radius1: f64) -> *mut c_void;
+    pub fn cairo_surface_write_to_png(surface: *mut CairoSurface, filename: *const std::ffi::c_char) -> i32;
     pub fn gdk_pixbuf_new_from_file_at_scale(
         filename: *const c_char,
         width: i32,
@@ -274,9 +278,11 @@ fn apply_global_font(spec: &str) -> String {
 pub fn hex_to_rgba(hex: &str, alpha: f64) -> (f64, f64, f64, f64) {
     let clean = hex.trim_start_matches('#');
     if clean.len() >= 6 {
-        let r = u8::from_str_radix(&clean[0..2], 16).unwrap_or(0) as f64 / 255.0;
-        let g = u8::from_str_radix(&clean[2..4], 16).unwrap_or(0) as f64 / 255.0;
-        let b = u8::from_str_radix(&clean[4..6], 16).unwrap_or(0) as f64 / 255.0;
+        // By checked range: a malformed palette may hold non-ASCII text.
+        let byte = |at: usize| clean.get(at..at + 2).and_then(|h| u8::from_str_radix(h, 16).ok()).unwrap_or(0);
+        let r = byte(0) as f64 / 255.0;
+        let g = byte(2) as f64 / 255.0;
+        let b = byte(4) as f64 / 255.0;
         (r, g, b, alpha)
     } else {
         (1.0, 1.0, 1.0, alpha)
@@ -381,6 +387,23 @@ pub fn draw_scrollbar_thumb(
     let progress = (scroll_offset / max_scroll).clamp(0.0, 1.0);
     let thumb_y = track_y + progress * (track_h - thumb_h);
     fill_rounded_rect(cr, track_x, thumb_y, thumb_w, thumb_h, thumb_w / 2.0, color);
+}
+
+/// Adds the outline of `text` to the current path, at the current point.
+pub fn text_path(cr: *mut Cairo, text: &str, font_spec: &str) {
+    unsafe {
+        let layout = pango_cairo_create_layout(cr);
+        if let Ok(c_text) = CString::new(text) {
+            pango_layout_set_text(layout, c_text.as_ptr(), -1);
+        }
+        if let Ok(c_font) = CString::new(apply_global_font(font_spec)) {
+            let desc = pango_font_description_from_string(c_font.as_ptr());
+            pango_layout_set_font_description(layout, desc);
+            pango_font_description_free(desc);
+        }
+        pango_cairo_layout_path(cr, layout);
+        g_object_unref(layout as *mut c_void);
+    }
 }
 
 pub fn draw_pango_text(

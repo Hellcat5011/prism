@@ -78,6 +78,8 @@ pub enum UiCommand {
     Capture(CaptureAction),
     /// Recording state for the indicator: Some while prism-rec runs, None when it stopped.
     Recording(Option<crate::capture::RecordStatus>),
+    /// Show this wallpaper on the built-in background.
+    Wallpaper(std::path::PathBuf),
 }
 
 /// Messages sent to the running notification popup overlay.
@@ -120,6 +122,8 @@ pub enum IpcCommand {
 
     #[serde(rename = "wallpaper")]
     Wallpaper(WallpaperAction),
+    /// Send files to a Bluetooth device over OBEX Object Push (prismd, obexd).
+    BluetoothSend { address: String, files: Vec<PathBuf> },
 
     #[serde(rename = "media")]
     Media(MediaAction),
@@ -235,6 +239,8 @@ pub enum ClipboardAction {
     Get(usize),
     Add(String),
     AddImage(Vec<u8>),
+    /// Put history entry `n` back on the clipboard (prismd owns it, so prism-ctl may exit).
+    Copy(usize),
     Clear,
 }
 

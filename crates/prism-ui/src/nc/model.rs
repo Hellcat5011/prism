@@ -64,6 +64,33 @@ pub struct NetState {
     pub connecting: Option<String>,
     /// (ssid, message) of the last failed connection.
     pub error: Option<(String, String)>,
+    /// VPN and WireGuard connections, active first, then by name.
+    pub vpns: Vec<Vpn>,
+    /// Settings paths of VPNs being switched on or off.
+    pub vpn_busy: Vec<String>,
+    /// Result of the last VPN action or import, (text, is error).
+    pub vpn_msg: Option<(String, bool)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum VpnState {
+    #[default]
+    Off,
+    Connecting,
+    On,
+    Disconnecting,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Vpn {
+    pub name: String,
+    /// Settings connection path.
+    pub path: String,
+    /// "openvpn", "wireguard", ...
+    pub kind: String,
+    pub state: VpnState,
+    /// Active connection path while on.
+    pub active: Option<String>,
 }
 
 impl NetState {

@@ -64,12 +64,28 @@ pub struct Config {
 
     #[serde(default = "default_true")]
     pub show_lockscreen_session_controls: bool,
+    /// Lock screen design: classic, stencil, horizon, sentence, aperture or tide.
+    #[serde(default = "default_lockscreen_theme")]
+    pub lockscreen_theme: String,
+    /// Greeter design: one of the lock screen designs, or "mirror" to follow the lock screen.
+    #[serde(default = "default_greeter_theme")]
+    pub greeter_theme: String,
 
+    /// "prism" (built-in, prism-ui draws the background), "awww" or "swww".
     #[serde(default = "default_wallpaper_daemon")]
     pub wallpaper_daemon: String,
+    /// Built-in daemon transition: random, fade, wipe, grow or none.
+    #[serde(default = "default_wallpaper_transition")]
+    pub wallpaper_transition: String,
 
     #[serde(default = "default_wallpaper_dir")]
     pub wallpaper_dir: String,
+    /// Applying a wallpaper offers the colour filters first.
+    #[serde(default = "default_wallpaper_filters_enabled")]
+    pub wallpaper_filters_enabled: bool,
+    /// Filters reach the lock screen, greeter and previews, not the desktop wallpaper.
+    #[serde(default)]
+    pub wallpaper_keep_desktop: bool,
 
     #[serde(default = "default_matugen_mode")]
     pub matugen_mode: String,
@@ -213,6 +229,65 @@ pub struct Config {
     /// Last selection kind in the capture overlay: "region", "window" or "screen".
     #[serde(default = "default_capture_mode")]
     pub capture_last_mode: String,
+
+    // ── Services (built-in replacements for helper daemons) ──
+    /// Serve MPD as an MPRIS player (org.mpris.MediaPlayer2.mpd), replacing mpd-mpris.
+    #[serde(default)]
+    pub mpd_mpris_enabled: bool,
+    /// MPD host name or socket path (a path starts with '/').
+    #[serde(default = "default_mpd_host")]
+    pub mpd_host: String,
+    #[serde(default = "default_mpd_port")]
+    pub mpd_port: u16,
+    #[serde(default)]
+    pub mpd_password: String,
+    /// Accept files pushed over Bluetooth (OBEX agent for obexd), replacing blueman's.
+    #[serde(default)]
+    pub bluetooth_receive_files: bool,
+    #[serde(default = "default_download_dir")]
+    pub bluetooth_download_dir: String,
+    /// prism-ui is the polkit authentication agent (replaces polkit-gnome).
+    #[serde(default)]
+    pub polkit_agent_enabled: bool,
+    /// prism-ui is a NetworkManager secret agent: asks for Wi-Fi / VPN passwords (replaces nm-applet).
+    #[serde(default)]
+    pub network_agent_enabled: bool,
+
+    // ── Displays (wlr-output-management; prismd applies these at login and on change) ──
+    #[serde(default)]
+    pub outputs: Vec<crate::outputs::OutputSettings>,
+    /// The output Settings > Display edits (empty: the first).
+    #[serde(default)]
+    pub display_output: String,
+
+    /// Control Centre tiles shown: network, bluetooth, vpn, notifications, caffeine.
+    #[serde(default = "default_nc_tiles")]
+    pub nc_tiles: Vec<String>,
+    /// The secret agent stores what is typed in VPN prompts in the connection.
+    #[serde(default)]
+    pub vpn_save_username: bool,
+    #[serde(default)]
+    pub vpn_save_password: bool,
+    /// Tray icons served by prism-ui (StatusNotifierItem).
+    #[serde(default)]
+    pub network_tray: bool,
+    #[serde(default)]
+    pub bluetooth_tray: bool,
+}
+
+pub fn default_nc_tiles() -> Vec<String> {
+    ["network", "bluetooth", "vpn", "notifications", "caffeine"].iter().map(|s| s.to_string()).collect()
+}
+
+fn default_download_dir() -> String {
+    "~/Downloads".to_string()
+}
+
+fn default_mpd_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_mpd_port() -> u16 {
+    6600
 }
 
 fn default_screenshot_dir() -> String {
@@ -496,8 +571,12 @@ fn default_night_start() -> String { "20:00".to_string() }
 fn default_night_end() -> String { "06:00".to_string() }
 fn default_day_temp() -> u32 { 6500 }
 fn default_night_temp() -> u32 { 4500 }
-fn default_wallpaper_daemon() -> String { "awww".to_string() }
+fn default_lockscreen_theme() -> String { "classic".to_string() }
+fn default_greeter_theme() -> String { "mirror".to_string() }
+fn default_wallpaper_daemon() -> String { "prism".to_string() }
+fn default_wallpaper_transition() -> String { "random".to_string() }
 fn default_wallpaper_dir() -> String { "~/Pictures/Wallpapers".to_string() }
+fn default_wallpaper_filters_enabled() -> bool { true }
 fn default_matugen_mode() -> String { "smart".to_string() }
 fn default_matugen_scheme() -> String { "scheme-smart".to_string() }
 fn default_max_results() -> u32 { 20 }
@@ -527,8 +606,13 @@ impl Default for Config {
             remember_last_user: default_true(),
             default_session: default_session(),
             show_lockscreen_session_controls: default_true(),
+            lockscreen_theme: default_lockscreen_theme(),
+            greeter_theme: default_greeter_theme(),
             wallpaper_daemon: default_wallpaper_daemon(),
+            wallpaper_transition: default_wallpaper_transition(),
             wallpaper_dir: default_wallpaper_dir(),
+            wallpaper_filters_enabled: default_wallpaper_filters_enabled(),
+            wallpaper_keep_desktop: false,
             matugen_mode: default_matugen_mode(),
             matugen_scheme: default_matugen_scheme(),
             search_include_hidden: false,
@@ -580,6 +664,21 @@ impl Default for Config {
             capture_audio_desktop: false,
             capture_audio_mic: false,
             capture_last_mode: default_capture_mode(),
+            mpd_mpris_enabled: false,
+            mpd_host: default_mpd_host(),
+            mpd_port: default_mpd_port(),
+            mpd_password: String::new(),
+            bluetooth_receive_files: false,
+            bluetooth_download_dir: default_download_dir(),
+            polkit_agent_enabled: false,
+            network_agent_enabled: false,
+            outputs: Vec::new(),
+            display_output: String::new(),
+            nc_tiles: default_nc_tiles(),
+            vpn_save_username: false,
+            vpn_save_password: false,
+            network_tray: false,
+            bluetooth_tray: false,
         }
     }
 }
@@ -611,16 +710,22 @@ impl Config {
         }
     }
 
+    /// What the greeter (another user, no access to this config) reads from its state directory.
+    fn greeter_snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "lockscreenAlignment": self.lockscreen_alignment,
+            "theme": if self.greeter_theme == "mirror" { &self.lockscreen_theme } else { &self.greeter_theme },
+            "rememberLastUser": self.remember_last_user,
+            "defaultSession": self.default_session,
+        })
+    }
+
     pub fn sync_greeter_snapshot(&self) {
         let state_dirs = [
             "/var/lib/greetd/prism",
             "/var/lib/greetd/quickshell-greeter",
         ];
-        let snapshot = serde_json::json!({
-            "lockscreenAlignment": self.lockscreen_alignment,
-            "rememberLastUser": self.remember_last_user,
-            "defaultSession": self.default_session,
-        });
+        let snapshot = self.greeter_snapshot();
         for dir_str in &state_dirs {
             let dir = Path::new(dir_str);
             if dir.is_dir() {
@@ -675,6 +780,16 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn greeter_theme_mirrors_the_lock_screen_by_default() {
+        let mut c = Config { lockscreen_theme: "tide".into(), ..Config::default() };
+        assert_eq!(c.greeter_theme, "mirror");
+        assert_eq!(c.greeter_snapshot()["theme"], "tide");
+        c.greeter_theme = "horizon".into();
+        assert_eq!(c.greeter_snapshot()["theme"], "horizon");
+    }
+
     use super::*;
 
     #[test]

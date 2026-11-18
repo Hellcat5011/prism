@@ -15,4 +15,5 @@ wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 xkbcommon = { version = "0.8", features = ["wayland"] }
 zbus = "5"
+blocking = "1"
 md5 = "0.7"

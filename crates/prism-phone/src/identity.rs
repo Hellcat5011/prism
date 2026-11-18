@@ -64,7 +64,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// A self-signed certificate for `id`: (certificate PEM, PKCS#8 key PEM).
-fn generate(id: &str) -> Result<(String, String), String> {
+pub(crate) fn generate(id: &str) -> Result<(String, String), String> {
     use rcgen::{CertificateParams, DnType, KeyPair, SerialNumber, PKCS_ECDSA_P256_SHA256};
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|e| e.to_string())?;
     let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;

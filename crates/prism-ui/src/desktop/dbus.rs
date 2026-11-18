@@ -868,8 +868,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(b);
+            // On bytes: what follows a stray '%' may be any UTF-8 text.
+            let digit = |b: u8| (b as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (digit(bytes[i + 1]), digit(bytes[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
             }
@@ -918,4 +920,18 @@ fn find_in_dir(name: &str, dir: &str) -> Option<PathBuf> {
         return None;
     }
     walk(Path::new(dir), name, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn percent_decoding_survives_stray_percent_signs() {
+        assert_eq!(percent_decode("/m/a%20b.png"), "/m/a b.png");
+        assert_eq!(percent_decode("/m/%E6%97%A5.png"), "/m/日.png");
+        assert_eq!(percent_decode("/m/100%日本.png"), "/m/100%日本.png");
+        assert_eq!(percent_decode("/m/%aé.png"), "/m/%aé.png");
+        assert_eq!(percent_decode("/m/100%"), "/m/100%");
+    }
 }

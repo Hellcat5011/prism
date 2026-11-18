@@ -19,8 +19,10 @@ pub fn bind_tcp() -> Option<TcpListener> {
 pub fn start_tcp(shared: Shared, listener: TcpListener) {
     thread::spawn(move || {
         for s in listener.incoming().flatten() {
+            // Over the limit the socket is simply closed; the peer tries again.
+            let Some(slot) = crate::link::Slot::take() else { continue };
             let sh = shared.clone();
-            thread::spawn(move || crate::link::accept_in(sh, s));
+            let _ = thread::Builder::new().spawn(move || crate::link::accept_in(sh, s, slot));
         }
     });
 }
@@ -35,8 +37,9 @@ pub fn start_udp(shared: Shared, port: u16) -> Result<(), String> {
             let Some(info) = std::str::from_utf8(&buf[..n]).ok().and_then(Packet::parse).and_then(|p| PeerInfo::from_identity(&p)) else { continue };
             let Some(port) = info.tcp_port else { continue };
             if shared.lock().unwrap().should_connect(&info, from.ip()) {
+                let Some(slot) = crate::link::Slot::take() else { continue };
                 let sh = shared.clone();
-                thread::spawn(move || crate::link::connect_out(sh, SocketAddr::new(from.ip(), port), info));
+                let _ = thread::Builder::new().spawn(move || crate::link::connect_out(sh, SocketAddr::new(from.ip(), port), info, slot));
             }
         }
     });

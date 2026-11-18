@@ -106,9 +106,6 @@ impl ClipboardView {
     fn copy(&self, i: usize) -> Effect {
         let Some(item) = self.results.get(i).and_then(|&k| self.all.get(k)).cloned() else { return Effect::None };
         std::thread::spawn(move || {
-            use std::io::Write;
-            use std::process::{Command, Stdio};
-            prism_common::clipboard::touch_self_copy_lock();
             if item.is_image {
                 let Some(path) = item.image_path.as_deref().map(|p| p.trim_start_matches("file://").to_string()) else { return };
                 // Only images from Prism's own cache (as QML).
@@ -116,14 +113,11 @@ impl ClipboardView {
                     eprintln!("[prism-ui] clipboard: refusing image outside the cache: {path}");
                     return;
                 }
-                if let Ok(f) = std::fs::File::open(&path) {
-                    let _ = Command::new("wl-copy").args(["-t", "image/png"]).stdin(f).status();
+                if let Ok(bytes) = std::fs::read(&path) {
+                    prism_common::wlclip::copy(&["image/png"], bytes, false);
                 }
-            } else if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(item.content.as_bytes());
-                }
-                let _ = child.wait();
+            } else {
+                prism_common::wlclip::copy_text(&item.content, false);
             }
         });
         Effect::Close

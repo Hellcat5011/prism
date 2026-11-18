@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 /// Represents active media player track metadata
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -67,59 +66,100 @@ impl MediaTrack {
     }
 }
 
-/// Query current media track from playerctl
-pub fn query_current_media() -> Option<MediaTrack> {
-    let output = Command::new("playerctl")
-        .args([
-            "metadata",
-            "--format",
-            "{{playerName}}|{{status}}|{{title}}|{{artist}}|{{album}}|{{mpris:artUrl}}|{{position}}|{{mpris:length}}",
-        ])
-        .output()
-        .ok()?;
+const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
+const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
+const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 
-    if !output.status.success() {
-        return None;
+fn session() -> Result<zbus::blocking::Connection, String> {
+    zbus::blocking::Connection::session().map_err(|e| format!("D-Bus session: {e}"))
+}
+
+fn player_proxy<'a>(conn: &zbus::blocking::Connection, bus: &'a str) -> Option<zbus::blocking::Proxy<'a>> {
+    zbus::blocking::Proxy::new(conn, bus.to_string(), MPRIS_PATH, PLAYER_IFACE).ok()
+}
+
+/// The player playerctl would pick: the first playing one, else the first listed.
+fn active_player(conn: &zbus::blocking::Connection) -> Option<String> {
+    let dbus = zbus::blocking::fdo::DBusProxy::new(conn).ok()?;
+    let mut names: Vec<String> = dbus.list_names().ok()?.into_iter().map(|n| n.to_string()).filter(|n| n.starts_with(MPRIS_PREFIX)).collect();
+    names.sort();
+    names
+        .iter()
+        .find(|n| player_proxy(conn, n).and_then(|p| p.get_property::<String>("PlaybackStatus").ok()).as_deref() == Some("Playing"))
+        .or(names.first())
+        .cloned()
+}
+
+fn meta_str(meta: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>, key: &str) -> String {
+    use zbus::zvariant::Value;
+    match meta.get(key).map(|v| &**v) {
+        Some(Value::Str(s)) => s.to_string(),
+        Some(Value::ObjectPath(p)) => p.to_string(),
+        Some(Value::Array(a)) => a.iter().filter_map(|v| if let Value::Str(s) = v { Some(s.to_string()) } else { None }).collect::<Vec<_>>().join(", "),
+        _ => String::new(),
     }
+}
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    MediaTrack::parse_formatted(&text)
+fn meta_num(meta: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>, key: &str) -> f64 {
+    use zbus::zvariant::Value;
+    match meta.get(key).map(|v| &**v) {
+        Some(Value::I64(n)) => *n as f64,
+        Some(Value::U64(n)) => *n as f64,
+        Some(Value::I32(n)) => *n as f64,
+        Some(Value::U32(n)) => *n as f64,
+        Some(Value::F64(n)) => *n,
+        _ => 0.0,
+    }
+}
+
+/// Query the current media track over MPRIS.
+pub fn query_current_media() -> Option<MediaTrack> {
+    let conn = session().ok()?;
+    let bus = active_player(&conn)?;
+    let p = player_proxy(&conn, &bus)?;
+    let meta: std::collections::HashMap<String, zbus::zvariant::OwnedValue> = p.get_property("Metadata").ok()?;
+    let status = p.get_property::<String>("PlaybackStatus").unwrap_or_else(|_| "Stopped".into());
+    let position = p.get_property::<i64>("Position").unwrap_or(0) as f64;
+    let art = meta_str(&meta, "mpris:artUrl");
+    // playerName as playerctl prints it: the bus name without the instance suffix.
+    let player = bus.trim_start_matches(MPRIS_PREFIX).split(".instance").next().unwrap_or("").to_string();
+    Some(MediaTrack {
+        player,
+        title: meta_str(&meta, "xesam:title"),
+        artist: meta_str(&meta, "xesam:artist"),
+        album: meta_str(&meta, "xesam:album"),
+        art_url: (!art.is_empty()).then_some(art),
+        status,
+        position_secs: position / 1_000_000.0,
+        length_secs: meta_num(&meta, "mpris:length") / 1_000_000.0,
+    })
+}
+
+fn call(method: &str) -> Result<(), String> {
+    let conn = session()?;
+    let bus = active_player(&conn).ok_or("No players found")?;
+    let p = player_proxy(&conn, &bus).ok_or("No players found")?;
+    p.call_method(method, &()).map(|_| ()).map_err(|e| format!("{method}: {e}"))
 }
 
 /// Send play-pause toggle command
 pub fn play_pause() -> Result<(), String> {
-    Command::new("playerctl")
-        .arg("play-pause")
-        .output()
-        .map_err(|e| format!("Failed to execute playerctl: {}", e))
-        .map(|_| ())
+    call("PlayPause")
 }
 
 /// Send next track command
 pub fn next() -> Result<(), String> {
-    Command::new("playerctl")
-        .arg("next")
-        .output()
-        .map_err(|e| format!("Failed to execute playerctl: {}", e))
-        .map(|_| ())
+    call("Next")
 }
 
 /// Send previous track command
 pub fn previous() -> Result<(), String> {
-    Command::new("playerctl")
-        .arg("previous")
-        .output()
-        .map_err(|e| format!("Failed to execute playerctl: {}", e))
-        .map(|_| ())
+    call("Previous")
 }
 
 /// Send stop command
 pub fn stop() -> Result<(), String> {
-    Command::new("playerctl")
-        .arg("stop")
-        .output()
-        .map_err(|e| format!("Failed to execute playerctl: {}", e))
-        .map(|_| ())
+    call("Stop")
 }
 
 #[cfg(test)]

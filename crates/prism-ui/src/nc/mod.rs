@@ -33,6 +33,23 @@ use model::{BtBusy, DetailRow, Net};
 use widgets::{alpha, font, text_size, text_v, Pal, Tween, RADIUS};
 
 pub const CARD_W: f64 = 400.0;
+
+/// Tab / tile ids. Pages: notifications, network, bluetooth, VPN; caffeine is a toggle tile.
+pub const TAB_NOTIFS: usize = 0;
+pub const TAB_NET: usize = 1;
+pub const TAB_BT: usize = 2;
+const TILE_CAFFEINE: usize = 3;
+pub const TAB_VPN: usize = 4;
+/// Tile order on screen (QML order, VPN after Bluetooth) and their config names.
+const TILE_ORDER: [(usize, &str); 5] = [(TAB_NET, "network"), (TAB_BT, "bluetooth"), (TAB_VPN, "vpn"), (TAB_NOTIFS, "notifications"), (TILE_CAFFEINE, "caffeine")];
+const PAGES: [usize; 4] = [TAB_NOTIFS, TAB_NET, TAB_BT, TAB_VPN];
+
+/// Tab the next Control Centre opens on (tray icons), e.g. TAB_NET.
+static OPEN_TAB: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
+pub fn open_on_tab(tab: usize) {
+    *OPEN_TAB.lock().unwrap() = Some(tab);
+}
 /// Card inset from the screen edges (OverlayWindow anchors.margins 20 inside a window with
 /// 10 px top/bottom margins, panelHeight = window height - 20).
 pub const CARD_MARGIN: f64 = 20.0;
@@ -124,6 +141,8 @@ macro_rules! hv {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Hit {
     Gear,
+    /// Cycles the power-profiles-daemon profile.
+    Profile,
     Tile(usize),
     Silent,
     ClearAll,
@@ -152,6 +171,9 @@ enum Hit {
     BtRefresh,
     BtForget(usize),
     BtAction(usize),
+    BtSend(usize),
+    VpnRow(usize),
+    VpnImport,
     Unnamed,
 }
 
@@ -172,8 +194,12 @@ pub struct NcView {
     status: StatusHandle,
     snap: StatusSnapshot,
     tab: usize,
-    page: [Tween; 3],
-    tile_w: [Tween; 4],
+    page: [Tween; 5],
+    tile_w: [Tween; 5],
+    /// Shown tiles (ids), from `nc_tiles`.
+    tiles: Vec<usize>,
+    /// VPN list filter (typed while the VPN page is open).
+    vpn_filter: String,
     hits: Vec<(Hit, Rect)>,
     hover: Option<Hit>,
     /// Hover fades of the hit targets (see `hv!`).
@@ -182,7 +208,7 @@ pub struct NcView {
     pressed: Option<Hit>,
     drag: Option<Drag>,
     swipe_dx: f64,
-    scroll: [crate::ui::Scroller; 3],
+    scroll: [crate::ui::Scroller; 5],
     /// Animation time scale from the last draw (None: animations off).
     time_scale: Option<f64>,
     expanded: Option<String>,
@@ -209,12 +235,21 @@ pub struct NcView {
 impl NcView {
     pub fn new(waker: Waker) -> Self {
         let status = status::spawn(waker);
-        let mut v = NcView {
+        let names = prism_common::Config::load().nc_tiles;
+        let tiles: Vec<usize> = TILE_ORDER.iter().filter(|(_, n)| names.iter().any(|x| x == n)).map(|(id, _)| *id).collect();
+        let pages: Vec<usize> = tiles.iter().copied().filter(|t| PAGES.contains(t)).collect();
+        let wanted = OPEN_TAB.lock().unwrap().take();
+        let tab = wanted.filter(|t| PAGES.contains(t)).or(pages.contains(&TAB_NOTIFS).then_some(TAB_NOTIFS)).or(pages.first().copied()).unwrap_or(TAB_NOTIFS);
+        let page: [Tween; 5] = std::array::from_fn(|i| Tween::new(if i == tab { 1.0 } else { 0.0 }));
+        let tile_w: [Tween; 5] = std::array::from_fn(|i| Tween::new(if i == tab && tiles.contains(&i) { f64::NAN } else if tiles.contains(&i) { 44.0 } else { 0.0 }));
+        NcView {
             status,
             snap: StatusSnapshot::default(),
-            tab: 0,
-            page: [Tween::new(1.0), Tween::new(0.0), Tween::new(0.0)],
-            tile_w: [Tween::new(44.0), Tween::new(44.0), Tween::new(0.0), Tween::new(44.0)],
+            tab,
+            page,
+            tile_w,
+            tiles,
+            vpn_filter: String::new(),
             hits: Vec::new(),
             hover: None,
             hover_fade: crate::ui::Fades::default(),
@@ -241,9 +276,7 @@ impl NcView {
             knobs: [Tween::new(0.0), Tween::new(0.0), Tween::new(0.0)],
             detail_values: Vec::new(),
             spin_start: Instant::now(),
-        };
-        v.tile_w[2] = Tween::new(f64::NAN); // set to the wide width on first draw
-        v
+        }
     }
 
     fn send(&self, r: StatusRequest) {
@@ -365,7 +398,7 @@ impl NcView {
         let mut y = card.y + PAD;
 
         // Header.
-        text_v(cr, x, y, 32.0, "Control Centre", &font(18.0, "Bold"), p.fg, Some(w - 120.0));
+        text_v(cr, x, y, 32.0, "Control Centre", &font(18.0, "Bold"), p.fg, Some(w - 160.0));
         let gear = Rect { x: x + w - 32.0, y, w: 32.0, h: 32.0 };
         let gh = self.hover == Some(Hit::Gear);
         if gh {
@@ -374,8 +407,25 @@ impl NcView {
         cb::stroke_circle(cr, gear.x + 16.0, gear.y + 16.0, 15.5, p.fg, 1.0);
         svg::icon(cr, "gear", gear.x + 7.0, gear.y + 7.0, 18.0, if gh { p.inv } else { p.fg }, false);
         self.hits.push((Hit::Gear, gear));
+        let mut right = gear.x - 8.0;
+        if let Some((active, _)) = &self.snap.power_profile {
+            let r = Rect { x: right - 32.0, y, w: 32.0, h: 32.0 };
+            let ph = self.hover == Some(Hit::Profile);
+            if ph {
+                cb::fill_circle(cr, r.x + 16.0, r.y + 16.0, 16.0, p.fg);
+            }
+            cb::stroke_circle(cr, r.x + 16.0, r.y + 16.0, 15.5, p.fg, 1.0);
+            let icon = match active.as_str() {
+                "power-saver" => "power-saver",
+                "performance" => "performance",
+                _ => "balanced",
+            };
+            svg::icon(cr, icon, r.x + 8.0, r.y + 8.0, 16.0, if ph { p.inv } else { p.fg }, false);
+            self.hits.push((Hit::Profile, r));
+            right = r.x - 8.0;
+        }
         if let Some(b) = &self.snap.battery {
-            widgets::battery(cr, gear.x - 8.0, y, b.percent, b.charging, &p);
+            widgets::battery(cr, right, y, b.percent, b.charging, &p);
         }
         y += 32.0 + 16.0;
 
@@ -389,7 +439,7 @@ impl NcView {
         let footer = Rect { x, y: card.y + card.h - PAD - footer_h, w, h: footer_h };
         let page = Rect { x, y, w, h: (footer.y - 16.0 - y).max(0.0) };
 
-        for tab in 0..3 {
+        for tab in PAGES {
             let a = self.page[tab].value();
             if a <= 0.001 {
                 continue;
@@ -403,8 +453,9 @@ impl NcView {
             }
             let hits_before = self.hits.len();
             match tab {
-                0 => self.draw_notifications(cr, page, &p),
-                1 => self.draw_network(cr, page, &p),
+                TAB_NOTIFS => self.draw_notifications(cr, page, &p),
+                TAB_NET => self.draw_network(cr, page, &p),
+                TAB_VPN => self.draw_vpn(cr, page, &p),
                 _ => self.draw_bluetooth(cr, page, &p),
             }
             if !interactive {
@@ -422,14 +473,29 @@ impl NcView {
 
     fn draw_tiles(&mut self, cr: *mut Cairo, x: f64, y: f64, w: f64, p: &Pal) {
         let gap = 8.0;
-        let wide = (w - 3.0 * 44.0 - 3.0 * gap).max(44.0);
-        for i in 0..4 {
-            let target = if i == self.tab && i < 3 { wide } else { 44.0 };
+        let n = self.tiles.len().max(1) as f64;
+        let has_wide = self.tiles.contains(&self.tab);
+        // One tile (the open page) is wide; the rest are 44 px icons. Hidden tiles shrink to 0.
+        let wide = if has_wide { (w - (n - 1.0) * (44.0 + gap)).max(44.0) } else { 44.0 };
+        for i in 0..5 {
+            let target = if !self.tiles.contains(&i) {
+                0.0
+            } else if i == self.tab && i != TILE_CAFFEINE {
+                wide
+            } else {
+                44.0
+            };
             if self.tile_w[i].target().is_nan() {
                 self.tile_w[i] = Tween::new(target);
             }
             self.tile_w[i].set(target, TILE_MS);
         }
+        let vpn_on = self.snap.net.vpns.iter().filter(|v| v.state == model::VpnState::On).count();
+        let vpn_title = match self.snap.net.vpns.iter().find(|v| v.state != model::VpnState::Off) {
+            Some(v) => v.name.clone(),
+            None => "VPN".into(),
+        };
+        let vpn_sub = if vpn_on > 0 { "Connected".to_string() } else if self.snap.net.vpns.iter().any(|v| v.state == model::VpnState::Connecting) { "Connecting\u{2026}".into() } else { "Off".into() };
         let net = &self.snap.net;
         let bt = &self.snap.bt;
         let bt_dev = bt.devices.iter().find(|d| d.connected);
@@ -454,13 +520,13 @@ impl NcView {
             "On".into()
         };
         let count_s = if count > 0 { count.to_string() } else { String::new() };
-        let specs = [
+        let mut specs = [
             widgets::TileSpec {
                 icon: if net.ethernet_connected { "ethernet" } else { "wifi" },
                 title: &net_title,
                 subtitle: &net_sub,
                 count: "",
-                selected: self.tab == 1,
+                selected: self.tab == TAB_NET,
                 on: false,
                 dimmed: !net.ethernet_connected && (!net.wifi_present() || !net.wifi_enabled),
                 slashed: !net.ethernet_connected && net.wifi_present() && !net.wifi_enabled,
@@ -472,7 +538,7 @@ impl NcView {
                 title: &bt_title,
                 subtitle: &bt_sub,
                 count: "",
-                selected: self.tab == 2,
+                selected: self.tab == TAB_BT,
                 on: false,
                 dimmed: !bt.powered,
                 slashed: false,
@@ -484,11 +550,23 @@ impl NcView {
                 title: "Notifications",
                 subtitle: if flags.silent { "Silent" } else { "" },
                 count: &count_s,
-                selected: self.tab == 0,
+                selected: self.tab == TAB_NOTIFS,
                 on: false,
                 dimmed: false,
                 slashed: flags.silent,
                 badge: count,
+                expanded_w: wide,
+            },
+            widgets::TileSpec {
+                icon: "lock",
+                title: &vpn_title,
+                subtitle: &vpn_sub,
+                count: "",
+                selected: self.tab == TAB_VPN,
+                on: false,
+                dimmed: vpn_on == 0,
+                slashed: false,
+                badge: 0,
                 expanded_w: wide,
             },
             widgets::TileSpec {
@@ -504,15 +582,25 @@ impl NcView {
                 expanded_w: wide,
             },
         ];
-        // QML order: network, bluetooth, notifications, caffeinate.
+        // Specs are listed network, bluetooth, notifications, VPN, caffeine: put them in TILE_ORDER.
+        specs.swap(2, 3);
+        // Network, bluetooth, VPN, notifications, caffeinate; hidden tiles close up the gap.
         let mut tx = x;
         let mut hits = Vec::new();
         for (slot, spec) in specs.iter().enumerate() {
-            let tab = [1, 2, 0, 3][slot];
-            let r = Rect { x: tx, y, w: self.tile_w[tab].value(), h: 44.0 };
-            widgets::tile(cr, r, spec, hv!(self, Hit::Tile(tab)), p);
-            hits.push((Hit::Tile(tab), r));
-            tx += r.w + gap;
+            let tab = TILE_ORDER[slot].0;
+            let tw = self.tile_w[tab].value();
+            if tw < 0.5 {
+                continue;
+            }
+            let r = Rect { x: tx, y, w: tw, h: 44.0 };
+            if tw >= 20.0 {
+                widgets::tile(cr, r, spec, hv!(self, Hit::Tile(tab)), p);
+                if self.tiles.contains(&tab) {
+                    hits.push((Hit::Tile(tab), r));
+                }
+            }
+            tx += tw + gap * (tw / 44.0).min(1.0);
         }
         self.hits.extend(hits);
     }
@@ -1177,6 +1265,96 @@ impl NcView {
         });
     }
 
+    /// VPNs matching the filter, in display order.
+    fn vpn_list(&self) -> Vec<model::Vpn> {
+        let f = self.vpn_filter.to_lowercase();
+        self.snap.net.vpns.iter().filter(|v| f.is_empty() || v.name.to_lowercase().contains(&f)).cloned().collect()
+    }
+
+    fn draw_vpn(&mut self, cr: *mut Cairo, r: Rect, p: &Pal) {
+        let net = self.snap.net.clone();
+        let mut y = r.y;
+        cb::draw_pango_text(cr, r.x, y, "VPN", &font(16.0, "Bold"), p.fg, None);
+        let on: Vec<&model::Vpn> = net.vpns.iter().filter(|v| v.state == model::VpnState::On).collect();
+        let status = match on.as_slice() {
+            [] if net.vpns.is_empty() => "No profiles".to_string(),
+            [] => format!("{} profiles  \u{00B7}  not connected", net.vpns.len()),
+            [v] => format!("Connected to {}", v.name),
+            more => format!("{} connected", more.len()),
+        };
+        let (ih, iw) = widgets::button_size(cr, "Import\u{2026}", "", true);
+        let ir = Rect { x: r.x + r.w - iw, y: y + (40.0 - ih) / 2.0, w: iw, h: ih };
+        cb::draw_pango_text(cr, r.x, y + 21.0, &status, &font(12.0, ""), alpha(p.fg, 0.65), Some((ir.x - r.x - 8.0) as i32));
+        widgets::button(cr, ir, "Import\u{2026}", "", true, false, true, hv!(self, Hit::VpnImport), p);
+        self.hits.push((Hit::VpnImport, ir));
+        y += 40.0 + 10.0;
+
+        // Type-to-filter field.
+        let fr = Rect { x: r.x, y, w: r.w, h: 36.0 };
+        cb::fill_rounded_rect(cr, fr.x, fr.y, fr.w, fr.h, 18.0, alpha(p.fg, 0.1));
+        let (shown, c) = if self.vpn_filter.is_empty() { ("Type to filter", alpha(p.fg, 0.5)) } else { (self.vpn_filter.as_str(), p.fg) };
+        text_v(cr, fr.x + 16.0, fr.y, fr.h, shown, &font(13.0, ""), c, Some(fr.w - 32.0));
+        if !self.vpn_filter.is_empty() {
+            let (tw, _) = text_size(cr, &self.vpn_filter, &font(13.0, ""));
+            cb::fill_rounded_rect(cr, fr.x + 16.0 + tw + 1.0, fr.y + 9.0, 1.5, fr.h - 18.0, 0.0, p.fg);
+        }
+        y += 36.0 + 10.0;
+        if let Some((m, err)) = &net.vpn_msg {
+            cb::draw_pango_text(cr, r.x + 4.0, y, m, &font(12.0, ""), if *err { p.error } else { alpha(p.fg, 0.75) }, Some(r.w as i32 - 8));
+            y += 22.0;
+        }
+        let list = Rect { x: r.x, y, w: r.w, h: (r.y + r.h - y).max(0.0) };
+        let vpns = self.vpn_list();
+        if vpns.is_empty() {
+            let msg = if net.vpns.is_empty() { "No VPN profiles yet. Import .ovpn files to add them.".to_string() } else { format!("No VPN matches \u{201C}{}\u{201D}", self.vpn_filter) };
+            self.empty_state(cr, list, "lock", false, &msg, p);
+            return;
+        }
+        let p = *p;
+        const ROW: f64 = 48.0;
+        self.scrolled(cr, TAB_VPN, list, |v, mut y| {
+            let start = y;
+            for (i, vpn) in vpns.iter().enumerate() {
+                let row = Rect { x: list.x, y, w: list.w, h: ROW };
+                y += ROW + 4.0;
+                // Only rows in view are drawn (there may be hundreds).
+                if row.y + row.h < list.y || row.y > list.y + list.h {
+                    continue;
+                }
+                let busy = net.vpn_busy.contains(&vpn.path) || matches!(vpn.state, model::VpnState::Connecting | model::VpnState::Disconnecting);
+                let on = vpn.state == model::VpnState::On;
+                let hovered = row.contains(v.pointer.0, v.pointer.1) && list.contains(v.pointer.0, v.pointer.1);
+                if on {
+                    cb::fill_rounded_rect(cr, row.x, row.y, row.w, row.h, RADIUS, alpha(p.fg, 0.16));
+                } else if hovered {
+                    cb::fill_rounded_rect(cr, row.x, row.y, row.w, row.h, RADIUS, alpha(p.fg, 0.1));
+                }
+                svg::icon(cr, "lock", row.x + 12.0, row.y + 14.0, 20.0, p.fg, false);
+                let label = if on || vpn.state == model::VpnState::Connecting { "Disconnect" } else { "Connect" };
+                let (bh, bw) = widgets::button_size(cr, label, "", true);
+                let br = Rect { x: row.x + row.w - 10.0 - bw, y: row.y + (ROW - bh) / 2.0, w: bw, h: bh };
+                widgets::button(cr, br, label, "", true, on, !busy || vpn.state == model::VpnState::Connecting, hv!(v, Hit::VpnRow(i)), &p);
+                let tx = row.x + 12.0 + 20.0 + 12.0;
+                text_v(cr, tx, row.y + 6.0, 20.0, &vpn.name, &font(14.0, if on { "Bold" } else { "" }), p.fg, Some(br.x - 10.0 - tx));
+                let sub = match vpn.state {
+                    model::VpnState::On => "Connected".to_string(),
+                    model::VpnState::Connecting => "Connecting\u{2026}".to_string(),
+                    model::VpnState::Disconnecting => "Disconnecting\u{2026}".to_string(),
+                    model::VpnState::Off => match vpn.kind.as_str() {
+                        "openvpn" => "OpenVPN".to_string(),
+                        "wireguard" => "WireGuard".to_string(),
+                        k => k.to_string(),
+                    },
+                };
+                text_v(cr, tx, row.y + 26.0, 16.0, &sub, &font(11.0, ""), alpha(p.fg, 0.65), Some(br.x - 10.0 - tx));
+                if !busy || vpn.state == model::VpnState::Connecting {
+                    v.hits.push((Hit::VpnRow(i), row));
+                }
+            }
+            y - start
+        });
+    }
+
     fn draw_bt_row(&mut self, cr: *mut Cairo, r: Rect, i: usize, bt: &model::BtState, p: &Pal) {
         let d = &bt.devices[i];
         let busy = bt.busy(&d.mac);
@@ -1207,6 +1385,13 @@ impl NcView {
         widgets::button(cr, ar, label, "", true, d.connected, !connecting, hv!(self, Hit::BtAction(i)), p);
         if !connecting {
             self.hits.push((Hit::BtAction(i), ar));
+        }
+        if d.paired && !connecting && !pairing {
+            let (sh, sw) = widgets::button_size(cr, "Send", "", true);
+            bx -= 8.0 + sw;
+            let sr = Rect { x: bx, y: r.y + (r.h - sh) / 2.0, w: sw, h: sh };
+            widgets::button(cr, sr, "Send", "", true, false, true, hv!(self, Hit::BtSend(i)), p);
+            self.hits.push((Hit::BtSend(i), sr));
         }
         if d.paired && !d.connected && !connecting {
             let (fh, fw) = widgets::button_size(cr, "Forget", "", true);
@@ -1405,7 +1590,15 @@ impl NcView {
         let nets = self.networks();
         match h {
             Hit::Gear => return Effect::OpenSettings,
-            Hit::Tile(3) => self.daemon(IpcCommand::Caffeinate(Some(!self.snap.flags.caffeinate))),
+            Hit::Profile => {
+                if let Some((active, list)) = &mut self.snap.power_profile {
+                    if let Some(next) = list.iter().position(|x| x == active).map(|i| list[(i + 1) % list.len()].clone()).or_else(|| list.first().cloned()) {
+                        *active = next.clone();
+                        self.send(StatusRequest::SetPowerProfile(next));
+                    }
+                }
+            }
+            Hit::Tile(TILE_CAFFEINE) => self.daemon(IpcCommand::Caffeinate(Some(!self.snap.flags.caffeinate))),
             Hit::Tile(t) => self.set_tab(t),
             Hit::Silent => {
                 self.snap.flags.silent = !self.snap.flags.silent;
@@ -1507,6 +1700,31 @@ impl NcView {
                     self.send(StatusRequest::ForgetBluetooth(d.mac.clone()));
                 }
             }
+            Hit::BtSend(i) => {
+                if let Some(d) = self.snap.bt.devices.get(i).cloned() {
+                    send_files_bluetooth(d.mac, d.name);
+                    return Effect::Close;
+                }
+            }
+            Hit::VpnImport => {
+                let tx = self.status.tx.clone();
+                std::thread::spawn(move || match crate::portal::pick_files("Import VPN profiles (.ovpn, WireGuard .conf)") {
+                    Ok(files) if !files.is_empty() => {
+                        let _ = tx.send(StatusRequest::ImportVpn(files));
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[prism-ui/vpn] file dialog: {e}"),
+                });
+            }
+            Hit::VpnRow(i) => {
+                if let Some(v) = self.vpn_list().get(i).cloned() {
+                    match (v.state, v.active) {
+                        (model::VpnState::Off, _) => self.send(StatusRequest::VpnUp(v.path)),
+                        (_, Some(a)) => self.send(StatusRequest::VpnDown(v.path, a)),
+                        _ => {}
+                    }
+                }
+            }
             Hit::BtAction(i) => {
                 if let Some(d) = self.snap.bt.devices.get(i).cloned() {
                     let req = match (d.connected, self.snap.bt.busy(&d.mac), d.paired) {
@@ -1575,6 +1793,10 @@ impl NcView {
                 self.sink_t.set(0.0, ANIM_MED_MS);
                 return Effect::Redraw;
             }
+            if self.tab == TAB_VPN && !self.vpn_filter.is_empty() {
+                self.vpn_filter.clear();
+                return Effect::Redraw;
+            }
             if self.tab == 1 && self.expanded_ssid.is_some() {
                 self.expanded_ssid = None;
                 self.frozen = None;
@@ -1582,6 +1804,17 @@ impl NcView {
                 return Effect::Redraw;
             }
             return Effect::Close;
+        }
+        if self.tab == TAB_VPN {
+            match (special, typed) {
+                (BACKSPACE, _) if !self.vpn_filter.is_empty() => {
+                    self.vpn_filter.pop();
+                }
+                (_, Some(c)) if !c.is_control() => self.vpn_filter.push(c),
+                _ => return Effect::None,
+            }
+            self.scroll[TAB_VPN] = Default::default();
+            return Effect::Redraw;
         }
         if self.typing() {
             match (special, typed) {
@@ -1697,4 +1930,17 @@ mod tests {
     fn plain_strips_markup() {
         assert_eq!(plain_line("<b>a</b>\n  b &amp; c"), "a b & c");
     }
+}
+
+/// Pick files with the system dialog and send them to a Bluetooth device (prismd, OBEX push).
+pub fn send_files_bluetooth(mac: String, name: String) {
+    std::thread::spawn(move || match crate::portal::pick_files(&format!("Send to {name}")) {
+        Ok(files) if !files.is_empty() => {
+            if let Err(e) = prism_common::ipc::request(&IpcCommand::BluetoothSend { address: mac, files }) {
+                eprintln!("[prism-ui] bluetooth send: {e}");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[prism-ui] file dialog: {e}"),
+    });
 }

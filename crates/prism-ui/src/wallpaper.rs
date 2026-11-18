@@ -14,6 +14,10 @@
 // and handed to the UI as ready pixel buffers. Scrolling animates a
 // continuous position (250 ms OutCubic, QML highlightMoveDuration) per
 // presented frame.
+//
+// Applying opens a strip of colour filters over the carousel: small previews
+// of the wallpaper, Normal selected first, and the centre slice shows the
+// selected filter large. Previews are made on their own worker thread.
 // ─────────────────────────────────────────────────────────────────────────
 
 use std::collections::HashMap;
@@ -22,15 +26,42 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
+use prism_common::filter::Filter;
+
 use crate::cairo_backend::*;
-use crate::desktop::text::{draw_in_box, Align, TextStyle};
-use crate::ui::{SpringValue, Style};
+use crate::desktop::layout::Rect;
+use crate::desktop::text::{draw_in_box, measure, Align, TextStyle};
+use crate::ui::{Fades, SpringValue, Style};
+use crate::uikit::{self, ButtonKind, Palette};
 use crate::waker::Waker;
 
 pub const PANEL_H: f64 = 618.0;
 const SKEW: f64 = -0.25;
 /// Carousel motion (response s, damping): settles with a hint of overshoot.
 const SPRING_MOVE: (f64, f64) = (0.36, 0.88);
+/// The filter strip sliding in and out, and its selection ring moving between tiles.
+const SPRING_STRIP: (f64, f64) = (0.32, 0.86);
+/// The large preview changing to another filter.
+const SPRING_PREVIEW: (f64, f64) = (0.24, 1.0);
+const TILE: f64 = 72.0;
+const TILE_MIN: f64 = 44.0;
+const TILE_GAP: f64 = 10.0;
+const TILE_RADIUS: f64 = 10.0;
+const TILE_LABEL_H: f64 = 24.0;
+const STRIP_PAD: f64 = 14.0;
+const STRIP_BUTTON_W: f64 = 96.0;
+const STRIP_BUTTON_H: f64 = 34.0;
+/// The two switches above the carousel.
+const PILL_LABELS: [&str; 2] = ["Use Wallpaper Filters", "Keep Desktop Wallpaper Original"];
+const PILL_H: f64 = 40.0;
+const PILL_GAP: f64 = 12.0;
+const PILL_TOP: f64 = 11.0;
+const PILL_SWITCH: (f64, f64) = (40.0, 24.0);
+/// Decoded height of the tile previews (drawn at TILE, sharp on scaled outputs).
+const TILE_PX: i32 = 160;
+/// Hover ids after the tiles.
+const HOVER_APPLY: usize = Filter::ALL.len();
+const HOVER_BACK: usize = Filter::ALL.len() + 1;
 
 struct Entry {
     original: PathBuf,
@@ -43,6 +74,63 @@ struct Decoded {
     w: i32,
     h: i32,
     data: Vec<u8>,
+}
+
+enum PreviewJob {
+    Tiles(PathBuf),
+    Large(PathBuf, Filter),
+}
+
+enum PreviewOut {
+    Tile(PathBuf, Filter, Decoded),
+    Large(PathBuf, Filter, Decoded),
+}
+
+/// The open filter strip.
+struct FilterStrip {
+    /// Thumbnail of the wallpaper being applied.
+    thumb: PathBuf,
+    selected: usize,
+    tiles: HashMap<Filter, *mut CairoSurface>,
+    large: HashMap<Filter, *mut CairoSurface>,
+    /// The large preview being faded out, and how far the selected one has faded in.
+    from: Filter,
+    fade: SpringValue,
+    /// Selection ring position (tile index).
+    ring: SpringValue,
+    /// 0 hidden, 1 fully in.
+    open: SpringValue,
+    closing: bool,
+    time_scale: Option<f64>,
+    hover: Option<usize>,
+    hovers: Fades<usize>,
+    bounds: Rect,
+    tile_rects: Vec<Rect>,
+    apply_rect: Rect,
+    back_rect: Rect,
+}
+
+impl FilterStrip {
+    fn filter(&self) -> Filter {
+        Filter::ALL[self.selected]
+    }
+
+    fn close(&mut self) {
+        self.closing = true;
+        self.open.set_scaled(0.0, SPRING_STRIP, self.time_scale);
+    }
+
+    fn animating(&self) -> bool {
+        !self.open.settled(0.004) || !self.ring.settled(0.004) || !self.fade.settled(0.004)
+    }
+}
+
+impl Drop for FilterStrip {
+    fn drop(&mut self) {
+        for s in self.tiles.values().chain(self.large.values()) {
+            unsafe { cairo_surface_destroy(*s) };
+        }
+    }
 }
 
 pub enum Effect {
@@ -61,8 +149,17 @@ pub struct WallpaperView {
     pos: SpringValue,
     images: HashMap<PathBuf, (*mut CairoSurface, Instant)>,
     requested: std::collections::HashSet<PathBuf>,
-    decode_tx: Sender<PathBuf>,
+    decode_tx: Sender<(PathBuf, PathBuf)>,
     decoded_rx: Receiver<Decoded>,
+    preview_tx: Sender<PreviewJob>,
+    preview_rx: Receiver<PreviewOut>,
+    strip: Option<FilterStrip>,
+    filters_on: bool,
+    keep_desktop: bool,
+    pill_rects: [Rect; 2],
+    pill_hover: Option<usize>,
+    pill_hovers: Fades<usize>,
+    pill_knobs: Fades<usize>,
     apply_rx: Option<Receiver<Result<(), String>>>,
     applying: bool,
     error: Option<String>,
@@ -96,9 +193,12 @@ impl WallpaperView {
             .collect();
 
         let slice_h = (PANEL_H * 0.80).round() as i32;
-        let (decode_tx, decode_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (decode_tx, decode_rx) = std::sync::mpsc::channel::<(PathBuf, PathBuf)>();
         let (decoded_tx, decoded_rx) = std::sync::mpsc::channel::<Decoded>();
         spawn_workers(missing, thumb_w, decode_rx, decoded_tx, slice_h, waker.clone());
+        let (preview_tx, preview_jobs) = std::sync::mpsc::channel::<PreviewJob>();
+        let (preview_out, preview_rx) = std::sync::mpsc::channel::<PreviewOut>();
+        spawn_preview_worker(preview_jobs, preview_out, slice_h, waker.clone());
 
         let mut order: Vec<usize> = (0..entries.len()).collect();
         shuffle(&mut order);
@@ -107,6 +207,8 @@ impl WallpaperView {
             order.extend(base.iter().copied());
         }
 
+        // Fresh from disk: Settings may have changed them since this overlay's config was read.
+        let switches = prism_common::Config::load();
         WallpaperView {
             entries,
             order,
@@ -116,6 +218,15 @@ impl WallpaperView {
             requested: Default::default(),
             decode_tx,
             decoded_rx,
+            preview_tx,
+            preview_rx,
+            strip: None,
+            filters_on: switches.wallpaper_filters_enabled,
+            keep_desktop: switches.wallpaper_keep_desktop,
+            pill_rects: [Rect::default(); 2],
+            pill_hover: None,
+            pill_hovers: Fades::default(),
+            pill_knobs: Fades::default(),
             apply_rx: None,
             applying: false,
             error: None,
@@ -137,6 +248,26 @@ impl WallpaperView {
                 redraw = true;
             }
         }
+        for out in self.preview_rx.try_iter() {
+            let (thumb, filter, d, is_tile) = match out {
+                PreviewOut::Tile(t, f, d) => (t, f, d, true),
+                PreviewOut::Large(t, f, d) => (t, f, d, false),
+            };
+            let Some(s) = (unsafe { surface_from_argb(&d) }) else { continue };
+            match self.strip.as_mut().filter(|p| p.thumb == thumb) {
+                Some(p) if is_tile => {
+                    p.tiles.insert(filter, s);
+                }
+                Some(p) => {
+                    p.large.insert(filter, s);
+                    if p.filter() == filter {
+                        p.fade.set_scaled(1.0, SPRING_PREVIEW, p.time_scale);
+                    }
+                }
+                None => unsafe { cairo_surface_destroy(s) },
+            }
+            redraw = true;
+        }
         let mut close = false;
         if let Some(rx) = &self.apply_rx {
             if let Ok(r) = rx.try_recv() {
@@ -153,7 +284,7 @@ impl WallpaperView {
     }
 
     pub fn animating(&self) -> bool {
-        !self.pos.settled(0.002) || self.images.values().any(|(_, t)| t.elapsed().as_secs_f64() * 1000.0 < crate::ui::ANIM_MED_MS)
+        !self.pos.settled(0.002) || self.strip.as_ref().is_some_and(|p| p.animating()) || self.images.values().any(|(_, t)| t.elapsed().as_secs_f64() * 1000.0 < crate::ui::ANIM_MED_MS)
     }
 
     fn step(&mut self, delta: i64, style: &Style) {
@@ -178,8 +309,244 @@ impl WallpaperView {
         if self.pos.settled(0.002) { self.pos.target() } else { self.pos.value() }
     }
 
+    /// The strip is open and takes the input.
+    fn picking(&self) -> bool {
+        self.strip.as_ref().is_some_and(|p| !p.closing)
+    }
+
+    /// Apply the current wallpaper: through the filter strip when filters are on.
+    fn choose(&mut self, style: &Style) {
+        if self.filters_on {
+            self.open_strip(style);
+        } else {
+            self.apply();
+        }
+    }
+
+    fn toggle_pill(&mut self, i: usize) {
+        if i == 0 {
+            self.filters_on = !self.filters_on;
+            if !self.filters_on {
+                if let Some(p) = self.strip.as_mut() {
+                    p.close();
+                }
+            }
+        } else if self.filters_on {
+            self.keep_desktop = !self.keep_desktop;
+        }
+        let (filters_on, keep_desktop) = (self.filters_on, self.keep_desktop);
+        std::thread::spawn(move || {
+            let mut c = prism_common::Config::load();
+            c.wallpaper_filters_enabled = filters_on;
+            c.wallpaper_keep_desktop = keep_desktop;
+            let _ = c.save();
+        });
+    }
+
+    fn draw_pills(&mut self, cr: *mut Cairo, panel_x: f64, panel_y: f64, width: f64, style: &Style, theme: &prism_common::Theme) {
+        let palette = Palette {
+            fg: style.fg,
+            accent: style.accent,
+            card: style.card_bg,
+            on_accent: hex_to_rgba(&theme.on_primary, 1.0),
+            outline: hex_to_rgba(&theme.outline_variant, 1.0),
+            error: hex_to_rgba(&theme.error, 1.0),
+            family: style.font_family.clone(),
+        };
+        let label = TextStyle { family: &style.font_family, px: 13.0, bold: true, color: style.fg };
+        // Label, its padding, the switch and the space around it.
+        let widths = PILL_LABELS.map(|t| measure(cr, t, &label).0.ceil() + 18.0 + 14.0 + PILL_SWITCH.0 + 8.0);
+        let total = widths[0] + PILL_GAP + widths[1];
+        let mut x = panel_x + (width - total) / 2.0;
+        let y = panel_y + PILL_TOP;
+        let dim = self.pill_knobs.settled_level(2, !self.filters_on, crate::ui::SPRING_HOVER, style);
+        for i in 0..2 {
+            let r = Rect { x, y, w: widths[i], h: PILL_H };
+            self.pill_rects[i] = r;
+            x += widths[i] + PILL_GAP;
+            let enabled = i == 0 || self.filters_on;
+            let on = if i == 0 { self.filters_on } else { self.keep_desktop };
+            let knob = self.pill_knobs.settled_level(i, on, crate::ui::SPRING_KNOB, style);
+            let hover = self.pill_hovers.level(i, enabled && self.pill_hover == Some(i), style);
+            let alpha = if i == 0 { 1.0 } else { 1.0 - 0.6 * dim };
+            unsafe { cairo_push_group(cr) };
+            fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, (0.0, 0.0, 0.0, 0.6));
+            fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, style.card_bg);
+            if hover > 0.0 {
+                fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, (style.fg.0, style.fg.1, style.fg.2, 0.08 * hover));
+            }
+            draw_in_box(cr, PILL_LABELS[i], &label, r.x + 18.0, r.y, r.w - 18.0 - PILL_SWITCH.0 - 8.0, r.h, Align::Start);
+            let sw = Rect { x: r.x + r.w - PILL_SWITCH.0 - 8.0, y: r.y + (r.h - PILL_SWITCH.1) / 2.0, w: PILL_SWITCH.0, h: PILL_SWITCH.1 };
+            uikit::switch(cr, sw, knob, hover, &palette);
+            unsafe {
+                cairo_pop_group_to_source(cr);
+                cairo_paint_with_alpha(cr, alpha);
+            }
+        }
+    }
+
+    fn open_strip(&mut self, style: &Style) {
+        if self.applying || self.order.is_empty() {
+            return;
+        }
+        let thumb = self.entries[self.order[self.current]].thumb.clone();
+        let time_scale = style.time_scale();
+        let mut open = SpringValue::new(0.0);
+        open.set_scaled(1.0, SPRING_STRIP, time_scale);
+        let _ = self.preview_tx.send(PreviewJob::Tiles(thumb.clone()));
+        self.error = None;
+        self.strip = Some(FilterStrip {
+            thumb,
+            selected: 0,
+            tiles: HashMap::new(),
+            large: HashMap::new(),
+            from: Filter::Normal,
+            fade: SpringValue::new(1.0),
+            ring: SpringValue::new(0.0),
+            open,
+            closing: false,
+            time_scale,
+            hover: None,
+            hovers: Fades::default(),
+            bounds: Rect::default(),
+            tile_rects: Vec::new(),
+            apply_rect: Rect::default(),
+            back_rect: Rect::default(),
+        });
+    }
+
+    fn select_filter(&mut self, i: usize) {
+        let Some(p) = self.strip.as_mut() else { return };
+        if i == p.selected {
+            return;
+        }
+        // Fade from whichever picture is showing more right now.
+        if p.fade.value() >= 0.5 {
+            p.from = p.filter();
+        }
+        p.selected = i;
+        p.ring.set_scaled(i as f64, SPRING_STRIP, p.time_scale);
+        p.fade.snap(0.0);
+        let f = p.filter();
+        if f == Filter::Normal || p.large.contains_key(&f) {
+            p.fade.set_scaled(1.0, SPRING_PREVIEW, p.time_scale);
+        } else {
+            let _ = self.preview_tx.send(PreviewJob::Large(p.thumb.clone(), f));
+        }
+    }
+
+    fn step_filter(&mut self, delta: i64) {
+        let Some(p) = self.strip.as_ref() else { return };
+        let n = Filter::ALL.len() as i64;
+        self.select_filter((p.selected as i64 + delta).rem_euclid(n) as usize);
+    }
+
+    fn draw_strip(&mut self, cr: *mut Cairo, panel_x: f64, panel_y: f64, width: f64, style: &Style, theme: &prism_common::Theme) {
+        let Some(p) = self.strip.as_mut() else { return };
+        let n = Filter::ALL.len() as f64;
+        let chrome = 2.0 * STRIP_PAD + (n - 1.0) * TILE_GAP + 2.0 * TILE_GAP + STRIP_BUTTON_W;
+        let tile = ((width - 32.0 - chrome) / n).clamp(TILE_MIN, TILE);
+        let strip_w = chrome + n * tile;
+        let strip_h = 2.0 * STRIP_PAD + tile + TILE_LABEL_H;
+        let open = p.open.animated(0.004).clamp(0.0, 1.2);
+        let x = panel_x + (width - strip_w) / 2.0;
+        let y = panel_y + PANEL_H - strip_h - 8.0 + (1.0 - open) * 28.0;
+        p.bounds = Rect { x, y, w: strip_w, h: strip_h };
+        let faded = open < 0.995;
+        if faded {
+            unsafe { cairo_push_group(cr) };
+        }
+        fill_rounded_rect(cr, x, y, strip_w, strip_h, style.radius, (0.0, 0.0, 0.0, 0.6));
+        crate::ui::card_surface(cr, x, y, strip_w, strip_h, style);
+
+        let accent = style.accent;
+        let tiles_y = y + STRIP_PAD;
+        p.tile_rects.clear();
+        for (i, f) in Filter::ALL.into_iter().enumerate() {
+            let r = Rect { x: x + STRIP_PAD + i as f64 * (tile + TILE_GAP), y: tiles_y, w: tile, h: tile };
+            p.tile_rects.push(r);
+            unsafe {
+                cairo_save(cr);
+                cairo_new_path(cr);
+                rounded_rect_path(cr, r.x, r.y, r.w, r.h, TILE_RADIUS);
+                cairo_clip(cr);
+                cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.08);
+                cairo_paint(cr);
+                if let Some(img) = p.tiles.get(&f) {
+                    let (iw, ih) = image_size(*img);
+                    let s = (r.w / iw).max(r.h / ih);
+                    cairo_translate(cr, r.x + (r.w - iw * s) / 2.0, r.y + (r.h - ih * s) / 2.0);
+                    cairo_scale(cr, s, s);
+                    cairo_set_source_surface(cr, *img, 0.0, 0.0);
+                    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+                    cairo_paint(cr);
+                }
+                cairo_restore(cr);
+            }
+            let hover = p.hovers.level_scaled(i, p.hover == Some(i), p.time_scale);
+            if hover > 0.0 {
+                stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, TILE_RADIUS, (1.0, 1.0, 1.0, 0.45 * hover), 1.0);
+            }
+            let on = (1.0 - (p.ring.value() - i as f64).abs()).clamp(0.0, 1.0);
+            let c = (style.fg.0 + (accent.0 - style.fg.0) * on, style.fg.1 + (accent.1 - style.fg.1) * on, style.fg.2 + (accent.2 - style.fg.2) * on, 0.72 + 0.28 * on);
+            draw_in_box(cr, f.label(), &TextStyle { family: &style.font_family, px: 11.5, bold: i == p.selected, color: c }, r.x - TILE_GAP / 2.0, r.y + r.h + 4.0, r.w + TILE_GAP, TILE_LABEL_H - 4.0, Align::Center);
+        }
+        let ring_x = x + STRIP_PAD + p.ring.animated(0.004) * (tile + TILE_GAP);
+        stroke_rounded_rect(cr, ring_x - 1.5, tiles_y - 1.5, tile + 3.0, tile + 3.0, TILE_RADIUS + 1.5, accent, 2.5);
+
+        let palette = Palette {
+            fg: style.fg,
+            accent,
+            card: style.card_bg,
+            on_accent: hex_to_rgba(&theme.on_primary, 1.0),
+            outline: hex_to_rgba(&theme.outline_variant, 1.0),
+            error: hex_to_rgba(&theme.error, 1.0),
+            family: style.font_family.clone(),
+        };
+        let button_x = x + strip_w - STRIP_PAD - STRIP_BUTTON_W;
+        let mid = y + strip_h / 2.0;
+        p.apply_rect = Rect { x: button_x, y: mid - STRIP_BUTTON_H - 5.0, w: STRIP_BUTTON_W, h: STRIP_BUTTON_H };
+        p.back_rect = Rect { x: button_x, y: mid + 5.0, w: STRIP_BUTTON_W, h: STRIP_BUTTON_H };
+        let (apply_h, back_h) = (p.hovers.level_scaled(HOVER_APPLY, p.hover == Some(HOVER_APPLY), p.time_scale), p.hovers.level_scaled(HOVER_BACK, p.hover == Some(HOVER_BACK), p.time_scale));
+        uikit::button(cr, p.apply_rect, "Apply", ButtonKind::Primary, apply_h, true, &palette);
+        uikit::button(cr, p.back_rect, "Back", ButtonKind::Outline, back_h, true, &palette);
+        if faded {
+            unsafe {
+                cairo_pop_group_to_source(cr);
+                cairo_paint_with_alpha(cr, open.clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// Pointer moved. Returns (redraw, over something clickable).
+    pub fn motion(&mut self, x: f64, y: f64) -> (bool, bool) {
+        let pill = self.pill_rects.iter().position(|r| r.contains(x, y));
+        let pill_changed = pill != self.pill_hover;
+        self.pill_hover = pill;
+        let pill_over = pill.is_some_and(|i| i == 0 || self.filters_on);
+        if !self.picking() {
+            return (pill_changed, pill_over);
+        }
+        let Some(p) = self.strip.as_mut() else { return (pill_changed, pill_over) };
+        let hover = p.tile_rects.iter().position(|r| r.contains(x, y)).or_else(|| {
+            if p.apply_rect.contains(x, y) {
+                Some(HOVER_APPLY)
+            } else if p.back_rect.contains(x, y) {
+                Some(HOVER_BACK)
+            } else {
+                None
+            }
+        });
+        let changed = hover != p.hover;
+        p.hover = hover;
+        (changed || pill_changed, hover.is_some() || pill_over)
+    }
+
     pub fn draw(&mut self, cr: *mut Cairo, panel_x: f64, panel_y: f64, width: f64, style: &Style, theme: &prism_common::Theme) {
         self.hits.clear();
+        if !self.applying && self.strip.as_ref().is_some_and(|p| p.closing && p.open.settled(0.01)) {
+            self.strip = None;
+        }
         let fg = style.fg;
         if self.order.is_empty() {
             let msg = "No wallpapers found. Set the folder in Settings > Wallpaper.";
@@ -259,10 +626,28 @@ impl WallpaperView {
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
                         cairo_paint_with_alpha(cr, alpha);
                     }
+                    // The selected filter, large, on the wallpaper being applied.
+                    if let Some(p) = self.strip.as_ref().filter(|p| k == self.current && p.thumb == key) {
+                        let target = p.filter();
+                        let paint = |s: *mut CairoSurface, a: f64| unsafe {
+                            cairo_set_source_surface(cr, s, 0.0, 0.0);
+                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+                            cairo_paint_with_alpha(cr, a);
+                        };
+                        if let Some(s) = p.large.get(&p.from) {
+                            paint(*s, 1.0);
+                        }
+                        let fade = p.fade.animated(0.004).clamp(0.0, 1.0);
+                        match p.large.get(&target) {
+                            Some(s) => paint(*s, fade),
+                            None if target == Filter::Normal => paint(*img, fade),
+                            None => {}
+                        }
+                    }
                 }
                 None => {
                     if self.requested.insert(key.clone()) {
-                        let _ = self.decode_tx.send(key);
+                        let _ = self.decode_tx.send((key, entry.original.clone()));
                     }
                 }
             }
@@ -307,6 +692,8 @@ impl WallpaperView {
         }
         // Topmost slices were drawn last; hit-test them first.
         self.hits.reverse();
+        self.draw_strip(cr, panel_x, panel_y, width, style, theme);
+        self.draw_pills(cr, panel_x, panel_y, width, style, theme);
     }
 
     pub fn key(&mut self, code: u32, style: &Style) -> Effect {
@@ -314,6 +701,16 @@ impl WallpaperView {
         const RIGHT: u32 = 106;
         const ENTER: u32 = 28;
         const ESC: u32 = 1;
+        if self.picking() {
+            match code {
+                ESC => self.strip.as_mut().unwrap().close(),
+                LEFT => self.step_filter(-1),
+                RIGHT => self.step_filter(1),
+                ENTER => self.apply(),
+                _ => return Effect::None,
+            }
+            return Effect::Redraw;
+        }
         match code {
             ESC => Effect::Close,
             LEFT => {
@@ -325,7 +722,7 @@ impl WallpaperView {
                 Effect::Redraw
             }
             ENTER => {
-                self.apply();
+                self.choose(style);
                 Effect::Redraw
             }
             _ => Effect::None,
@@ -336,6 +733,10 @@ impl WallpaperView {
         if delta.abs() < 0.01 || self.applying {
             return Effect::None;
         }
+        if self.picking() {
+            self.step_filter(if delta > 0.0 { 1 } else { -1 });
+            return Effect::Redraw;
+        }
         self.step(if delta > 0.0 { 1 } else { -1 }, style);
         Effect::Redraw
     }
@@ -344,11 +745,32 @@ impl WallpaperView {
         if self.applying {
             return Effect::None;
         }
+        if let Some(i) = self.pill_rects.iter().position(|r| r.contains(x, y)) {
+            self.toggle_pill(i);
+            return Effect::Redraw;
+        }
         let hit = self.hits.iter().find(|(_, poly)| point_in_poly(x, y, poly)).map(|(k, _)| *k);
+        if self.picking() {
+            let p = self.strip.as_mut().unwrap();
+            if let Some(i) = p.tile_rects.iter().position(|r| r.contains(x, y)) {
+                self.select_filter(i);
+            } else if p.apply_rect.contains(x, y) {
+                self.apply();
+            } else if p.back_rect.contains(x, y) {
+                p.close();
+            } else if p.bounds.contains(x, y) {
+                return Effect::None;
+            } else if hit == Some(self.current) {
+                self.apply();
+            } else {
+                p.close();
+            }
+            return Effect::Redraw;
+        }
         match hit {
             None => Effect::Close,
             Some(k) if k == self.current => {
-                self.apply();
+                self.choose(style);
                 Effect::Redraw
             }
             Some(k) => {
@@ -366,11 +788,20 @@ impl WallpaperView {
             return;
         }
         let path = self.entries[self.order[self.current]].original.clone();
+        let filter = self.strip.as_ref().map(|p| p.filter()).unwrap_or_default();
+        if let Some(p) = self.strip.as_mut() {
+            p.close();
+        }
         let (daemon, scheme, mode) = (self.daemon.clone(), self.scheme.clone(), self.mode.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         let w = self.waker.clone();
         std::thread::spawn(move || {
-            let r = prism_common::wallpaper::set_wallpaper(&path, Some(&daemon), Some(&scheme), Some(&mode));
+            let r = prism_common::wallpaper::desktop_image(&path, filter).and_then(|shown| {
+                if daemon == "prism" {
+                    crate::background::request_show(&shown);
+                }
+                prism_common::wallpaper::set_wallpaper_filtered(&path, filter, Some(&daemon), Some(&scheme), Some(&mode))
+            });
             let _ = tx.send(r);
             w.wake();
         });
@@ -386,6 +817,24 @@ impl Drop for WallpaperView {
             unsafe { cairo_surface_destroy(*s) };
         }
     }
+}
+
+/// The desktop switch changed: put the current wallpaper's filter on or off the desktop.
+pub fn reapply_filter(cfg: &prism_common::Config) {
+    let filter = prism_common::wallpaper::active_filter();
+    let Some(path) = prism_common::wallpaper::get_current_wallpaper().filter(|_| filter != Filter::Normal) else { return };
+    let (daemon, scheme, mode) = (cfg.wallpaper_daemon.clone(), cfg.matugen_scheme.clone(), cfg.matugen_mode.clone());
+    std::thread::spawn(move || {
+        let r = prism_common::wallpaper::desktop_image(&path, filter).and_then(|shown| {
+            if daemon == "prism" {
+                crate::background::request_show(&shown);
+            }
+            prism_common::wallpaper::set_wallpaper_filtered(&path, filter, Some(&daemon), Some(&scheme), Some(&mode))
+        });
+        if let Err(e) = r {
+            eprintln!("[prism-ui/wallpaper] {e}");
+        }
+    });
 }
 
 fn expand_home(p: &str) -> PathBuf {
@@ -411,7 +860,7 @@ fn is_stale(original: &Path, thumb: &Path) -> bool {
 }
 
 /// Thumbnail generators (one per CPU core) followed by a decoder for on-screen slices.
-fn spawn_workers(missing: Vec<(PathBuf, PathBuf)>, thumb_w: i32, decode_rx: Receiver<PathBuf>, out: Sender<Decoded>, slice_h: i32, waker: Waker) {
+fn spawn_workers(missing: Vec<(PathBuf, PathBuf)>, thumb_w: i32, decode_rx: Receiver<(PathBuf, PathBuf)>, out: Sender<Decoded>, slice_h: i32, waker: Waker) {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
     let jobs = std::sync::Arc::new(std::sync::Mutex::new(missing));
     for _ in 0..threads {
@@ -423,13 +872,17 @@ fn spawn_workers(missing: Vec<(PathBuf, PathBuf)>, thumb_w: i32, decode_rx: Rece
         });
     }
     std::thread::spawn(move || {
-        for path in decode_rx {
+        for (path, original) in decode_rx {
             // The thumbnail may still be in generation; wait for it briefly.
             for _ in 0..50 {
                 if path.exists() {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            // Older thumbnails of pictures with transparency were saved without their colour.
+            if prism_common::pixbuf::jpeg_components(&path) == Some(1) {
+                make_thumb(&original, &path, thumb_w);
             }
             if let Some(d) = decode(&path, slice_h) {
                 if out.send(d).is_err() {
@@ -441,23 +894,56 @@ fn spawn_workers(missing: Vec<(PathBuf, PathBuf)>, thumb_w: i32, decode_rx: Rece
     });
 }
 
+/// Filtered previews for the strip: every tile at once, large ones on demand.
+fn spawn_preview_worker(jobs: Receiver<PreviewJob>, out: Sender<PreviewOut>, slice_h: i32, waker: Waker) {
+    std::thread::spawn(move || {
+        // The last large decode: stepping through filters reuses it.
+        let mut base: Option<Decoded> = None;
+        for job in jobs {
+            match job {
+                PreviewJob::Tiles(thumb) => {
+                    let Some(d) = decode(&thumb, TILE_PX) else { continue };
+                    for f in Filter::ALL {
+                        if out.send(PreviewOut::Tile(thumb.clone(), f, filtered(&d, f))).is_err() {
+                            return;
+                        }
+                    }
+                }
+                PreviewJob::Large(thumb, f) => {
+                    if base.as_ref().is_none_or(|b| b.key != thumb) {
+                        base = decode(&thumb, slice_h);
+                    }
+                    let Some(d) = &base else { continue };
+                    if out.send(PreviewOut::Large(thumb, f, filtered(d, f))).is_err() {
+                        return;
+                    }
+                }
+            }
+            waker.wake();
+        }
+    });
+}
+
+/// A copy of an opaque decoded image with `filter` applied.
+fn filtered(d: &Decoded, filter: Filter) -> Decoded {
+    let rgb = |px: &[u8]| {
+        let v = u32::from_ne_bytes([px[0], px[1], px[2], px[3]]);
+        [(v >> 16) as u8, (v >> 8) as u8, v as u8]
+    };
+    let grade = filter.grade(d.data.chunks_exact(4).step_by(16).map(rgb));
+    let mut data = d.data.clone();
+    for px in data.chunks_exact_mut(4) {
+        let v = u32::from_ne_bytes([px[0], px[1], px[2], px[3]]);
+        let [r, g, b] = grade.apply(rgb(px));
+        let v = (v & 0xFF00_0000) | (r as u32) << 16 | (g as u32) << 8 | b as u32;
+        px.copy_from_slice(&v.to_ne_bytes());
+    }
+    Decoded { key: d.key.clone(), w: d.w, h: d.h, data }
+}
+
 fn make_thumb(src: &Path, dst: &Path, width: i32) {
-    let (Ok(cs), Ok(cd)) = (CString::new(src.to_string_lossy().as_bytes()), CString::new(dst.with_extension("part").to_string_lossy().as_bytes())) else { return };
-    unsafe {
-        let pb = gdk_pixbuf_new_from_file_at_scale(cs.as_ptr(), width, -1, 1, std::ptr::null_mut());
-        if pb.is_null() {
-            return;
-        }
-        let ty = CString::new("jpeg").unwrap();
-        let k = CString::new("quality").unwrap();
-        let v = CString::new("85").unwrap();
-        let keys = [k.as_ptr(), std::ptr::null()];
-        let vals = [v.as_ptr(), std::ptr::null()];
-        let ok = gdk_pixbuf_savev(pb, cd.as_ptr(), ty.as_ptr(), keys.as_ptr(), vals.as_ptr(), std::ptr::null_mut());
-        g_object_unref(pb as *mut std::ffi::c_void);
-        if ok != 0 {
-            let _ = std::fs::rename(dst.with_extension("part"), dst);
-        }
+    if let Err(e) = prism_common::pixbuf::save_jpeg_fit_width(src, dst, width, 85) {
+        eprintln!("[prism-ui/wallpaper] thumbnail: {e}");
     }
 }
 

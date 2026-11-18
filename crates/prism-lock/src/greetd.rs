@@ -14,6 +14,13 @@ pub struct GreeterConfig {
     pub remember_last_user: bool,
     #[serde(rename = "defaultSession", default = "default_session")]
     pub default_session: String,
+    /// The design to show, resolved from the greeter theme setting when Prism saved its config.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "classic".to_string()
 }
 
 fn default_alignment() -> String {
@@ -66,6 +73,7 @@ impl Default for GreeterConfig {
             lockscreen_alignment: default_alignment(),
             remember_last_user: default_remember(),
             default_session: default_session(),
+            theme: default_theme(),
         }
     }
 }

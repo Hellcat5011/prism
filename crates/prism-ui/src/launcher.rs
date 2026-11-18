@@ -71,6 +71,11 @@ impl Query {
         self.text.chars().count()
     }
 
+    /// `text` with the caret after it.
+    pub fn with_text(text: &str) -> Self {
+        Query { text: text.to_string(), caret: text.chars().count() }
+    }
+
     /// Apply an editing key. Returns Some(text_changed) when the key was an editing key.
     pub fn key(&mut self, special: u32, typed: Option<char>, ctrl: bool) -> Option<bool> {
         match (special, typed) {

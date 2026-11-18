@@ -12,9 +12,12 @@ use std::time::Duration;
 mod bluelight;
 mod config_watch;
 mod depth;
+mod displays;
 mod gamma;
 mod idle;
+mod mpd;
 mod notifd;
+mod obex;
 mod recording;
 mod wake;
 
@@ -39,6 +42,12 @@ struct DaemonState {
     emojis: Vec<EmojiItem>,
     /// Silent mode: notifications are stored but only critical ones pop up.
     silent: bool,
+}
+
+/// The daemon state, also after a thread panicked while holding it: one failed request must not
+/// take locking, notifications and every later request down with it.
+fn lock_state(state: &Mutex<DaemonState>) -> std::sync::MutexGuard<'_, DaemonState> {
+    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Caffeinate (idle inhibitor held by prism-ui). Global so the prism-ui supervisor can
@@ -135,12 +144,40 @@ fn terminate(mut child: Child) {
     let _ = child.wait();
 }
 
+/// Connect to prism-ui without blocking: a hung prism-ui with a full listen backlog must not
+/// stall the caller, and neither may a write to it.
+fn connect_ui(path: &std::path::Path) -> std::io::Result<UnixStream> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= addr.sun_path.len() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (d, s) in addr.sun_path.iter_mut().zip(bytes) {
+        *d = *s as libc::c_char;
+    }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    if unsafe { libc::connect(fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr, len) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    stream.set_nonblocking(false)?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    Ok(stream)
+}
+
 /// Send a command to the resident `prism-ui daemon`, starting it if it is not up yet.
 fn send_ui(cmd: &prism_common::UiCommand) -> Result<String, String> {
     let json = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
     let path = prism_common::get_ui_socket_path();
     for attempt in 0..30 {
-        if let Ok(mut stream) = UnixStream::connect(&path) {
+        if let Ok(mut stream) = connect_ui(&path) {
             return writeln!(stream, "{}", json).map(|_| "ok".to_string()).map_err(|e| e.to_string());
         }
         if attempt == 0 {
@@ -183,15 +220,15 @@ fn ensure_ui_daemon() {
     });
 }
 
-fn open_popup(_st: &mut DaemonState, mode_arg: &str) -> Result<String, String> {
+fn open_popup(mode_arg: &str) -> Result<String, String> {
     send_ui(&prism_common::UiCommand::Open(mode_arg.to_string())).map(|_| format!("{}_opened", mode_arg))
 }
 
-fn toggle_or_spawn_popup(_st: &mut DaemonState, mode_arg: &str) -> Result<String, String> {
+fn toggle_or_spawn_popup(mode_arg: &str) -> Result<String, String> {
     send_ui(&prism_common::UiCommand::Toggle(mode_arg.to_string())).map(|_| format!("{}_toggled", mode_arg))
 }
 
-fn close_active_popup(_st: &mut DaemonState) -> String {
+fn close_active_popup() -> String {
     match send_ui(&prism_common::UiCommand::Close) {
         Ok(_) => "popup_closed".to_string(),
         Err(e) => e,
@@ -207,41 +244,28 @@ fn send_notif(msg: prism_common::NotifOverlayMessage) {
     let _ = send_ui(&prism_common::UiCommand::Notify(msg));
 }
 
-fn start_clipboard_daemon() {
-    if std::env::var("WAYLAND_DISPLAY").is_err() && std::env::var("WAYLAND_SOCKET").is_err() {
-        return;
+/// Clipboard history: watch the selection (ext-data-control) and store text and images, except
+/// Prism's own copies, password-manager secrets and sensitive-looking text.
+fn start_clipboard_daemon(state: Arc<Mutex<DaemonState>>) {
+    let ok = prism_common::wlclip::watch(move |sel| {
+        if sel.is_self() {
+            return;
+        }
+        let mut st = lock_state(&state);
+        match &sel.content {
+            prism_common::wlclip::Content::Text(t) => {
+                if !t.trim().is_empty() && !prism_common::clipboard::ClipboardItem::is_sensitive(t) {
+                    st.clipboard.add_text(t.clone());
+                }
+            }
+            prism_common::wlclip::Content::Png(bytes) => {
+                st.clipboard.add_image(bytes);
+            }
+        }
+    });
+    if !ok {
+        eprintln!("[prismd/clipboard] clipboard history unavailable");
     }
-
-    // Terminate any stale watchers
-    let _ = Command::new("pkill")
-        .args(["-f", "wl-paste .*capture-"])
-        .status();
-
-    eprintln!("[prismd/clipboard] Spawning clipboard background watchers...");
-
-    // 1. Text watcher thread
-    thread::spawn(|| {
-        loop {
-            let mut cmd = Command::new("wl-paste");
-            cmd.args(["-t", "text/plain", "--watch", "prism-ctl", "clipboard", "capture-text"]);
-            if let Ok(mut child) = cmd.spawn() {
-                let _ = child.wait();
-            }
-            thread::sleep(Duration::from_secs(2));
-        }
-    });
-
-    // 2. Image watcher thread
-    thread::spawn(|| {
-        loop {
-            let mut cmd = Command::new("wl-paste");
-            cmd.args(["-t", "image/png", "--watch", "prism-ctl", "clipboard", "capture-image"]);
-            if let Ok(mut child) = cmd.spawn() {
-                let _ = child.wait();
-            }
-            thread::sleep(Duration::from_secs(2));
-        }
-    });
 }
 
 /// Receives notifications from the notification server (notifd.rs).
@@ -278,7 +302,7 @@ impl notifd::Handler for NotifHandler {
         n.image = i.image;
         n.preview = i.preview;
         let (popup, silent) = {
-            let mut st = state.lock().unwrap();
+            let mut st = lock_state(&state);
             if i.transient {
                 n.id = if i.replaces_id != 0 { i.replaces_id } else { st.notifications.reserve_id() };
             } else {
@@ -296,7 +320,7 @@ impl notifd::Handler for NotifHandler {
     fn close(&self, id: u32) {
         let Some(state) = self.state.upgrade() else { return };
         send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
-        state.lock().unwrap().notifications.remove(id);
+        lock_state(&state).notifications.remove(id);
         notifd::emit_closed(id, notifd::CLOSED_BY_CALL);
     }
 }
@@ -339,9 +363,7 @@ fn start_clipboard_pruner(state: Arc<Mutex<DaemonState>>) {
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_secs(900)); // 15 minutes
-            if let Ok(mut st) = state.lock() {
-                st.clipboard.prune_older_than(86400); // 24 hours
-            }
+            lock_state(&state).clipboard.prune_older_than(86400); // 24 hours
         }
     });
 }
@@ -356,18 +378,30 @@ static INDEX_STATE: Mutex<(String, String)> = Mutex::new((String::new(), String:
 
 static LOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Exists from locking until a clean unlock (in the runtime dir, so it ends with the login).
+fn lock_marker() -> std::path::PathBuf {
+    get_socket_path().with_file_name("prism-locked")
+}
+
 /// Lock the session. A supervisor thread runs prism-lock until it exits 0 (unlocked). If it
 /// dies any other way the compositor keeps the session locked with nothing on screen, so a
 /// new prism-lock is started to take the lock over. Exit code 3 means the compositor cannot
 /// lock at all; that is not retried.
-fn lock_screen(_st: &mut DaemonState) -> Result<&'static str, String> {
+///
+/// The marker file outlives prismd: restarting the service also ends prism-lock, and the next
+/// prismd uses the marker to put a prompt back on the locked session.
+fn lock_screen() -> Result<&'static str, String> {
     if LOCK_ACTIVE.swap(true, Ordering::SeqCst) {
         return Ok("already_locked");
+    }
+    if let Err(e) = fs::write(lock_marker(), b"") {
+        eprintln!("[prismd] cannot write the lock marker: {e}");
     }
     eprintln!("[prismd] Spawning prism-lock...");
     let mut child = match spawn_prism_lock(&[]) {
         Ok(c) => c,
         Err(e) => {
+            let _ = fs::remove_file(lock_marker());
             LOCK_ACTIVE.store(false, Ordering::SeqCst);
             return Err(e);
         }
@@ -379,9 +413,13 @@ fn lock_screen(_st: &mut DaemonState) -> Result<&'static str, String> {
             let status = child.wait();
             let code = status.as_ref().ok().and_then(|s| s.code());
             match code {
-                Some(0) => break,
+                Some(0) => {
+                    let _ = fs::remove_file(lock_marker());
+                    break;
+                }
                 Some(3) => {
                     eprintln!("[prismd] prism-lock: compositor cannot lock the session");
+                    let _ = fs::remove_file(lock_marker());
                     break;
                 }
                 _ => {
@@ -481,6 +519,9 @@ fn apply_phone(cfg: &Config) {
 fn apply_config(st: &DaemonState) {
     apply_blur(&st.config);
     apply_phone(&st.config);
+    mpd::apply(&st.config);
+    obex::apply(&st.config);
+    displays::apply(&st.config);
     st.bluelight.update_config(&st.config);
     st.depth.update_config(&st.config);
     if let Some(idle) = &st.idle {
@@ -495,6 +536,15 @@ fn save_and_apply_config(st: &mut DaemonState) {
         eprintln!("[prismd] saving config failed: {}", e);
     }
     apply_config(st);
+}
+
+/// Clipboard text for `clipboard list`: at most 50 characters.
+fn clip_preview(text: &str) -> String {
+    if text.chars().count() > 50 {
+        format!("{}...", text.chars().take(47).collect::<String>())
+    } else {
+        text.to_string()
+    }
 }
 
 fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
@@ -549,21 +599,20 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             Ok(IpcCommand::Help) => IpcResponse::Ok(Some("Prism IPC server active".to_string())),
 
             Ok(IpcCommand::Lock(LockAction::Status)) => {
-                let st = state.lock().unwrap();
-                let idle = st.is_idle.load(Ordering::SeqCst);
+                // Never waits for the state: remote input asks this with a short timeout.
+                let idle = state.try_lock().map(|st| st.is_idle.load(Ordering::SeqCst)).unwrap_or(false);
                 let locked = if LOCK_ACTIVE.load(Ordering::SeqCst) { "locked" } else { "unlocked" };
                 IpcResponse::Ok(Some(format!("{locked}, idle={}", idle)))
             }
             Ok(IpcCommand::Lock(LockAction::Lock)) => {
-                let mut st = state.lock().unwrap();
-                match lock_screen(&mut st) {
+                match lock_screen() {
                     Ok(msg) => IpcResponse::Ok(Some(msg.to_string())),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
 
             Ok(IpcCommand::Launcher(LauncherAction::Query(query))) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let matches = search_apps(&st.apps, &query);
                 let count = matches.len();
                 let summary: Vec<String> = matches
@@ -575,7 +624,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Launcher(LauncherAction::List)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let count = st.apps.len();
                 let summary: Vec<String> = st.apps
                     .iter()
@@ -586,7 +635,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Launcher(LauncherAction::Run(id))) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 if let Some(app) = st.apps.iter().find(|a| a.id.eq_ignore_ascii_case(&id)) {
                     match app.launch() {
                         Ok(_) => IpcResponse::Ok(Some(format!("Launched {}", app.name))),
@@ -598,7 +647,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Clipboard(ClipboardAction::List)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let count = st.clipboard.items.len();
                 let summary: Vec<String> = st.clipboard
                     .items
@@ -606,11 +655,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                     .take(10)
                     .enumerate()
                     .map(|(i, item)| {
-                        let preview = if item.content.len() > 50 {
-                            format!("{}...", &item.content[0..47])
-                        } else {
-                            item.content.clone()
-                        };
+                        let preview = clip_preview(&item.content);
                         format!("[{}] {}", i, preview.replace('\n', " "))
                     })
                     .collect();
@@ -618,7 +663,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Clipboard(ClipboardAction::Get(idx))) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 if let Some(item) = st.clipboard.items.get(idx) {
                     IpcResponse::Ok(Some(item.content.clone()))
                 } else {
@@ -627,7 +672,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Clipboard(ClipboardAction::Add(text))) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 if st.clipboard.add_text(text) {
                     IpcResponse::Ok(Some("added".to_string()))
                 } else {
@@ -635,7 +680,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 }
             }
             Ok(IpcCommand::Clipboard(ClipboardAction::AddImage(bytes))) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 if st.clipboard.add_image(&bytes) {
                     IpcResponse::Ok(Some("image_added".to_string()))
                 } else {
@@ -643,59 +688,82 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 }
             }
 
+            Ok(IpcCommand::Clipboard(ClipboardAction::Copy(idx))) => {
+                let st = lock_state(&state);
+                match st.clipboard.items.get(idx) {
+                    Some(item) if item.is_image => {
+                        let local = item.image_path.as_deref().unwrap_or("").trim_start_matches("file://").to_string();
+                        match std::fs::read(&local) {
+                            Ok(bytes) if std::path::Path::new(&local).starts_with(prism_common::clipboard::get_image_cache_dir()) => {
+                                prism_common::wlclip::copy(&["image/png"], bytes, false);
+                                IpcResponse::Ok(Some("copied".to_string()))
+                            }
+                            _ => IpcResponse::Error(format!("cannot read image {local}")),
+                        }
+                    }
+                    Some(item) => {
+                        prism_common::wlclip::copy_text(&item.content, false);
+                        IpcResponse::Ok(Some("copied".to_string()))
+                    }
+                    None => IpcResponse::Error(format!("No clipboard entry at index {}", idx)),
+                }
+            }
+
             Ok(IpcCommand::Clipboard(ClipboardAction::Clear)) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 st.clipboard.clear();
                 IpcResponse::Ok(Some("cleared".to_string()))
             }
             Ok(IpcCommand::Clipboard(ClipboardAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "clipboard") {
+                match toggle_or_spawn_popup("clipboard") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Clipboard(ClipboardAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "clipboard") {
+                match open_popup("clipboard") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Clipboard(ClipboardAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
 
             Ok(IpcCommand::Wallpaper(WallpaperAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "wallpaper") {
+                match toggle_or_spawn_popup("wallpaper") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Wallpaper(WallpaperAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "wallpaper") {
+                match open_popup("wallpaper") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Wallpaper(WallpaperAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
             Ok(IpcCommand::Wallpaper(WallpaperAction::Set { path, scheme, mode })) => {
-                match prism_common::wallpaper::set_wallpaper(&path, None, scheme.as_deref(), mode.as_deref()) {
+                let daemon = lock_state(&state).config.wallpaper_daemon.clone();
+                if daemon == "prism" && path.exists() {
+                    let _ = send_ui(&prism_common::UiCommand::Wallpaper(path.clone()));
+                }
+                match prism_common::wallpaper::set_wallpaper(&path, Some(&daemon), scheme.as_deref(), mode.as_deref()) {
                     Ok(_) => {
-                        let mut st = state.lock().unwrap();
+                        let mut st = lock_state(&state);
                         st.theme = Theme::load();
                         IpcResponse::Ok(Some(format!("Wallpaper set: {}", path.display())))
                     }
                     Err(e) => IpcResponse::Error(format!("Failed to set wallpaper: {}", e)),
                 }
+            }
+            Ok(IpcCommand::BluetoothSend { address, files }) => {
+                obex::send(address, files);
+                IpcResponse::Ok(Some("sending".to_string()))
             }
             Ok(IpcCommand::Wallpaper(WallpaperAction::Get)) => {
                 if let Some(wp) = prism_common::wallpaper::get_current_wallpaper() {
@@ -705,12 +773,12 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 }
             }
             Ok(IpcCommand::Theme(ThemeAction::Reload)) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 st.theme = Theme::load();
                 IpcResponse::Ok(Some("Theme palette reloaded".to_string()))
             }
             Ok(IpcCommand::Theme(ThemeAction::GetPalette)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let json = serde_json::to_string_pretty(&st.theme).unwrap_or_default();
                 IpcResponse::Ok(Some(json))
             }
@@ -751,47 +819,41 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Launcher(LauncherAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "launcher") {
+                match toggle_or_spawn_popup("launcher") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Launcher(LauncherAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "launcher") {
+                match open_popup("launcher") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Launcher(LauncherAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
 
             Ok(IpcCommand::Search(SearchAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "search") {
+                match toggle_or_spawn_popup("search") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Search(SearchAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "search") {
+                match open_popup("search") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Search(SearchAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
 
             Ok(IpcCommand::Search(SearchAction::SetQuery(query))) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let app_matches = search_apps(&st.apps, &query);
                 let file_matches = prism_common::search_files(&query, 10);
 
@@ -818,28 +880,25 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Notif(NotifAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "notif-center") {
+                match toggle_or_spawn_popup("notif-center") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Notif(NotifAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "notif-center") {
+                match open_popup("notif-center") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Notif(NotifAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
             Ok(IpcCommand::Notif(NotifAction::Send { app_name, summary, body })) => {
                 let mut notif = Notification::new(0, app_name, summary, body);
                 let silent = {
-                    let mut st = state.lock().unwrap();
+                    let mut st = lock_state(&state);
                     notif.id = st.notifications.add(notif.clone());
                     st.silent
                 };
@@ -850,7 +909,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some(format!("notification_id:{}", id)))
             }
             Ok(IpcCommand::Notif(NotifAction::List)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 if st.notifications.notifications.is_empty() {
                     IpcResponse::Ok(Some("No notifications in history".to_string()))
                 } else {
@@ -863,7 +922,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
             Ok(IpcCommand::Notif(NotifAction::Clear)) => {
                 send_notif(prism_common::NotifOverlayMessage::Dismiss { id: 0 });
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 let ids: Vec<u32> = st.notifications.notifications.iter().map(|n| n.id).collect();
                 st.notifications.clear();
                 drop(st);
@@ -873,17 +932,22 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some("Notifications cleared".to_string()))
             }
             Ok(IpcCommand::Notif(NotifAction::Silent(want))) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 st.silent = want.unwrap_or(!st.silent);
                 IpcResponse::Ok(Some(format!("silent:{}", st.silent)))
             }
             Ok(IpcCommand::Notif(NotifAction::ClearApp(app))) => {
-                let mut st = state.lock().unwrap();
                 let key = app.to_lowercase();
-                let ids: Vec<u32> = st.notifications.notifications.iter().filter(|n| n.app_name.to_lowercase() == key).map(|n| n.id).collect();
+                let ids: Vec<u32> = {
+                    let mut st = lock_state(&state);
+                    let ids: Vec<u32> = st.notifications.notifications.iter().filter(|n| n.app_name.to_lowercase() == key).map(|n| n.id).collect();
+                    for id in &ids {
+                        st.notifications.remove(*id);
+                    }
+                    ids
+                };
                 for id in &ids {
                     send_notif(prism_common::NotifOverlayMessage::Dismiss { id: *id });
-                    st.notifications.remove(*id);
                     notifd::emit_closed(*id, notifd::CLOSED_DISMISSED);
                 }
                 IpcResponse::Ok(Some(format!("cleared:{}", ids.len())))
@@ -892,12 +956,12 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 // Tell the app, then close the notification (spec: unless "resident").
                 notifd::emit_action(id, &action);
                 send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
-                state.lock().unwrap().notifications.remove(id);
+                lock_state(&state).notifications.remove(id);
                 notifd::emit_closed(id, notifd::CLOSED_DISMISSED);
                 IpcResponse::Ok(Some(format!("invoked:{id}:{action}")))
             }
             Ok(IpcCommand::Notif(NotifAction::State)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let flags = prism_common::ipc::DaemonFlags { silent: st.silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst) };
                 IpcResponse::Ok(serde_json::to_string(&flags).ok())
             }
@@ -910,8 +974,8 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
             Ok(IpcCommand::Notif(NotifAction::Dismiss(id))) => {
                 send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
-                let mut st = state.lock().unwrap();
-                if st.notifications.remove(id) {
+                let removed = lock_state(&state).notifications.remove(id);
+                if removed {
                     notifd::emit_closed(id, notifd::CLOSED_DISMISSED);
                     IpcResponse::Ok(Some(format!("Dismissed notification #{}", id)))
                 } else {
@@ -966,21 +1030,21 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::BlueLight(BlueLightAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 st.config.blue_light_enabled = !st.config.blue_light_enabled;
                 let enabled = st.config.blue_light_enabled;
                 save_and_apply_config(&mut st);
                 IpcResponse::Ok(Some(format!("enabled:{}", enabled)))
             }
             Ok(IpcCommand::BlueLight(BlueLightAction::ManualToggle)) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 st.config.blue_light_manual_on = !st.config.blue_light_manual_on;
                 let manual_on = st.config.blue_light_manual_on;
                 save_and_apply_config(&mut st);
                 IpcResponse::Ok(Some(format!("manual_on:{}", manual_on)))
             }
             Ok(IpcCommand::BlueLight(BlueLightAction::Dump)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let data = serde_json::to_string(&st.bluelight.status()).unwrap_or_default();
                 IpcResponse::Ok(Some(data))
             }
@@ -999,7 +1063,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Emoji(EmojiAction::Search(q))) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let matches = prism_common::search_emojis(&st.emojis, &q, None, 10);
                 if matches.is_empty() {
                     IpcResponse::Ok(Some(format!("No emojis found for '{}'", q)))
@@ -1012,12 +1076,12 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 }
             }
             Ok(IpcCommand::Emoji(EmojiAction::Copy(glyph))) => {
-                let mut st = state.lock().unwrap();
+                let mut st = lock_state(&state);
                 st.clipboard.add_text(glyph.clone());
                 IpcResponse::Ok(Some(format!("Copied '{}' to clipboard", glyph)))
             }
             Ok(IpcCommand::Emoji(EmojiAction::List)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 let mut lines = Vec::new();
                 for m in st.emojis.iter().take(20) {
                     lines.push(format!("{}  {}", m.emoji, m.name));
@@ -1025,30 +1089,26 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some(lines.join("\n")))
             }
             Ok(IpcCommand::Emoji(EmojiAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "emoji") {
+                match toggle_or_spawn_popup("emoji") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
 
             Ok(IpcCommand::Power(PowerAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "power") {
+                match toggle_or_spawn_popup("power") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Power(PowerAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "power") {
+                match open_popup("power") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Power(PowerAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
             Ok(IpcCommand::Power(act)) => {
@@ -1059,36 +1119,29 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
 
             Ok(IpcCommand::Settings(SettingsAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "settings") {
+                match toggle_or_spawn_popup("settings") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Settings(SettingsAction::Open) | IpcCommand::Settings(SettingsAction::OpenTab(_))) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "settings") {
+                match open_popup("settings") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Settings(SettingsAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
 
             Ok(IpcCommand::DesktopEdit(DesktopEditAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                let _ = &mut st;
                 match send_ui(&prism_common::UiCommand::EditMode("toggle".into())) {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::DesktopEdit(DesktopEditAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                let _ = &mut st;
                 match send_ui(&prism_common::UiCommand::EditMode("open".into())) {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
@@ -1162,22 +1215,19 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some(lines.join("\n")))
             }
             Ok(IpcCommand::Keybinds(KeybindsAction::Toggle)) => {
-                let mut st = state.lock().unwrap();
-                match toggle_or_spawn_popup(&mut st, "keybinds") {
+                match toggle_or_spawn_popup("keybinds") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Keybinds(KeybindsAction::Open)) => {
-                let mut st = state.lock().unwrap();
-                match open_popup(&mut st, "keybinds") {
+                match open_popup("keybinds") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::Keybinds(KeybindsAction::Close)) => {
-                let mut st = state.lock().unwrap();
-                let msg = close_active_popup(&mut st);
+                let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
             }
 
@@ -1217,7 +1267,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 )))
             }
             Ok(IpcCommand::Depth(DepthAction::Generate)) => {
-                let st = state.lock().unwrap();
+                let st = lock_state(&state);
                 if !st.config.depth_enabled {
                     IpcResponse::Error("The depth effect is turned off".to_string())
                 } else if prism_common::wallpaper::get_current_wallpaper().is_none() {
@@ -1315,6 +1365,9 @@ fn main() {
 
     apply_blur(&cfg);
     apply_phone(&cfg);
+    mpd::apply(&cfg);
+    obex::apply(&cfg);
+    displays::apply(&cfg);
     let state = Arc::new(Mutex::new(DaemonState {
         config: cfg,
         theme,
@@ -1329,15 +1382,12 @@ fn main() {
         silent: false,
     }));
 
-    let idle_state = Arc::downgrade(&state);
     let idle = idle::start_idle_monitor(
         idle_start,
         is_idle,
         Box::new(move || {
-            if let Some(state) = idle_state.upgrade() {
-                if let Err(e) = lock_screen(&mut state.lock().unwrap()) {
-                    eprintln!("[prismd/idle] lock failed: {}", e);
-                }
+            if let Err(e) = lock_screen() {
+                eprintln!("[prismd/idle] lock failed: {}", e);
             }
         }),
         // QML dimmed the screens 30 s before the lock; done in the gamma ramp (instant, every
@@ -1349,11 +1399,11 @@ fn main() {
         }),
     );
     {
-        let mut st = state.lock().unwrap();
+        let mut st = lock_state(&state);
         st.idle = idle;
         let watch_state = Arc::clone(&state);
         config_watch::start(&st.config, move |cfg| {
-            let mut st = watch_state.lock().unwrap();
+            let mut st = lock_state(&watch_state);
             st.config = cfg;
             apply_config(&st);
         });
@@ -1364,11 +1414,17 @@ fn main() {
         // One resident prism-ui hosts the desktop widgets and every overlay.
         eprintln!("[prismd] Starting resident prism-ui daemon...");
         ensure_ui_daemon();
-        start_clipboard_daemon();
+        start_clipboard_daemon(Arc::clone(&state));
         start_clipboard_pruner(Arc::clone(&state));
         start_popup_watcher(Arc::clone(&state));
         stop_python_bridge();
         notifd::start(Arc::new(NotifHandler { state: Arc::downgrade(&state) }));
+        if lock_marker().exists() {
+            eprintln!("[prismd] the session was locked when prismd stopped; restoring the lock screen");
+            if let Err(e) = lock_screen() {
+                eprintln!("[prismd] restoring the lock screen failed: {e}");
+            }
+        }
     }
 
     println!("Prism IPC listening on '{}'", socket_path.display());
@@ -1383,5 +1439,18 @@ fn main() {
             }
             Err(e) => eprintln!("Error accepting IPC connection: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_preview_cuts_on_characters() {
+        let text = format!("{}😀 and more text after the emoji", "a".repeat(46));
+        assert_eq!(clip_preview(&text), format!("{}😀...", "a".repeat(46)));
+        assert_eq!(clip_preview("short"), "short");
+        assert_eq!(clip_preview(&"é".repeat(50)), "é".repeat(50));
     }
 }

@@ -174,68 +174,7 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                     let text = args.get(2).cloned().unwrap_or_default();
                     ClipboardAction::Add(text)
                 }
-                Some("capture-text") => {
-                    use std::io::Read;
-                    if prism_common::clipboard::consume_self_copy_lock() {
-                        std::process::exit(0);
-                    }
-                    let mut input = String::new();
-                    let _ = std::io::stdin().read_to_string(&mut input);
-                    if input.trim().is_empty()
-                        || prism_common::clipboard::selection_is_secret()
-                        || prism_common::clipboard::ClipboardItem::is_sensitive(&input)
-                    {
-                        std::process::exit(0);
-                    }
-                    ClipboardAction::Add(input)
-                }
-                Some("capture-image") => {
-                    use std::io::Read;
-                    if prism_common::clipboard::consume_self_copy_lock() {
-                        std::process::exit(0);
-                    }
-                    let mut bytes = Vec::new();
-                    let _ = std::io::stdin().read_to_end(&mut bytes);
-                    if bytes.is_empty() || prism_common::clipboard::selection_is_secret() {
-                        std::process::exit(0);
-                    }
-                    ClipboardAction::AddImage(bytes)
-                }
-                Some("copy") => {
-                    let idx = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let store = prism_common::clipboard::ClipboardStore::load();
-                    if let Some(item) = store.items.get(idx) {
-                        prism_common::clipboard::touch_self_copy_lock();
-                        if item.is_image {
-                            if let Some(ref path) = item.image_path {
-                                let local = path.replace("file://", "");
-                                if let Ok(f) = std::fs::File::open(&local) {
-                                    let _ = std::process::Command::new("wl-copy")
-                                        .arg("-t")
-                                        .arg("image/png")
-                                        .stdin(f)
-                                        .status();
-                                }
-                            }
-                        } else {
-                            if let Ok(mut child) = std::process::Command::new("wl-copy")
-                                .stdin(std::process::Stdio::piped())
-                                .spawn()
-                            {
-                                if let Some(mut sin) = child.stdin.take() {
-                                    use std::io::Write;
-                                    let _ = sin.write_all(item.content.as_bytes());
-                                }
-                                let _ = child.wait();
-                            }
-                        }
-                        println!("copied");
-                        std::process::exit(0);
-                    } else {
-                        eprintln!("Index out of range");
-                        std::process::exit(1);
-                    }
-                }
+                Some("copy") => ClipboardAction::Copy(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0)),
                 _ => ClipboardAction::Toggle,
             };
             Ok(IpcCommand::Clipboard(act))

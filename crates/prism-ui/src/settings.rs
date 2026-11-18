@@ -26,7 +26,7 @@ use crate::ui::Style;
 use crate::uikit::{self, ButtonKind, Dropdown, Palette};
 use crate::waker::Waker;
 
-pub const TABS: [&str; 10] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search", "Notifications", "Phone", "Capture"];
+pub const TABS: [&str; 11] = ["Wallpaper", "Lock Screen", "Greeter", "Display", "Desktop", "UI", "Search", "Notifications", "Phone", "Capture", "Services"];
 /// Undo steps kept per Settings session.
 const UNDO_LIMIT: usize = 100;
 
@@ -105,9 +105,19 @@ enum Control {
     /// (label, value) options; `fonts` renders each option in its own font.
     Combo { options: fn() -> Vec<(String, String)>, get: fn(&Config) -> String, set: fn(&mut Config, &str), fonts: bool },
     Buttons(&'static [(&'static str, Action, ButtonKind)]),
+    /// Toggle pills: (label, value) options, any number on.
+    Pills { options: &'static [(&'static str, &'static str)], get: fn(&Config) -> Vec<String>, set: fn(&mut Config, Vec<String>) },
     /// Section heading (the row title) grouping the rows after it; not focusable, hidden
     /// in search results and when its section has no visible rows.
     Heading,
+}
+
+const LOCK_THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Stencil", "stencil"), ("Horizon", "horizon"), ("Sentence", "sentence"), ("Aperture", "aperture"), ("Tide", "tide")];
+const KEEP_DESKTOP_ROW: &str = "Keep Desktop Wallpaper Original";
+
+/// Greyed out and not changeable: the option has no effect with the current settings.
+fn row_disabled(r: &Row, c: &Config) -> bool {
+    r.title == KEEP_DESKTOP_ROW && !c.wallpaper_filters_enabled
 }
 
 struct Row {
@@ -141,6 +151,7 @@ impl Control {
             Control::Switch(get, _) => Some(get(c).to_string()),
             Control::Slider { get, .. } => Some(get(c).to_string()),
             Control::Text { get, .. } | Control::Combo { get, .. } => Some(get(c)),
+            Control::Pills { get, .. } => Some(get(c).join(",")),
             Control::Buttons(_) | Control::Heading => None,
         }
     }
@@ -154,6 +165,7 @@ impl Control {
                 set(to, &get(from));
             }
             Control::Combo { get, set, .. } => set(to, &get(from)),
+            Control::Pills { get, set, .. } => set(to, get(from)),
             Control::Buttons(_) | Control::Heading => {}
         }
     }
@@ -196,7 +208,13 @@ fn rows() -> Vec<Row> {
         Row { tab: 0, title: "Wallpaper Directory", subtitle: "The directory containing your wallpaper images (~ is expanded).", visible: always,
             control: Text { get: |c| c.wallpaper_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.wallpaper_dir = v.to_string(); true }, placeholder: "~/Pictures/Wallpapers", browse: true } },
         Row { tab: 0, title: "Wallpaper Daemon", subtitle: "The backend used to set and render your desktop wallpapers.", visible: always,
-            control: Combo { options: || opts(&[("awww", "awww"), ("swww", "swww")]), get: |c| c.wallpaper_daemon.clone(), set: |c, v| c.wallpaper_daemon = v.to_string(), fonts: false } },
+            control: Combo { options: || opts(&[("Built-in", "prism"), ("awww", "awww"), ("swww", "swww")]), get: |c| c.wallpaper_daemon.clone(), set: |c, v| c.wallpaper_daemon = v.to_string(), fonts: false } },
+        Row { tab: 0, title: "Transition", subtitle: "How a new wallpaper replaces the old one.", visible: |c| c.wallpaper_daemon == "prism",
+            control: Combo { options: || opts(&[("Random", "random"), ("Fade", "fade"), ("Wipe", "wipe"), ("Grow", "grow"), ("None", "none")]), get: |c| c.wallpaper_transition.clone(), set: |c, v| c.wallpaper_transition = v.to_string(), fonts: false } },
+        Row { tab: 0, title: "Use Wallpaper Filters", subtitle: "Choose a colour filter when applying a wallpaper.", visible: always,
+            control: Switch(|c| c.wallpaper_filters_enabled, |c, v| c.wallpaper_filters_enabled = v) },
+        Row { tab: 0, title: KEEP_DESKTOP_ROW, subtitle: "Filters apply to the lock screen, greeter and previews, not the desktop.", visible: always,
+            control: Switch(|c| c.wallpaper_keep_desktop, |c, v| c.wallpaper_keep_desktop = v) },
         heading(0, "Depth Effect"),
         Row { tab: 0, title: "Wallpaper Depth", subtitle: "Makes desktop widgets pass behind wallpaper foregrounds.", visible: always,
             control: Switch(|c| c.depth_enabled, |c, v| c.depth_enabled = v) },
@@ -216,14 +234,33 @@ fn rows() -> Vec<Row> {
         Row { tab: 0, title: "Depth Actions", subtitle: "Generate the mask for the current wallpaper or clear cached files.", visible: |c| c.depth_enabled,
             control: Buttons(&[("Generate now", Action::DepthGenerate, ButtonKind::Primary), ("Clear cache", Action::DepthClear, ButtonKind::Danger)]) },
         // ── Lock Screen ──
+        Row { tab: 1, title: "Lockscreen Theme", subtitle: "The design of the lock screen.", visible: always,
+            control: Combo { options: || opts(LOCK_THEMES), get: |c| c.lockscreen_theme.clone(), set: |c, v| c.lockscreen_theme = v.to_string(), fonts: false } },
         Row { tab: 1, title: "Lockscreen Power Menu", subtitle: "Allow Suspend, Reboot and Shutdown directly from the lockscreen.", visible: always,
             control: Switch(|c| c.show_lockscreen_session_controls, |c, v| c.show_lockscreen_session_controls = v) },
-        Row { tab: 1, title: "Lockscreen Alignment", subtitle: "Align the lockscreen elements to the left or right edge.", visible: always,
+        Row { tab: 1, title: "Lockscreen Alignment", subtitle: "Align the lockscreen elements to the left or right edge (Classic theme).", visible: |c| c.lockscreen_theme == "classic" || c.greeter_theme == "classic",
             control: Combo { options: || opts(&[("Left", "left"), ("Right", "right")]), get: |c| c.lockscreen_alignment.clone(), set: |c, v| c.lockscreen_alignment = v.to_string(), fonts: false } },
         // ── Greeter ──
+        Row { tab: 2, title: "Greeter Theme", subtitle: "The design of the login screen.", visible: always,
+            control: Combo { options: || { let mut o = opts(&[("Mirror the Lock Screen", "mirror")]); o.extend(opts(LOCK_THEMES)); o }, get: |c| c.greeter_theme.clone(), set: |c, v| c.greeter_theme = v.to_string(), fonts: false } },
         Row { tab: 2, title: "Remember Last User", subtitle: "Pre-select the last user and session on the next boot (applies after logout).", visible: always,
             control: Switch(|c| c.remember_last_user, |c, v| c.remember_last_user = v) },
         // ── Display ──
+        heading(3, "Monitor"),
+        Row { tab: 3, title: "Monitor", subtitle: "Which monitor the settings below change.", visible: |_| crate::displays::count() > 1,
+            control: Combo { options: crate::displays::monitor_options, get: |c| crate::displays::selected(c).map(|o| o.name).unwrap_or_default(), set: |c, v| c.display_output = v.to_string(), fonts: false } },
+        Row { tab: 3, title: "Enabled", subtitle: "Turn this monitor off or on.", visible: |_| crate::displays::count() > 1,
+            control: Switch(|c| crate::displays::entry(c).map(|e| e.enabled).unwrap_or(true), |c, v| crate::displays::update(c, |e| e.enabled = v)) },
+        Row { tab: 3, title: "Resolution", subtitle: "Size and refresh rate. A change is undone after 15 seconds unless you keep it.", visible: |_| crate::displays::count() > 0,
+            control: Combo { options: crate::displays::mode_options, get: |c| crate::displays::entry(c).map(|e| e.mode).unwrap_or_default(), set: |c, v| crate::displays::update(c, |e| e.mode = v.to_string()), fonts: false } },
+        Row { tab: 3, title: "Display Scale", subtitle: "How large everything is drawn on this monitor (compositor scale).", visible: |_| crate::displays::count() > 0,
+            control: Combo { options: crate::displays::scale_options, get: |c| crate::displays::entry(c).map(|e| format!("{:.2}", e.scale)).unwrap_or_default(), set: |c, v| { if let Ok(s) = v.parse::<f64>() { crate::displays::update(c, |e| e.scale = s) } }, fonts: false } },
+        Row { tab: 3, title: "Rotation", subtitle: "", visible: |_| crate::displays::count() > 0,
+            control: Combo { options: || opts(&[("Normal", "normal"), ("90\u{00B0}", "90"), ("180\u{00B0}", "180"), ("270\u{00B0}", "270"), ("Flipped", "flipped")]), get: |c| crate::displays::entry(c).map(|e| e.transform).unwrap_or_default(), set: |c, v| crate::displays::update(c, |e| e.transform = v.to_string()), fonts: false } },
+        Row { tab: 3, title: "Adaptive Sync", subtitle: "Variable refresh rate (FreeSync / G-Sync Compatible).", visible: |c| crate::displays::selected(c).is_some_and(|o| o.adaptive_sync.is_some()),
+            control: Switch(|c| crate::displays::entry(c).and_then(|e| e.adaptive_sync).unwrap_or(false), |c, v| crate::displays::update(c, |e| e.adaptive_sync = Some(v))) },
+        Row { tab: 3, title: "Position", subtitle: "Top-left corner in the layout, as X,Y in logical pixels.", visible: |_| crate::displays::count() > 1,
+            control: Text { get: |c| crate::displays::entry(c).and_then(|e| e.position).map(|(x, y)| format!("{x},{y}")).unwrap_or_default(), set: |c, v| match v.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))) { Some(p) => { crate::displays::update(c, |e| e.position = Some(p)); true } None => false }, placeholder: "0,0", browse: false } },
         heading(3, "Appearance"),
         Row { tab: 3, title: "Global font", subtitle: "Font for the shell and desktop widgets.", visible: always,
             control: Combo {
@@ -362,6 +399,8 @@ fn rows() -> Vec<Row> {
                 set: |c, v| c.notification_popup_position = v.to_string(),
                 fonts: false,
             } },
+        Row { tab: 7, title: "Control Centre Tiles", subtitle: "Tiles shown in the Control Centre; the others close up the gap.", visible: always,
+            control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
         Row { tab: 7, title: "Notification Center Position", subtitle: "Which side of the screen the notification center opens on.", visible: always,
             control: Combo {
                 options: || opts(&[("Left", "left"), ("Center", "center"), ("Right", "right")]),
@@ -424,6 +463,34 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.capture_audio_desktop, |c, v| c.capture_audio_desktop = v) },
         Row { tab: 9, title: "Microphone", subtitle: "Record the default microphone. Also switchable in the capture overlay.", visible: always,
             control: Switch(|c| c.capture_audio_mic, |c, v| c.capture_audio_mic = v) },
+        // ── Services ──
+        heading(10, "Music Player Daemon"),
+        Row { tab: 10, title: "MPD Media Controls", subtitle: "Show MPD as a media player (MPRIS) for media keys, the media widget and the phone. Replaces mpd-mpris.", visible: always,
+            control: Switch(|c| c.mpd_mpris_enabled, |c, v| c.mpd_mpris_enabled = v) },
+        Row { tab: 10, title: "MPD Host", subtitle: "Host name, or the path of MPD's socket.", visible: |c| c.mpd_mpris_enabled,
+            control: Text { get: |c| c.mpd_host.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.mpd_host = v.to_string(); true }, placeholder: "127.0.0.1", browse: false } },
+        Row { tab: 10, title: "MPD Port", subtitle: "TCP port (not used with a socket path).", visible: |c| c.mpd_mpris_enabled && !c.mpd_host.starts_with('/'),
+            control: Text { get: |c| c.mpd_port.to_string(), set: |c, v| match v.trim().parse::<u16>() { Ok(n) if n > 0 => { c.mpd_port = n; true } _ => false }, placeholder: "6600", browse: false } },
+        heading(10, "Authentication"),
+        Row { tab: 10, title: "Polkit Agent", subtitle: "Ask for your password when an app needs administrator rights. Replaces polkit-gnome (stop it first: only one agent per session).", visible: always,
+            control: Switch(|c| c.polkit_agent_enabled, |c, v| c.polkit_agent_enabled = v) },
+        Row { tab: 10, title: "Network Passwords", subtitle: "Ask for Wi-Fi, VPN and 802.1X secrets when NetworkManager needs them. Replaces nm-applet.", visible: always,
+            control: Switch(|c| c.network_agent_enabled, |c, v| c.network_agent_enabled = v) },
+        heading(10, "VPN"),
+        Row { tab: 10, title: "Save VPN User Names", subtitle: "Store the user name typed in the VPN prompt in the connection.", visible: |c| c.network_agent_enabled,
+            control: Switch(|c| c.vpn_save_username, |c, v| c.vpn_save_username = v) },
+        Row { tab: 10, title: "Save VPN Passwords", subtitle: "Store VPN passwords with NetworkManager (system-owned secrets, like nm-applet's \u{201C}store for all users\u{201D}).", visible: |c| c.network_agent_enabled,
+            control: Switch(|c| c.vpn_save_password, |c, v| c.vpn_save_password = v) },
+        heading(10, "Tray Icons"),
+        Row { tab: 10, title: "Network Tray Icon", subtitle: "Network status in the tray; its menu connects VPNs. Replaces nm-applet's icon.", visible: always,
+            control: Switch(|c| c.network_tray, |c, v| c.network_tray = v) },
+        Row { tab: 10, title: "Bluetooth Tray Icon", subtitle: "Bluetooth status in the tray; its menu connects devices and sends files. Replaces blueman's icon.", visible: always,
+            control: Switch(|c| c.bluetooth_tray, |c, v| c.bluetooth_tray = v) },
+        heading(10, "Bluetooth"),
+        Row { tab: 10, title: "Receive Files", subtitle: "Accept files sent from phones and computers over Bluetooth (asks each time; needs bluez-obex). Replaces blueman's file receiving.", visible: always,
+            control: Switch(|c| c.bluetooth_receive_files, |c, v| c.bluetooth_receive_files = v) },
+        Row { tab: 10, title: "Bluetooth Download Folder", subtitle: "Where received files are saved (~ is expanded).", visible: |c| c.bluetooth_receive_files,
+            control: Text { get: |c| c.bluetooth_download_dir.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.bluetooth_download_dir = v.to_string(); true }, placeholder: "~/Downloads", browse: true } },
     ]
 }
 
@@ -777,9 +844,9 @@ impl SettingsView {
                 continue;
             }
             let sub = row_subtitle(r);
-            let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_)) { list.w } else { text_w }, None) };
+            let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. }) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
-                Control::Buttons(_) => th + 12.0 + 34.0,
+                Control::Buttons(_) | Control::Pills { .. } => th + 12.0 + 34.0,
                 _ => th.max(36.0),
             };
             heights.push(ctl_h + 28.0 + if group_start[k] { GROUP_H } else { 0.0 });
@@ -822,6 +889,7 @@ impl SettingsView {
         for (k, &i) in visible.iter().enumerate() {
             match self.rows[i].control {
                 Control::Buttons(btns) => self.focus_order.extend((0..btns.len()).map(|b| Hit::Button(i, b))),
+                Control::Pills { options, .. } => self.focus_order.extend((0..options.len()).map(|b| Hit::Button(i, b))),
                 Control::Text { browse: true, .. } => self.focus_order.extend([Hit::Control(i), Hit::Browse(i)]),
                 Control::Heading => {}
                 _ => self.focus_order.push(Hit::Control(i)),
@@ -851,7 +919,9 @@ impl SettingsView {
             }
             let r = &self.rows[i];
             let ry = y + 14.0;
-            let (_, _, tw, _) = draw_in_box(cr, r.title, &TextStyle { family: &title_fam, px: 15.0, bold: false, color: p.fg }, list.x, ry, text_w, 20.0, Align::Start);
+            let disabled = row_disabled(r, &draft);
+            let title_color = if disabled { (p.fg.0, p.fg.1, p.fg.2, 0.4) } else { p.fg };
+            let (_, _, tw, _) = draw_in_box(cr, r.title, &TextStyle { family: &title_fam, px: 15.0, bold: false, color: title_color }, list.x, ry, text_w, 20.0, Align::Start);
             let modified = r.control.value(&draft) != r.control.value(&self.baseline);
             if modified {
                 // Changed-this-session marker after the title, and a revert button.
@@ -867,7 +937,7 @@ impl SettingsView {
             }
             let sub = row_subtitle(r);
             if !sub.is_empty() {
-                let sw = if matches!(r.control, Control::Buttons(_)) { list.w } else { text_w };
+                let sw = if matches!(r.control, Control::Buttons(_) | Control::Pills { .. }) { list.w } else { text_w };
                 wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) }, sw, Some((list.x, ry + 24.0)));
             }
             let cx = list.x + list.w - CONTROL_W;
@@ -877,7 +947,16 @@ impl SettingsView {
                 Control::Switch(get, _) => {
                     let sr = Rect { x: list.x + list.w - 50.0, y: mid - 14.0, w: 50.0, h: 28.0 };
                     let knob = self.knobs.settled_level(i, get(&draft), crate::ui::SPRING_KNOB, style);
-                    uikit::switch(cr, sr, knob, hov, &p);
+                    if disabled {
+                        unsafe { cairo_push_group(cr) };
+                        uikit::switch(cr, sr, knob, 0.0, &p);
+                        unsafe {
+                            cairo_pop_group_to_source(cr);
+                            cairo_paint_with_alpha(cr, 0.4);
+                        }
+                    } else {
+                        uikit::switch(cr, sr, knob, hov, &p);
+                    }
                     self.control_rects.push((i, sr));
                 }
                 Control::Slider { min, max, get, fmt, .. } => {
@@ -926,6 +1005,20 @@ impl SettingsView {
                         let br = Rect { x: bx, y: by, w, h: 34.0 };
                         let bh = self.hover_fade.level(Hit::Button(i, b), self.hover == Some(Hit::Button(i, b)), style);
                         uikit::button(cr, br, label, *kind, bh, true, &p);
+                        self.hits.push((Hit::Button(i, b), br));
+                        bx += w + 10.0;
+                    }
+                }
+                Control::Pills { options, get, .. } => {
+                    let on = get(&self.config);
+                    let mut bx = list.x;
+                    let by = y + h - 14.0 - 34.0;
+                    for (b, (label, value)) in options.iter().enumerate() {
+                        let w = (crate::desktop::text::measure(cr, label, &TextStyle { family: &p.family, px: 13.0, bold: true, color: p.fg }).0 + 40.0).max(100.0);
+                        let br = Rect { x: bx, y: by, w, h: 34.0 };
+                        let bh = self.hover_fade.level(Hit::Button(i, b), self.hover == Some(Hit::Button(i, b)), style);
+                        let kind = if on.iter().any(|v| v == value) { ButtonKind::Primary } else { ButtonKind::Outline };
+                        uikit::button(cr, br, label, kind, bh, true, &p);
                         self.hits.push((Hit::Button(i, b), br));
                         bx += w + 10.0;
                     }
@@ -1133,8 +1226,10 @@ impl SettingsView {
                     let action = btns[b].1;
                     return self.run_action(action);
                 }
+                self.toggle_pill(i, b);
             }
             Hit::Control(i) => match &self.rows[i].control {
+                Control::Switch(..) if row_disabled(&self.rows[i], &self.config) => {}
                 Control::Switch(get, set) => {
                     let mut after = self.config.clone();
                     set(&mut after, !get(&self.config));
@@ -1152,7 +1247,7 @@ impl SettingsView {
                     }
                 }
                 Control::Combo { .. } => self.combo = Some((i, Dropdown::default())),
-                Control::Buttons(_) | Control::Heading => {}
+                Control::Buttons(_) | Control::Pills { .. } | Control::Heading => {}
             },
         }
         Effect::Redraw
@@ -1325,7 +1420,7 @@ impl SettingsView {
                             let before = self.config.clone();
                             self.change(before, after);
                         } else if let Control::Switch(get, set) = self.rows[i].control {
-                            if get(&self.config) != (dir > 0) {
+                            if get(&self.config) != (dir > 0) && !row_disabled(&self.rows[i], &self.config) {
                                 let mut after = self.config.clone();
                                 set(&mut after, dir > 0);
                                 let before = self.config.clone();
@@ -1385,6 +1480,24 @@ impl SettingsView {
         self.scroll_to_focus = true;
     }
 
+    /// Turn pill `b` of row `i` on or off (options keep their listed order).
+    fn toggle_pill(&mut self, i: usize, b: usize) {
+        let Control::Pills { options, get, set } = self.rows[i].control else { return };
+        let mut on = get(&self.config);
+        let v = options[b].1.to_string();
+        match on.iter().position(|x| *x == v) {
+            Some(k) => {
+                on.remove(k);
+            }
+            None => on.push(v),
+        }
+        on.sort_by_key(|x| options.iter().position(|(_, o)| o == x));
+        let before = self.config.clone();
+        let mut after = before.clone();
+        set(&mut after, on);
+        self.change(before, after);
+    }
+
     /// Enter / Space on the focused control.
     fn activate(&mut self) -> Effect {
         match self.focus {
@@ -1393,8 +1506,10 @@ impl SettingsView {
                 if let Control::Buttons(btns) = self.rows[i].control {
                     return self.run_action(btns[b].1);
                 }
+                self.toggle_pill(i, b);
             }
             Some(Hit::Control(i)) => match &self.rows[i].control {
+                Control::Switch(..) if row_disabled(&self.rows[i], &self.config) => {}
                 Control::Switch(get, set) => {
                     let mut after = self.config.clone();
                     set(&mut after, !get(&self.config));
@@ -1407,7 +1522,7 @@ impl SettingsView {
                     let dd = Dropdown { hover: options().iter().position(|(_, v)| *v == cur), ..Dropdown::default() };
                     self.combo = Some((i, dd));
                 }
-                Control::Slider { .. } | Control::Buttons(_) | Control::Heading => {}
+                Control::Slider { .. } | Control::Buttons(_) | Control::Pills { .. } | Control::Heading => {}
             },
             _ => {}
         }

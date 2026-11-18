@@ -47,7 +47,21 @@ pub fn free_path(dir: &Path, name: &str) -> PathBuf {
         Some(i) => (&name[..i], &name[i..]),
         None => (name, ""),
     };
-    (1..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).unwrap()
+    (1..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists() && !Path::new(&format!("{}.part", p.display())).exists()).unwrap()
+}
+
+/// Claim a free name by creating its `.part` file: (final path, part path, open part file).
+/// Exclusive, so transfers running at the same time never share a file.
+fn reserve(dir: &Path, name: &str) -> std::io::Result<(PathBuf, PathBuf, std::fs::File)> {
+    loop {
+        let target = free_path(dir, name);
+        let part = PathBuf::from(format!("{}.part", target.display()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
+            Ok(f) => return Ok((target, part, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn add_transfer(core: &mut Core, id: &str, t: PhoneTransfer) -> Arc<AtomicBool> {
@@ -126,9 +140,7 @@ pub fn handle(core: &mut Core, id: &str, p: &Packet) {
     std::thread::spawn(move || {
         let result = (|| -> Result<PathBuf, String> {
             std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            let target = free_path(&dir, &name);
-            let part = PathBuf::from(format!("{}.part", target.display()));
-            let mut f = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+            let (target, part, mut f) = reserve(&dir, &name).map_err(|e| format!("{}: {e}", dir.display()))?;
             let r = crate::payload::download(&shared, &id, port, size, &mut f, progress(shared.clone(), id.clone(), tid, cancel));
             drop(f);
             match r {
@@ -290,6 +302,11 @@ mod tests {
         assert_eq!(free_path(&dir, "a.txt"), dir.join("a (1).txt"));
         std::fs::write(dir.join("noext"), "x").unwrap();
         assert_eq!(free_path(&dir, "noext"), dir.join("noext (1)"));
+        std::fs::write(dir.join("a (1).txt.part"), "x").unwrap();
+        assert_eq!(free_path(&dir, "a.txt"), dir.join("a (2).txt"));
+        let (first, _, _) = reserve(&dir, "b.txt").unwrap();
+        let (second, _, _) = reserve(&dir, "b.txt").unwrap();
+        assert_ne!(first, second);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

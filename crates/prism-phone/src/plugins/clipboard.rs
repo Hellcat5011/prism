@@ -7,8 +7,6 @@ use crate::core::{Core, Shared};
 use crate::identity::unix_ms;
 use crate::packet::Packet;
 use serde_json::json;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
 
 /// Larger texts are not synced.
 const MAX_TEXT: usize = 512 * 1024;
@@ -55,15 +53,7 @@ pub fn handle_shared_text(core: &mut Core, text: &str) {
 }
 
 fn set_pc_clipboard(text: &str) {
-    let text = text.to_string();
-    std::thread::spawn(move || {
-        if let Ok(mut c) = Command::new("wl-copy").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-            if let Some(mut i) = c.stdin.take() {
-                let _ = i.write_all(text.as_bytes());
-            }
-            let _ = c.wait();
-        }
-    });
+    prism_common::wlclip::copy_text(text, true);
 }
 
 /// The PC clipboard changed to `text`: send it to every connected paired device.
@@ -103,64 +93,14 @@ pub fn send_now(core: &mut Core, id: &str, text: &str) -> Result<Option<String>,
     Ok(Some("clipboard sent".into()))
 }
 
-/// Watch the PC clipboard. Each change arrives as one base64 line (empty for secrets).
+/// Watch the PC clipboard (text only; password-manager secrets are never read).
 pub fn start_watcher(shared: Shared) {
-    std::thread::spawn(move || loop {
-        let script = "if wl-paste -l 2>/dev/null | grep -q x-kde-passwordManagerHint; then cat >/dev/null; echo; else base64 -w0; echo; fi";
-        let child = Command::new("wl-paste")
-            .args(["--no-newline", "--type", "text", "--watch", "sh", "-c", script])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
-        let Ok(mut child) = child else {
-            eprintln!("[prism-phoned] wl-paste not available; PC clipboard is not synced");
-            return;
-        };
-        if let Some(out) = child.stdout.take() {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if let Some(text) = decode_b64(line.trim()).and_then(|b| String::from_utf8(b).ok()) {
-                    pc_changed(&shared, text);
-                }
-            }
+    let ok = prism_common::wlclip::watch(move |sel| {
+        if let prism_common::wlclip::Content::Text(t) = &sel.content {
+            pc_changed(&shared, t.clone());
         }
-        let _ = child.wait();
-        std::thread::sleep(std::time::Duration::from_secs(5));
     });
-}
-
-fn decode_b64(s: &str) -> Option<Vec<u8>> {
-    if s.is_empty() {
-        return None;
-    }
-    let val = |c: u8| -> Option<u32> {
-        Some(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32)
-    };
-    let bytes: Vec<u8> = s.bytes().filter(|c| *c != b'=').collect();
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    for chunk in bytes.chunks(4) {
-        let mut acc = 0u32;
-        for (i, c) in chunk.iter().enumerate() {
-            acc |= val(*c)? << (18 - 6 * i);
-        }
-        let n = chunk.len() * 6 / 8;
-        out.extend_from_slice(&acc.to_be_bytes()[1..1 + n]);
-    }
-    Some(out)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn decodes_base64() {
-        assert_eq!(super::decode_b64("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
-        assert_eq!(super::decode_b64("w6k=").unwrap(), "é".as_bytes());
-        assert_eq!(super::decode_b64(""), None);
+    if !ok {
+        eprintln!("[prism-phoned] no clipboard access; PC clipboard is not synced");
     }
 }

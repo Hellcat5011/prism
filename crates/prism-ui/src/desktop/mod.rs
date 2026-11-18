@@ -181,6 +181,8 @@ struct Desk {
     viewporter: Option<WpViewporter>,
     output_mode: (i32, i32),
     output_scale: i32,
+    /// Bumped on every config reload.
+    config_seq: u64,
 
     config: Config,
     theme: Theme,
@@ -199,6 +201,7 @@ struct Desk {
     // data
     dbus: dbus::DbusHandle,
     media: Option<MediaState>,
+    /// Owned reference: outlives image cache clears.
     art: Option<*mut CairoSurface>,
     art_path: Option<std::path::PathBuf>,
     palette: MediaPalette,
@@ -269,6 +272,7 @@ impl Desktop {
             viewporter: None,
             output_mode: (0, 0),
             output_scale: 1,
+            config_seq: 0,
             config,
             theme,
             style,
@@ -327,6 +331,11 @@ impl Desktop {
             icon_gen: crate::icons::generation(),
             phone_seen: 0,
         })
+    }
+
+    /// Changes whenever the desktop has re-read the config.
+    pub fn config_seq(&self) -> u64 {
+        self.state.config_seq
     }
 
     pub fn inotify_fd(&self) -> Option<i32> {
@@ -461,6 +470,7 @@ impl Desk {
 
     fn reload(&mut self, qh: &QueueHandle<Self>) {
         self.config = Config::load();
+        self.config_seq += 1;
         PHONE_SYNC.store(self.config.phone_enabled, std::sync::atomic::Ordering::Relaxed);
         self.theme = Theme::load();
         self.style = Style::new(&self.config, &self.theme);
@@ -591,7 +601,10 @@ impl Desk {
                 let new_art = m.as_ref().and_then(|m| m.art_path.clone());
                 if new_art != self.art_path {
                     self.art_path = new_art.clone();
-                    self.art = new_art.as_ref().and_then(|p| cached_image(&p.to_string_lossy(), 512, 512, true));
+                    let art = new_art.as_ref().and_then(|p| owned_image(&p.to_string_lossy(), 512, 512, true));
+                    if let Some(old) = std::mem::replace(&mut self.art, art) {
+                        unsafe { cairo_surface_destroy(old) };
+                    }
                     self.palette = new_art
                         .as_ref()
                         .and_then(|p| sample_palette(p))
@@ -1011,7 +1024,7 @@ impl Desk {
         let (sw, sh) = self.screen;
         // Never taller than the screen; longer menus scroll.
         let height = content_h.min((sh - 8.0).max(60.0)).round();
-        let mut x = (anchor.x + anchor.w / 2.0 - width / 2.0).clamp(4.0, sw - width - 4.0);
+        let mut x = (anchor.x + anchor.w / 2.0 - width / 2.0).clamp(4.0, (sw - width - 4.0).max(4.0));
         let mut y = anchor.y + anchor.h + 6.0;
         if y + height > sh - 4.0 {
             y = anchor.y - height - 6.0;

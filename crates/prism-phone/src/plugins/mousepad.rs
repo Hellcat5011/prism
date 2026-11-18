@@ -35,17 +35,23 @@ impl InputState {
     }
 }
 
+/// Locked unless prismd clearly says otherwise: no answer must never open remote input.
 fn prismd_says_locked() -> bool {
     use std::io::{BufRead, BufReader, Write};
-    let Ok(mut s) = std::os::unix::net::UnixStream::connect(prism_common::get_socket_path()) else { return false };
+    let Ok(mut s) = std::os::unix::net::UnixStream::connect(prism_common::get_socket_path()) else { return true };
     s.set_read_timeout(Some(Duration::from_millis(300))).ok();
     let cmd = prism_common::IpcCommand::Lock(prism_common::ipc::LockAction::Status);
     if writeln!(s, "{}", serde_json::to_string(&cmd).unwrap_or_default()).is_err() {
-        return false;
+        return true;
     }
     let mut line = String::new();
     let _ = BufReader::new(s).read_line(&mut line);
-    line.contains("\"locked")
+    !reply_says_unlocked(&line)
+}
+
+/// prismd's `lock status` reply: `{"status":"ok","data":"unlocked, idle=false"}`.
+fn reply_says_unlocked(line: &str) -> bool {
+    line.contains("\"data\":\"unlocked")
 }
 
 /// Turn one mousepad packet into input events (kdeconnect-kde MousepadPlugin semantics).
@@ -132,6 +138,15 @@ mod tests {
 
     fn pk(body: &str) -> Packet {
         Packet::parse(&format!(r#"{{"id":1,"type":"kdeconnect.mousepad.request","body":{body}}}"#)).unwrap()
+    }
+
+    #[test]
+    fn only_a_clear_answer_counts_as_unlocked() {
+        let reply = |r| serde_json::to_string(&r).unwrap();
+        assert!(reply_says_unlocked(&reply(prism_common::ipc::IpcResponse::Ok(Some("unlocked, idle=false".into())))));
+        assert!(!reply_says_unlocked(&reply(prism_common::ipc::IpcResponse::Ok(Some("locked, idle=false".into())))));
+        assert!(!reply_says_unlocked(""));
+        assert!(!reply_says_unlocked("{\"status\":\"error\",\"data\":\"busy\"}"));
     }
 
     #[test]

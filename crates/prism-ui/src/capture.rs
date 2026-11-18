@@ -778,7 +778,7 @@ unsafe fn hint(cr: *mut Cairo, w: f64, y: f64, text: &str) {
 
 /// Save the image as `Screenshot_<time>.png` (unless `save` is false, then to the runtime dir),
 /// copy it to the clipboard and post a notification. Returns the file path.
-pub fn finish(img: Image, cfg: &Config, save: bool, clip: Option<&mut crate::clip_owner::ClipOwner>) -> Result<std::path::PathBuf, String> {
+pub fn finish(img: Image, cfg: &Config, save: bool, ) -> Result<std::path::PathBuf, String> {
     let dir = if save {
         prism_common::config::expand_home(&cfg.capture_screenshot_dir)
     } else {
@@ -797,8 +797,8 @@ pub fn finish(img: Image, cfg: &Config, save: bool, clip: Option<&mut crate::cli
         }
     }
     if cfg.capture_copy_to_clipboard {
-        if let (Some(c), Ok(bytes)) = (clip, std::fs::read(&path)) {
-            c.set(&["image/png"], bytes);
+        if let Ok(bytes) = std::fs::read(&path) {
+            prism_common::wlclip::copy(&["image/png"], bytes, true);
         }
     }
     notify(&path, save, img.width, img.height);

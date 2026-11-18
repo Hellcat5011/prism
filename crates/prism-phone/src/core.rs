@@ -22,6 +22,12 @@ pub type Shared = Arc<Mutex<Core>>;
 
 /// Pair requests expire after this long (KDE Connect uses 30 s).
 const PAIR_TIMEOUT: Duration = Duration::from_secs(30);
+/// Unpaired devices only heard over UDP (anyone on the LAN can invent these).
+const MAX_IDLE_PEERS: usize = 32;
+/// An idle peer is forgotten this long after the last attempt to reach it.
+const IDLE_PEER_TTL: Duration = Duration::from_secs(120);
+/// Connected devices that are not paired.
+const MAX_UNPAIRED_LINKS: usize = 16;
 
 /// Sending half of a link. Dropping it closes the wake pipe, which ends the link thread.
 pub struct LinkHandle {
@@ -49,6 +55,13 @@ pub struct Dev {
     pair_deadline: Option<Instant>,
     /// Last connect attempt started from discovery (rate limit).
     pub last_attempt: Option<Instant>,
+}
+
+impl Dev {
+    /// Heard over UDP only: not paired, not connected, no pairing under way.
+    fn is_idle_peer(&self) -> bool {
+        self.trusted.is_none() && self.link.is_none() && self.pair_deadline.is_none()
+    }
 }
 
 pub struct Core {
@@ -116,6 +129,9 @@ impl Core {
         if info.id == self.ident.id || info.protocol < crate::packet::PROTOCOL_VERSION || !identity::valid_device_id(&info.id) {
             return false;
         }
+        if !self.devices.contains_key(&info.id) {
+            self.make_room_for_peer();
+        }
         let dev = self.devices.entry(info.id.clone()).or_insert_with(|| Dev {
             view: PhoneDevice { id: info.id.clone(), name: info.name.clone(), device_type: info.device_type.clone(), ..Default::default() },
             info: info.clone(),
@@ -135,6 +151,17 @@ impl Core {
         true
     }
 
+    /// At the limit of idle peers, forget the one tried longest ago.
+    fn make_room_for_peer(&mut self) {
+        let idle: Vec<(&String, Option<Instant>)> = self.devices.iter().filter(|(_, d)| d.is_idle_peer()).map(|(k, d)| (k, d.last_attempt)).collect();
+        if idle.len() < MAX_IDLE_PEERS {
+            return;
+        }
+        if let Some(id) = idle.iter().min_by_key(|(_, at)| *at).map(|(k, _)| (*k).clone()) {
+            self.devices.remove(&id);
+        }
+    }
+
     /// A TLS link to `info` is up. Err = refuse it (the caller closes the socket).
     pub fn link_up(&mut self, info: PeerInfo, cert: Vec<u8>, addr: std::net::IpAddr, handle: LinkHandle) -> Result<(), String> {
         if info.id == self.ident.id {
@@ -148,6 +175,10 @@ impl Core {
                 return Err(format!("{} ({}) presented a different certificate than when it was paired; refusing", info.name, info.id));
             }
         }
+        let known = self.devices.get(&info.id).is_some_and(|d| d.trusted.is_some() || d.link.is_some());
+        if !known && self.devices.values().filter(|d| d.trusted.is_none() && d.link.is_some()).count() >= MAX_UNPAIRED_LINKS {
+            return Err("too many unpaired devices are connected".into());
+        }
         let id = info.id.clone();
         let dev = self.devices.entry(id.clone()).or_insert_with(|| Dev {
             view: PhoneDevice::default(),
@@ -159,6 +190,15 @@ impl Core {
             pair_deadline: None,
             last_attempt: None,
         });
+        // A pending pair request belongs to the certificate it was made with. Another key taking
+        // over the device id must not inherit it (the key on screen would be the old device's).
+        if dev.trusted.is_none() && dev.link.as_ref().is_some_and(|l| l.cert != cert) {
+            eprintln!("[prism-phoned] {id} reconnected with another certificate; pending pairing cancelled");
+            dev.view.pair = PairStatus::NotPaired;
+            dev.view.verification_key = None;
+            dev.pair_deadline = None;
+            crate::notify::close(&format!("pair:{id}"));
+        }
         dev.view.id = id.clone();
         dev.view.name = info.name.clone();
         dev.view.device_type = info.device_type.clone();
@@ -330,6 +370,11 @@ impl Core {
             }
             self.publish();
         }
+        let before = self.devices.len();
+        self.devices.retain(|_, d| !d.is_idle_peer() || d.last_attempt.is_some_and(|t| t.elapsed() < IDLE_PEER_TTL));
+        if self.devices.len() != before {
+            self.publish();
+        }
         crate::plugins::tick(self);
     }
 
@@ -480,4 +525,81 @@ fn write_reply(s: &mut UnixStream, r: &PhoneReply) -> bool {
     let mut line = serde_json::to_string(r).unwrap_or_default();
     line.push('\n');
     s.write_all(line.as_bytes()).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    use std::os::fd::FromRawFd;
+
+    const ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn cert() -> Vec<u8> {
+        CertificateDer::from_pem_slice(identity::generate(ID).unwrap().0.as_bytes()).unwrap().to_vec()
+    }
+
+    /// A link handle, with the ends that must stay open while it is used.
+    fn link(serial: u64, cert: &[u8]) -> (LinkHandle, std::sync::mpsc::Receiver<Packet>, OwnedFd) {
+        let mut p = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) }, 0);
+        let (r, w) = unsafe { (OwnedFd::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) };
+        let (tx, rx) = std::sync::mpsc::channel();
+        (LinkHandle { serial, tx, wake: w, cert: cert.to_vec() }, rx, r)
+    }
+
+    fn core(name: &str) -> (Core, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("prism-core-test-{name}-{}", std::process::id()));
+        let ident = identity::load_or_create(&dir.join("desk")).unwrap();
+        let tls = crate::tls::configs(&ident).unwrap();
+        (Core::new(ident, tls, Config::default(), dir.join("data")), dir)
+    }
+
+    fn peer() -> PeerInfo {
+        PeerInfo { id: ID.into(), name: "Phone".into(), device_type: "phone".into(), protocol: 8, ..Default::default() }
+    }
+
+    #[test]
+    fn another_certificate_cannot_take_over_a_pending_pairing() {
+        let (mut core, dir) = core("takeover");
+        let (real, other) = (cert(), cert());
+        let (h1, _r1, _p1) = link(1, &real);
+        core.link_up(peer(), real.clone(), "10.0.0.2".parse().unwrap(), h1).unwrap();
+        core.on_packet(ID, Packet::new(PAIR, json!({"pair": true, "timestamp": 1700000000u64})));
+        assert_eq!(core.devices[ID].view.pair, PairStatus::RequestedByPeer);
+
+        let (h2, _r2, _p2) = link(2, &other);
+        core.link_up(peer(), other, "10.0.0.66".parse().unwrap(), h2).unwrap();
+        assert_eq!(core.devices[ID].view.pair, PairStatus::NotPaired);
+        assert_eq!(core.devices[ID].view.verification_key, None);
+        assert!(matches!(core.command(PhoneCommand::Accept { device: None }), PhoneReply::Error { .. }));
+        assert!(core.devices[ID].trusted.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invented_udp_peers_stay_bounded() {
+        let (mut core, dir) = core("flood");
+        for i in 0..500 {
+            let info = PeerInfo { id: format!("{i:032}"), protocol: 8, ..Default::default() };
+            assert!(core.should_connect(&info, "10.0.0.9".parse().unwrap()));
+        }
+        assert!(core.devices.len() <= MAX_IDLE_PEERS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconnecting_with_the_same_certificate_keeps_the_request() {
+        let (mut core, dir) = core("reconnect");
+        let real = cert();
+        let (h1, _r1, _p1) = link(1, &real);
+        core.link_up(peer(), real.clone(), "10.0.0.2".parse().unwrap(), h1).unwrap();
+        core.on_packet(ID, Packet::new(PAIR, json!({"pair": true, "timestamp": 1700000000u64})));
+        let (h2, _r2, _p2) = link(2, &real);
+        core.link_up(peer(), real.clone(), "10.0.0.2".parse().unwrap(), h2).unwrap();
+        assert_eq!(core.devices[ID].view.pair, PairStatus::RequestedByPeer);
+        assert!(matches!(core.command(PhoneCommand::Accept { device: None }), PhoneReply::Ok { .. }));
+        assert_eq!(core.devices[ID].trusted.as_ref().unwrap().cert_der(), real);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

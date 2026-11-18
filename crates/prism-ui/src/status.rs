@@ -12,7 +12,6 @@
 // the worker to refresh when they finish, so the worker never blocks on them.
 // ─────────────────────────────────────────────────────────────────────────
 
-use std::process::Command;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,6 +34,8 @@ pub struct StatusSnapshot {
     pub brightness: Option<u32>,
     pub sinks: Vec<AudioSink>,
     pub battery: Option<BatteryStatus>,
+    /// power-profiles-daemon: (active, available), None when it is not running.
+    pub power_profile: Option<(String, Vec<String>)>,
     /// Newest first.
     pub notifications: Vec<Notification>,
     pub flags: DaemonFlags,
@@ -54,6 +55,13 @@ pub enum StatusRequest {
     ForgetWifi(String),
     SetBluetooth(bool),
     SetDiscoverable(bool),
+    SetPowerProfile(String),
+    /// Activate the VPN with this settings path.
+    VpnUp(String),
+    /// Deactivate: (settings path, active connection path).
+    VpnDown(String, String),
+    /// Import VPN profiles (.ovpn / WireGuard .conf) with nmcli.
+    ImportVpn(Vec<std::path::PathBuf>),
     ScanBluetooth,
     PairBluetooth(String),
     CancelPair(String),
@@ -87,6 +95,8 @@ struct Ops {
     wifi_error: Option<(String, String)>,
     bt_busy: Vec<(String, BtBusy)>,
     bt_failed: Vec<String>,
+    vpn_busy: Vec<String>,
+    vpn_msg: Option<(String, bool)>,
 }
 
 pub fn spawn(waker: Waker) -> StatusHandle {
@@ -104,6 +114,8 @@ fn refresh(snap: &mut StatusSnapshot, ops: &Ops, bus: Option<&Bus>) {
     if let Some(bus) = bus {
         bus.refresh_network(&mut snap.net);
         bus.refresh_bluetooth(&mut snap.bt);
+        snap.power_profile = bus.power_profile();
+        bus.refresh_vpns(&mut snap.net);
     }
     let (vol, muted) = prism_common::hardware::get_volume().unwrap_or((snap.volume, snap.muted));
     snap.volume = vol;
@@ -123,6 +135,8 @@ fn apply_ops(snap: &mut StatusSnapshot, ops: &Ops) {
     snap.net.error = ops.wifi_error.clone();
     snap.bt.busy = ops.bt_busy.clone();
     snap.bt.failed = ops.bt_failed.clone();
+    snap.net.vpn_busy = ops.vpn_busy.clone();
+    snap.net.vpn_msg = ops.vpn_msg.clone();
 }
 
 fn worker(waker: Waker, out: Sender<StatusSnapshot>, req_rx: Receiver<StatusRequest>, again: Sender<StatusRequest>) {
@@ -224,14 +238,7 @@ fn handle(req: StatusRequest, ops: &Arc<Mutex<Ops>>, again: &Sender<StatusReques
             true
         }
         StatusRequest::Copy(text) => {
-            prism_common::clipboard::touch_self_copy_lock();
-            if let Ok(mut child) = Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
-                use std::io::Write;
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                crate::reap(child);
-            }
+            prism_common::wlclip::copy_text(&text, false);
             false
         }
         other => match bus {
@@ -305,6 +312,51 @@ fn handle_bus(req: StatusRequest, ops: &Arc<Mutex<Ops>>, again: &Sender<StatusRe
             log("discoverable", bus.set_discoverable(on));
             true
         }
+        StatusRequest::SetPowerProfile(p) => {
+            log("power profile", bus.set_power_profile(&p));
+            true
+        }
+        StatusRequest::VpnUp(path) | StatusRequest::VpnDown(path, _) if ops.lock().unwrap().vpn_busy.contains(&path) => false,
+        StatusRequest::VpnUp(path) => {
+            {
+                let mut o = ops.lock().unwrap();
+                o.vpn_busy.push(path.clone());
+                o.vpn_msg = None;
+            }
+            let ops = Arc::clone(ops);
+            background(again, move || {
+                // Activation returns at once; the state then follows NetworkManager's signals.
+                let r = bus.vpn_up(&path);
+                let mut o = ops.lock().unwrap();
+                o.vpn_busy.retain(|p| *p != path);
+                if let Err(e) = r {
+                    o.vpn_msg = Some((e, true));
+                }
+            });
+            true
+        }
+        StatusRequest::VpnDown(path, active) => {
+            ops.lock().unwrap().vpn_busy.push(path.clone());
+            let ops = Arc::clone(ops);
+            background(again, move || {
+                let r = bus.vpn_down(&active);
+                let mut o = ops.lock().unwrap();
+                o.vpn_busy.retain(|p| *p != path);
+                if let Err(e) = r {
+                    o.vpn_msg = Some((e, true));
+                }
+            });
+            true
+        }
+        StatusRequest::ImportVpn(files) => {
+            ops.lock().unwrap().vpn_msg = Some((format!("Importing {} file{}\u{2026}", files.len(), if files.len() == 1 { "" } else { "s" }), false));
+            let ops = Arc::clone(ops);
+            background(again, move || {
+                let msg = import_vpns(&files);
+                ops.lock().unwrap().vpn_msg = Some(msg);
+            });
+            true
+        }
         StatusRequest::ScanBluetooth => {
             bus.scan_bluetooth(BT_SCAN_SECS);
             true
@@ -357,5 +409,33 @@ fn handle_bus(req: StatusRequest, ops: &Arc<Mutex<Ops>>, again: &Sender<StatusRe
             true
         }
         _ => false,
+    }
+}
+
+/// Import VPN profiles with nmcli (the VPN plugins' importers run in the client); WireGuard
+/// files are recognised by their [Interface] section. Returns (summary, any failed).
+pub fn import_vpns(files: &[std::path::PathBuf]) -> (String, bool) {
+    let mut ok = 0;
+    let mut failed: Vec<String> = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(f).unwrap_or_default();
+        let kind = if text.contains("[Interface]") { "wireguard" } else { "openvpn" };
+        let out = std::process::Command::new("nmcli").args(["connection", "import", "type", kind, "file"]).arg(f).output();
+        match out {
+            Ok(o) if o.status.success() => ok += 1,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("").trim().to_string();
+                eprintln!("[prism-ui/vpn] import {}: {err}", f.display());
+                failed.push(f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            }
+            Err(e) => {
+                return (format!("nmcli: {e}"), true);
+            }
+        }
+    }
+    if failed.is_empty() {
+        (format!("Imported {ok} VPN profile{}", if ok == 1 { "" } else { "s" }), false)
+    } else {
+        (format!("Imported {ok}, failed {}: {}", failed.len(), failed.join(", ")), true)
     }
 }

@@ -117,14 +117,25 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 
 | Tool | Used for |
 |---|---|
-| `wl-clipboard` (`wl-copy`, `wl-paste`) | Clipboard history, colour picker, emoji copy, phone clipboard sync |
-| `wpctl` / `pactl`, `playerctl` | Volume, audio outputs, media keys |
+| `wpctl` / `pactl` | Volume, audio outputs |
+| `power-profiles-daemon` | Power profile button in the Control Centre (optional) |
 | `brightnessctl` or `ddcutil` | Brightness (laptop backlight or external monitor) |
 | `matugen` | Palette from the wallpaper |
-| `awww` or `swww` | Wallpaper daemon |
+| `awww` or `swww` | Only when chosen instead of the built-in wallpaper daemon |
+| `bluez-obex` | Receiving files over Bluetooth (Settings > Services) |
 | `plocate` | File search (`pkexec updatedb` to rebuild the index) |
 | `wtype` | Pasting emoji into the focused app |
 | `NetworkManager`, `BlueZ` | Network and Bluetooth pages |
+
+Clipboard (ext-data-control), media control (MPRIS, `prism-ctl media play-pause|next|previous|stop` for media
+keys), notifications and wallpaper resizing are built in; wl-clipboard, playerctl, libnotify and ImageMagick
+are not needed. Also built in, each switched on in Settings: the wallpaper daemon (Wallpaper tab, replaces
+awww/swww), monitor resolution, scale, rotation and adaptive sync (Display tab, replaces wlr-randr), and under
+Services an MPRIS bridge for MPD (mpd-mpris), the polkit agent (polkit-gnome), Wi-Fi/VPN password prompts
+(nm-applet; with optional saving of VPN user names and passwords), Bluetooth file receiving (blueman) and
+Network / Bluetooth tray icons (VPN, device and send-file menus). The Control Centre has a VPN page (connect,
+filter, bulk import of .ovpn / WireGuard files through `nmcli`), Bluetooth devices have a Send button, and its
+tiles are chosen in Settings > Notifications. Stop the program a service replaces before turning it on.
 | `python3` | Keybind parsers; wallpaper depth (installs its own venv) |
 | `greetd`, `cage` | Greeter (optional) |
 | KDE Connect app on the phone | Phone sync (open UDP 1716 and TCP 1714-1764 in the firewall) |

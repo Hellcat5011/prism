@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::filter::Filter;
+
 /// Retrieves the current wallpaper path if saved
 pub fn get_current_wallpaper() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok().map(PathBuf::from)?;
@@ -33,9 +35,87 @@ pub fn get_current_wallpaper() -> Option<PathBuf> {
     None
 }
 
+fn filtered_dir(home: &Path) -> PathBuf {
+    home.join(".cache/prism/filtered")
+}
+
+fn filtered_pointer(home: &Path) -> PathBuf {
+    home.join(".cache/prism/current-wallpaper-filtered.txt")
+}
+
+fn active_filter_file(home: &Path) -> PathBuf {
+    home.join(".cache/prism/current-wallpaper-filter.txt")
+}
+
+/// The filter the current wallpaper was applied with.
+pub fn active_filter() -> Filter {
+    std::env::var("HOME")
+        .ok()
+        .and_then(|h| fs::read_to_string(active_filter_file(Path::new(&h))).ok())
+        .map(|id| Filter::from_id(id.trim()))
+        .unwrap_or_default()
+}
+
+/// The file the desktop shows for `image_path` under `filter`: the image itself while
+/// `wallpaper_keep_desktop` is on, else its filtered copy.
+pub fn desktop_image(image_path: &Path, filter: Filter) -> Result<PathBuf, String> {
+    if crate::Config::load().wallpaper_keep_desktop {
+        return Ok(image_path.to_path_buf());
+    }
+    render_filtered(image_path, filter)
+}
+
+/// The picture to put on screen: the filtered copy of the current wallpaper when a filter is on.
+/// `get_current_wallpaper` stays the original (depth masks are generated from it).
+pub fn displayed_wallpaper() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok().map(PathBuf::from)?;
+    if let Ok(content) = fs::read_to_string(filtered_pointer(&home)) {
+        let p = PathBuf::from(content.trim());
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    get_current_wallpaper()
+}
+
+/// The file to display for `image_path` under `filter`: the image itself for `Filter::Normal`,
+/// else a full-size filtered copy in the cache (rendered once).
+pub fn render_filtered(image_path: &Path, filter: Filter) -> Result<PathBuf, String> {
+    if filter == Filter::Normal {
+        return Ok(image_path.to_path_buf());
+    }
+    use std::hash::{Hash, Hasher};
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "HOME environment variable not set".to_string())?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    image_path.hash(&mut hash);
+    fs::metadata(image_path).and_then(|m| m.modified()).ok().hash(&mut hash);
+    filter.hash(&mut hash);
+    let dir = filtered_dir(&home);
+    let out = dir.join(format!("{:016x}.jpg", hash.finish()));
+    if !out.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+        crate::pixbuf::save_jpeg_filtered(image_path, &out, i32::MAX, 96, filter)?;
+    }
+    Ok(out)
+}
+
 /// Sets the desktop wallpaper and triggers dynamic theming via matugen
 pub fn set_wallpaper(
     image_path: &Path,
+    daemon: Option<&str>,
+    scheme: Option<&str>,
+    mode: Option<&str>,
+) -> Result<(), String> {
+    set_wallpaper_filtered(image_path, Filter::Normal, daemon, scheme, mode)
+}
+
+/// `set_wallpaper` with a colour filter. The lock screen and greeter copies always get it, the
+/// desktop as `desktop_image` decides.
+pub fn set_wallpaper_filtered(
+    image_path: &Path,
+    filter: Filter,
     daemon: Option<&str>,
     scheme: Option<&str>,
     mode: Option<&str>,
@@ -51,40 +131,14 @@ pub fn set_wallpaper(
     let wa_jpg = home.join(".wa.jpg");
     let wa_thumb = home.join(".wa-thumb.jpg");
 
-    // Copy or resize using magick
-    let has_magick = Command::new("magick")
-        .arg("-version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let shown = desktop_image(image_path, filter)?;
 
-    if has_magick {
-        let _ = Command::new("magick")
-            .args([
-                image_path.to_str().unwrap_or(""),
-                "-resize",
-                "1920x>",
-                "-quality",
-                "95",
-                wa_jpg.to_str().unwrap_or(""),
-            ])
-            .output();
-
-        let _ = Command::new("magick")
-            .args([
-                image_path.to_str().unwrap_or(""),
-                "-resize",
-                "960x>",
-                "-quality",
-                "90",
-                wa_thumb.to_str().unwrap_or(""),
-            ])
-            .output();
-    } else {
-        fs::copy(image_path, &wa_jpg)
-            .map_err(|e| format!("Failed to copy to ~/.wa.jpg: {}", e))?;
-        fs::copy(image_path, &wa_thumb)
-            .map_err(|e| format!("Failed to copy to ~/.wa-thumb.jpg: {}", e))?;
+    // Downscaled copies for the lock screen, settings previews and matugen.
+    if crate::pixbuf::save_jpeg_filtered(image_path, &wa_jpg, 1920, 95, filter).is_err() {
+        fs::copy(image_path, &wa_jpg).map_err(|e| format!("Failed to copy to ~/.wa.jpg: {}", e))?;
+    }
+    if crate::pixbuf::save_jpeg_filtered(image_path, &wa_thumb, 960, 90, filter).is_err() {
+        fs::copy(image_path, &wa_thumb).map_err(|e| format!("Failed to copy to ~/.wa-thumb.jpg: {}", e))?;
     }
 
     // Save to cache file
@@ -94,14 +148,30 @@ pub fn set_wallpaper(
         prism_cache_dir.join("current-wallpaper.txt"),
         image_path.to_string_lossy().as_bytes(),
     );
+    if shown == image_path {
+        let _ = fs::remove_file(filtered_pointer(&home));
+    } else {
+        let _ = fs::write(filtered_pointer(&home), shown.to_string_lossy().as_bytes());
+    }
+    if filter == Filter::Normal {
+        let _ = fs::remove_file(active_filter_file(&home));
+    } else {
+        let _ = fs::write(active_filter_file(&home), filter.id());
+    }
+    // Only the copy on screen is kept.
+    if let Ok(dir) = fs::read_dir(filtered_dir(&home)) {
+        for f in dir.flatten().filter(|f| f.path() != shown) {
+            let _ = fs::remove_file(f.path());
+        }
+    }
 
-    // Invoke wallpaper daemon
-    let daemon_name = daemon.unwrap_or("awww");
+    // External wallpaper daemons. The built-in one ("prism") is told by the caller.
+    let daemon_name = daemon.unwrap_or("prism");
     if daemon_name == "awww" {
         let _ = Command::new("awww")
             .args([
                 "img",
-                image_path.to_str().unwrap_or(""),
+                shown.to_str().unwrap_or(""),
                 "--transition-type",
                 "random",
                 "--transition-duration",
@@ -114,7 +184,7 @@ pub fn set_wallpaper(
         let _ = Command::new("swww")
             .args([
                 "img",
-                image_path.to_str().unwrap_or(""),
+                shown.to_str().unwrap_or(""),
                 "--transition-type",
                 "random",
                 "--transition-duration",
@@ -136,10 +206,11 @@ pub fn set_wallpaper(
         .unwrap_or(false);
 
     if has_matugen {
+        let theme_source = if filter.is_monochrome() { image_path } else { shown.as_path() };
         let _ = Command::new("matugen")
             .args([
                 "image",
-                image_path.to_str().unwrap_or(""),
+                theme_source.to_str().unwrap_or(""),
                 "-m",
                 mode_str,
                 "-t",

@@ -206,43 +206,6 @@ pub fn luhn_check(digits_str: &str) -> bool {
     sum % 10 == 0
 }
 
-/// Self-copy lockfile path helper
-pub fn get_self_copy_lock_path() -> PathBuf {
-    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("prism-clipboard-self.lock")
-    } else {
-        std::env::temp_dir().join("prism-clipboard-self.lock")
-    }
-}
-
-/// Creates the lockfile before `wl-copy` so the watcher skips self-initiated copies.
-pub fn touch_self_copy_lock() {
-    let path = get_self_copy_lock_path();
-    let _ = fs::File::create(&path);
-    // Also touch legacy quickshell lockfile for backward compatibility
-    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        let _ = fs::File::create(PathBuf::from(runtime_dir).join("qs-clipboard-self.lock"));
-    }
-}
-
-/// Checks and consumes the lockfile if it exists. Returns true if self-copy was active.
-pub fn consume_self_copy_lock() -> bool {
-    let path = get_self_copy_lock_path();
-    let mut locked = false;
-    if path.exists() {
-        let _ = fs::remove_file(&path);
-        locked = true;
-    }
-    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        let legacy = PathBuf::from(runtime_dir).join("qs-clipboard-self.lock");
-        if legacy.exists() {
-            let _ = fs::remove_file(legacy);
-            locked = true;
-        }
-    }
-    locked
-}
-
 /// Directory for storing captured PNG image clipboard thumbnails.
 pub fn get_image_cache_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
@@ -251,6 +214,9 @@ pub fn get_image_cache_dir() -> PathBuf {
         std::env::temp_dir().join("prism/clipboard/images")
     }
 }
+
+/// Longer text stays out of the history (it is rewritten to disk on every copy).
+const MAX_TEXT_BYTES: usize = 1 << 20;
 
 pub struct ClipboardStore {
     path: PathBuf,
@@ -302,7 +268,7 @@ impl ClipboardStore {
     }
 
     pub fn add_text(&mut self, text: String) -> bool {
-        if text.trim().is_empty() || ClipboardItem::is_sensitive(&text) {
+        if text.len() > MAX_TEXT_BYTES || text.trim().is_empty() || ClipboardItem::is_sensitive(&text) {
             return false;
         }
 
@@ -315,10 +281,7 @@ impl ClipboardStore {
 
         self.items.retain(|item| item.is_image || item.content != text);
         self.items.insert(0, ClipboardItem::new_text(text));
-
-        if self.items.len() > self.max_items {
-            self.items.truncate(self.max_items);
-        }
+        self.trim_to_max();
 
         let _ = self.save();
         true
@@ -338,7 +301,7 @@ impl ClipboardStore {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_nanos();
         let filename = format!("{}.png", timestamp);
         let file_path = img_dir.join(filename);
 
@@ -349,22 +312,22 @@ impl ClipboardStore {
 
         let path_str = format!("file://{}", file_path.display());
         self.items.insert(0, ClipboardItem::new_image(path_str));
-
-        if self.items.len() > self.max_items {
-            // Check if any removed items were images and remove the orphaned files
-            let removed = self.items.split_off(self.max_items);
-            for it in removed {
-                if it.is_image {
-                    if let Some(p) = it.image_path {
-                        let local_path = p.replace("file://", "");
-                        let _ = fs::remove_file(local_path);
-                    }
-                }
-            }
-        }
+        self.trim_to_max();
 
         let _ = self.save();
         true
+    }
+
+    /// Drop the oldest entries over the limit, with the image files they own.
+    fn trim_to_max(&mut self) {
+        if self.items.len() <= self.max_items {
+            return;
+        }
+        for it in self.items.split_off(self.max_items) {
+            if let (true, Some(p)) = (it.is_image, it.image_path) {
+                let _ = fs::remove_file(p.replace("file://", ""));
+            }
+        }
     }
 
     pub fn clear(&mut self) {
@@ -449,11 +412,7 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()>
 /// True when the current Wayland selection is marked secret by a password manager
 /// (KeePassXC, Bitwarden, ... offer the `x-kde-passwordManagerHint` MIME type).
 pub fn selection_is_secret() -> bool {
-    std::process::Command::new("wl-paste")
-        .arg("--list-types")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|t| t.trim() == "x-kde-passwordManagerHint"))
-        .unwrap_or(false)
+    crate::wlclip::types().iter().any(|t| t == crate::wlclip::SECRET_MIME)
 }
 
 /// A lone token that looks like a generated password: 8-64 characters, no whitespace, upper and
@@ -476,6 +435,20 @@ fn looks_like_password(t: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_limits_remove_old_images_and_skip_huge_text() {
+        let dir = std::env::temp_dir().join(format!("prism-clip-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("old.png");
+        fs::write(&image, b"png").unwrap();
+        let mut store = ClipboardStore { path: dir.join("history.json"), items: vec![ClipboardItem::new_image(format!("file://{}", image.display()))], max_items: 1 };
+        assert!(store.add_text("plain words".into()));
+        assert_eq!(store.items.len(), 1);
+        assert!(!image.exists());
+        assert!(!store.add_text("word ".repeat(MAX_TEXT_BYTES)));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_sensitive_filtering() {
