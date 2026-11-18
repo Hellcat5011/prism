@@ -13,7 +13,9 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 
 ## ✨ Features
 
-- **App launcher and Spotlight search**: fuzzy app search plus files and folders via `plocate`.
+- **App launcher and Spotlight search**: fuzzy app search plus files and folders via `plocate`. The launcher comes
+  in four designs: **Classic**, **Slices** (the wallpaper cut into one strip per app), **Spectrum** (a mosaic sorted
+  by icon colour) and **Deck** (a floating hand of cards). Apps without an icon get their initials on their own colour.
 - **Notification center**: notification history grouped by app, quick toggles, Wi-Fi and Bluetooth pages
   (NetworkManager and BlueZ over D-Bus, with pairing), volume and brightness sliders, audio output switching.
 - **Notification server**: `org.freedesktop.Notifications` built into `prismd` (actions, urgency, images,
@@ -34,9 +36,14 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   arranged in an on-screen edit mode. Widgets can be "sent to the background" so the wallpaper's foreground
   (a neural depth mask) passes in front of them.
 - **System tray**: StatusNotifierItem host with tooltips and dbusmenu context menus (scrollable when long).
-- **Lock screen and greeter**: `ext-session-lock-v1` lock with PAM, and the same look as a greetd greeter under
-  `cage` (the greeter can cycle through the system's users).
+- **Lock screen and greeter**: `ext-session-lock-v1` lock with PAM, and a greetd greeter under `cage`. Six designs:
+  **Classic**, **Stencil** (the wallpaper seen through a giant clock), **Horizon** (one line across the screen),
+  **Sentence** (the time and your notifications as a sentence), **Aperture** (a circular window that opens as you
+  type) and **Tide** (colour splashes that fill the greyscale wallpaper on unlock). The greeter mirrors the lock
+  screen or uses its own design, and clicking the user or session cycles through them.
 - **Theming**: Material You palette from [matugen](https://github.com/InioX/matugen), applied live everywhere.
+- **Wallpaper filters**: pick Color Pop, Pop Art, Synthwave, Noir or Vivid with small previews when applying a
+  wallpaper. The filter shows on the desktop, lock screen and greeter alike, and can be turned off.
 - **Blue light filter**: colour temperature through `wlr-gamma-control`, on a schedule or sunrise/sunset.
 - **Idle handling**: screens dim 30 s before auto-lock; caffeinate (idle inhibitor) from the notification center.
 - **Clipboard history**: text and images, stored with `0600` permissions; entries from password managers and
@@ -57,7 +64,19 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 ![Spotlight Search](assets/screenshots/spotlight-search.png)
 
 ### App Launcher
-![App Launcher](assets/screenshots/app-launcher.png)
+
+Choose a design in Settings > Launcher.
+
+<table>
+  <tr>
+    <td width="50%" align="center"><img src="assets/screenshots/app-launcher.png" alt="Classic launcher"><br><b>Classic</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/launcher-slices.png" alt="Slices launcher"><br><b>Slices</b></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="assets/screenshots/launcher-spectrum.png" alt="Spectrum launcher"><br><b>Spectrum</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/launcher-deck.png" alt="Deck launcher"><br><b>Deck</b></td>
+  </tr>
+</table>
 
 ### Wallpaper Selector
 ![Wallpaper Selector](assets/screenshots/wallpaper-selector.png)
@@ -72,7 +91,23 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 ![Keybindings Cheatsheet](assets/screenshots/keybinds.png)
 
 ### Lock Screen
-![Lock Screen](assets/screenshots/lockscreen.png)
+
+Choose a design in Settings > Lock Screen. The greeter can mirror it or use its own (Settings > Greeter).
+
+<table>
+  <tr>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen.png" alt="Classic lock screen"><br><b>Classic</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-stencil.png" alt="Stencil lock screen"><br><b>Stencil</b></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-horizon.png" alt="Horizon lock screen"><br><b>Horizon</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-sentence.png" alt="Sentence lock screen"><br><b>Sentence</b></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-aperture.png" alt="Aperture lock screen"><br><b>Aperture</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-tide.png" alt="Tide lock screen"><br><b>Tide</b></td>
+  </tr>
+</table>
 
 ---
 
@@ -109,7 +144,7 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 
 ### Requirements
 
-- **Rust** 1.77 or newer.
+- **Rust** 1.88 or newer.
 - **Libraries**: wayland-client, xkbcommon, cairo, pango/pangocairo, gdk-pixbuf, GTK 3 (`gdk`), PAM, FFmpeg
   (libavcodec, libavformat, libavutil, libswscale, libswresample) and PipeWire for the recorder, and libclang at
   build time (bindings for FFmpeg and PipeWire).
@@ -126,6 +161,9 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 | `plocate` | File search (`pkexec updatedb` to rebuild the index) |
 | `wtype` | Pasting emoji into the focused app |
 | `NetworkManager`, `BlueZ` | Network and Bluetooth pages |
+| `python3` | Keybind parsers; wallpaper depth (installs its own venv) |
+| `greetd`, `cage` | Greeter (optional) |
+| KDE Connect app on the phone | Phone sync (open UDP 1716 and TCP 1714-1764 in the firewall) |
 
 Clipboard (ext-data-control), media control (MPRIS, `prism-ctl media play-pause|next|previous|stop` for media
 keys), notifications and wallpaper resizing are built in; wl-clipboard, playerctl, libnotify and ImageMagick
@@ -136,9 +174,6 @@ the System and Connections tabs an MPRIS bridge for MPD (mpd-mpris), the polkit 
 Network / Bluetooth tray icons (VPN, device and send-file menus). The Control Centre has a VPN page (connect,
 filter, bulk import of .ovpn / WireGuard files through `nmcli`), Bluetooth devices have a Send button, and its
 tiles are chosen in Settings > Notifications. Stop the program a service replaces before turning it on.
-| `python3` | Keybind parsers; wallpaper depth (installs its own venv) |
-| `greetd`, `cage` | Greeter (optional) |
-| KDE Connect app on the phone | Phone sync (open UDP 1716 and TCP 1714-1764 in the firewall) |
 
 ### Build and install
 
@@ -165,6 +200,9 @@ Include the snippet for your compositor. It sets up the keybinds and, for MangoW
 | MangoWM (`~/.config/mango/config.conf`) | `source=/path/to/prism/deploy/prism-mango.conf` |
 | Niri (`~/.config/niri/config.kdl`) | `include "/path/to/prism/deploy/prism-niri.kdl"` |
 | Hyprland (`~/.config/hypr/hyprland.conf`) | `source = /path/to/prism/deploy/prism-hyprland.conf` |
+
+`prismd` starts with `graphical-session.target`, so start Niri with `niri-session`. Older Hyprland releases may need
+UWSM to reach that target.
 
 ### Theme
 
