@@ -1687,14 +1687,12 @@ impl Preloader {
             }
             // The launcher's wallpaper panel, at the size it is drawn (design px).
             if let Some(path) = cairo_backend::wallpaper_panel_path() {
-                let (w, h) = match launcher_themes::card_size(&Config::load().launcher_theme) {
-                    (w, h) if w == launcher::CARD_W => (launcher::panel_w(w), h),
-                    size => size,
-                };
+                let (w, h) = launcher_themes::wallpaper_size(&Config::load().launcher_theme);
                 if let Some(d) = cairo_backend::decode_image_cover(&path, w.round() as i32, h.round() as i32) {
                     let _ = tx.send(Preloaded::Image(d));
                 }
             }
+            launcher_themes::prepare(&Config::load().launcher_theme, &apps);
             let _ = tx.send(Preloaded::Apps(apps));
             waker.wake();
         });

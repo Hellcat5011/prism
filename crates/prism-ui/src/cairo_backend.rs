@@ -177,6 +177,13 @@ pub struct Decoded {
     data: Vec<u8>,
 }
 
+impl Decoded {
+    /// Premultiplied ARGB32 pixels.
+    pub fn pixels(&self) -> &[u8] {
+        &self.data
+    }
+}
+
 /// Decode `path` scaled to fit (w, h) with gdk-pixbuf. Touches no cairo or thread-local state,
 /// so it can run on a worker thread (icon preloading). None if the file cannot be read.
 pub fn decode_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option<Decoded> {
