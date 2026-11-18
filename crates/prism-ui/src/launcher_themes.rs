@@ -24,7 +24,7 @@ pub const THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Slices", "slices
 
 const SLICES_SIZE: (f64, f64) = (1120.0, 600.0);
 const SPECTRUM_SIZE: (f64, f64) = (1040.0, 640.0);
-const DECK_SIZE: (f64, f64) = (1120.0, 620.0);
+const DECK_SIZE: (f64, f64) = (1120.0, 560.0);
 
 /// Card size of the launcher design `id`.
 pub fn card_size(id: &str) -> (f64, f64) {
@@ -34,6 +34,11 @@ pub fn card_size(id: &str) -> (f64, f64) {
         "deck" => DECK_SIZE,
         _ => (launcher::CARD_W, launcher::CARD_H),
     }
+}
+
+/// The design has no card behind it: its surface must stay clear of blur and the card shadow.
+pub fn floating(id: &str) -> bool {
+    id == "deck"
 }
 
 /// Size the design `id` draws the wallpaper at.
@@ -155,18 +160,55 @@ fn icon_name(app: &DesktopApp) -> &str {
     app.icon.as_deref().unwrap_or("")
 }
 
-/// Decodes the icons whose colour is not known yet. Safe to run on any thread.
+/// RGB of a hue (degrees) at the given saturation and value.
+fn rgb_of(hue: f64, s: f64, v: f64) -> (f64, f64, f64) {
+    let c = v * s;
+    let x = c * (1.0 - ((hue / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match (hue.rem_euclid(360.0) / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    (r + m, g + m, b + m)
+}
+
+/// The colour of an app without an icon: fixed by its name, so it always looks the same and apps
+/// without icons spread across the rainbow.
+fn monogram_tint(name: &str) -> Tint {
+    let hash = name.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    let hue = (hash % 360) as f64;
+    Tint { rgb: rgb_of(hue, 0.62, 0.82), hue, colourful: true, value: 0.82 }
+}
+
+/// Up to two letters for an app without an icon: "Deck Craft" and "DeckCraft" give DC.
+fn initials(name: &str) -> String {
+    let mut words = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty());
+    let Some(first) = words.next() else { return "?".to_string() };
+    let lead = first.chars().next().unwrap_or('?');
+    let second = words
+        .next()
+        .and_then(|w| w.chars().next())
+        .or_else(|| first.chars().skip(1).find(|c| c.is_uppercase()))
+        .or_else(|| first.chars().nth(1));
+    lead.to_uppercase().chain(second).collect()
+}
+
+/// Works out the colours not known yet. Safe to run on any thread.
 fn compute_tints(apps: &[DesktopApp]) {
     for app in apps {
-        let name = icon_name(app);
-        if TINTS.lock().map_or(true, |t| t.contains_key(name)) {
+        if TINTS.lock().map_or(true, |t| t.contains_key(&app.id)) {
             continue;
         }
-        let path = [name, "application-x-executable"].iter().filter(|n| !n.is_empty()).find_map(|n| crate::icons::lookup(n, 32));
-        let decoded = path.and_then(|p| cb::decode_image(&p.to_string_lossy(), 32, 32, true));
-        let tint = decoded.map_or(NEUTRAL, |d| tint_of(d.pixels()));
+        let tint = match crate::icons::lookup(icon_name(app), 32) {
+            Some(path) => cb::decode_image(&path.to_string_lossy(), 32, 32, true).map_or(NEUTRAL, |d| tint_of(d.pixels())),
+            None => monogram_tint(&app.name),
+        };
         if let Ok(mut t) = TINTS.lock() {
-            t.insert(name.to_string(), tint);
+            t.insert(app.id.clone(), tint);
         }
     }
     TINT_BATCH.fetch_add(1, Ordering::SeqCst);
@@ -174,7 +216,7 @@ fn compute_tints(apps: &[DesktopApp]) {
 
 /// Starts working out the colours of `apps` in the background when some are missing.
 fn ensure_tints(apps: &[DesktopApp]) {
-    let missing = TINTS.lock().is_ok_and(|t| apps.iter().any(|a| !t.contains_key(icon_name(a))));
+    let missing = TINTS.lock().is_ok_and(|t| apps.iter().any(|a| !t.contains_key(&a.id)));
     if !missing || TINTS_BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -189,7 +231,7 @@ fn ensure_tints(apps: &[DesktopApp]) {
 }
 
 fn tint(app: &DesktopApp) -> Tint {
-    TINTS.lock().ok().and_then(|t| t.get(icon_name(app)).copied()).unwrap_or(NEUTRAL)
+    TINTS.lock().ok().and_then(|t| t.get(&app.id).copied()).unwrap_or(NEUTRAL)
 }
 
 // ── Shared by the designs ────────────────────────────────────────────────
@@ -328,10 +370,21 @@ fn about(app: &DesktopApp) -> String {
     app.comment.clone().filter(|c| !c.is_empty()).or_else(|| app.generic_name.clone()).unwrap_or_default()
 }
 
+/// Stands in for a missing icon: the app's initials on its own colour.
+fn monogram(cr: *mut Cairo, app: &DesktopApp, x: f64, y: f64, size: f64, alpha: f64) {
+    let rgb = monogram_tint(&app.name).rgb;
+    cb::fill_rounded_rect_gradient(cr, x, y, size, size, size * 0.24, shade(rgb, 1.0, alpha), shade(rgb, 0.68, alpha), 0.0, 1.0);
+    cb::stroke_rounded_rect(cr, x + 0.5, y + 0.5, size - 1.0, size - 1.0, size * 0.24, faded(INK, 0.28 * alpha), 1.0);
+    let font = format!("Inter, Sans Bold {}px", (size * 0.4).round());
+    centred_text(cr, Rect { x, y, w: size, h: size }, &initials(&app.name), &font, faded(INK, alpha));
+}
+
 /// An app's icon at (x, y), `alpha` visible.
 fn icon(cr: *mut Cairo, app: &DesktopApp, x: f64, y: f64, size: f64, alpha: f64) {
     let name = icon_name(app);
-    if alpha >= 0.999 {
+    if crate::icons::lookup(name, size.round() as u32).is_none() {
+        monogram(cr, app, x, y, size, alpha);
+    } else if alpha >= 0.999 {
         launcher::draw_icon(cr, name, "application-x-executable", x, y, size);
     } else if alpha > 0.004 {
         unsafe {
@@ -836,7 +889,7 @@ impl CardView for SpectrumLauncher {
 
 const DECK_CARD: (f64, f64) = (250.0, 350.0);
 /// Cards shown on each side of the selected one.
-const DECK_REACH: i64 = 5;
+const DECK_REACH: i64 = 4;
 const DECK_PAGE: i32 = 5;
 /// Enough cards to fill both sides of the hand: from here on it is an endless loop.
 const DECK_LOOP: usize = 2 * DECK_REACH as usize + 2;
@@ -870,47 +923,136 @@ fn deck_pose(d: f64) -> Pose {
     }
 }
 
+/// Room around a card's face for its shadow.
+const DECK_MARGIN: f64 = 32.0;
+const DECK_DETAIL: (f64, f64) = (198.0, 84.0);
+/// Card faces kept ready before those out of sight are dropped.
+const DECK_FACES: usize = 64;
+/// How far past the visible hand card faces are prepared while nothing is moving.
+const DECK_AHEAD: i64 = 8;
+/// Time after opening before spare faces are prepared, so the entrance stays smooth.
+const DECK_SETTLE: Duration = Duration::from_millis(500);
+const DECK_BAR_MARGIN: f64 = 28.0;
+const CAIRO_FILTER_FAST: i32 = 0;
+
+/// The part of the screen a card held at `pose` certainly covers, around its centre: half width
+/// and half height of the largest upright box inside it.
+fn deck_cover(pose: &Pose) -> Option<(f64, f64)> {
+    let (sin, cos) = (pose.angle.abs().sin(), pose.angle.cos());
+    let (hw, hh) = (DECK_CARD.0 / 2.0 * pose.scale, DECK_CARD.1 / 2.0 * pose.scale);
+    let (w, h) = (hw * cos - hh * sin - 2.0, hh * cos - hw * sin - 2.0);
+    (w > 0.0 && h > 0.0 && pose.alpha >= 0.999).then_some((w, h))
+}
+
+/// The screen around a covered box centred on (x, y): what is left to paint of the card behind.
+fn deck_uncovered(x: f64, y: f64, w: f64, h: f64) -> [Rect; 4] {
+    const FAR: f64 = 8000.0;
+    [
+        Rect { x: x - FAR, y: y - FAR, w: 2.0 * FAR, h: FAR - h },
+        Rect { x: x - FAR, y: y + h, w: 2.0 * FAR, h: FAR - h },
+        Rect { x: x - FAR, y: y - h, w: FAR - w, h: 2.0 * h },
+        Rect { x: x + w, y: y - h, w: FAR - w, h: 2.0 * h },
+    ]
+}
+
+/// A picture drawn once and then only moved around.
+struct Sprite(*mut cb::CairoSurface);
+
+impl Sprite {
+    /// Draws a sprite of `w` by `h` design px at `k` device px each.
+    fn new(w: f64, h: f64, k: f64, draw: impl FnOnce(*mut Cairo)) -> Sprite {
+        unsafe {
+            let surface = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, (w * k).ceil() as i32, (h * k).ceil() as i32);
+            let cr = cb::cairo_create(surface);
+            cb::cairo_scale(cr, k, k);
+            draw(cr);
+            cb::cairo_destroy(cr);
+            cb::cairo_surface_flush(surface);
+            Sprite(surface)
+        }
+    }
+
+    /// Paints the sprite centred on the origin. Bilinear: cairo's default filter is far slower
+    /// on a scaled or rotated picture. `rough` is quicker still, for cards passing at the back.
+    fn paint(&self, cr: *mut Cairo, w: f64, h: f64, k: f64, alpha: f64, rough: bool) {
+        unsafe {
+            cb::cairo_save(cr);
+            cb::cairo_scale(cr, 1.0 / k, 1.0 / k);
+            cb::cairo_set_source_surface(cr, self.0, -(w * k).ceil() / 2.0, -(h * k).ceil() / 2.0);
+            cb::cairo_pattern_set_filter(cb::cairo_get_source(cr), if rough { CAIRO_FILTER_FAST } else { cb::CAIRO_FILTER_BILINEAR });
+            cb::cairo_paint_with_alpha(cr, alpha);
+            cb::cairo_restore(cr);
+        }
+    }
+}
+
+impl Drop for Sprite {
+    fn drop(&mut self) {
+        unsafe { cb::cairo_surface_destroy(self.0) };
+    }
+}
+
+/// A card ready to deal: its face, and the description only the front card shows.
+struct Face {
+    base: Sprite,
+    detail: Sprite,
+    detail_y: f64,
+}
+
+fn deck_face(app: &DesktopApp, k: f64) -> Face {
+    let (w, h) = DECK_CARD;
+    let t = tint(app).rgb;
+    let mut name_h = 0.0;
+    let base = Sprite::new(w + 2.0 * DECK_MARGIN, h + 2.0 * DECK_MARGIN, k, |cr| {
+        let (x, y) = (DECK_MARGIN, DECK_MARGIN);
+        cb::drop_shadow(cr, x, y, w, h, 22.0, 26.0, 10.0, 0.42);
+        cb::fill_rounded_rect_gradient(cr, x, y, w, h, 22.0, shade(t, 0.74, 1.0), shade(t, 0.30, 1.0), 0.0, 1.0);
+        cb::stroke_rounded_rect(cr, x + 0.5, y + 0.5, w - 1.0, h - 1.0, 22.0, faded(INK, 0.22), 1.0);
+        icon(cr, app, x + 26.0, y + 28.0, 96.0, 1.0);
+        name_h = cb::draw_pango_text_wrapped(cr, x + 26.0, y + 158.0, &app.name, "Inter, Sans Bold 25px", INK, (w - 52.0) as i32, Some(2)).1 as f64;
+    });
+    let detail = Sprite::new(DECK_DETAIL.0, DECK_DETAIL.1, k, |cr| {
+        cb::draw_pango_text_wrapped(cr, 0.0, 0.0, &about(app), "Inter, Sans 14px", faded(INK, 0.82), DECK_DETAIL.0 as i32, Some(4));
+    });
+    Face { base, detail, detail_y: 166.0 + name_h }
+}
+
 struct DeckLauncher {
     picker: Picker,
     fan: SpringValue,
-    glow: [SpringValue; 3],
     batch: usize,
+    faces: HashMap<String, Face>,
+    faces_scale: f64,
+    /// The search bar, which a click must not close the launcher through, and its plate.
+    bar: Rect,
+    plate: Option<Sprite>,
 }
 
 impl DeckLauncher {
     fn new(apps: Vec<DesktopApp>) -> Self {
         ensure_tints(&apps);
-        let start = apps.first().map_or(NEUTRAL, tint).rgb;
         let mut picker = Picker::new(apps);
         picker.wraps_from = DECK_LOOP;
-        Self {
-            picker,
-            fan: SpringValue::new(0.0),
-            glow: [start.0, start.1, start.2].map(SpringValue::new),
-            batch: TINT_BATCH.load(Ordering::SeqCst),
-        }
+        Self { picker, fan: SpringValue::new(0.0), batch: TINT_BATCH.load(Ordering::SeqCst), faces: HashMap::new(), faces_scale: 1.0, bar: Rect::default(), plate: None }
     }
 }
 
-/// The face of a card, centred on the origin; `front` is 1 for the selected card.
-fn draw_deck_card(cr: *mut Cairo, app: &DesktopApp, front: f64) {
-    let (w, h) = DECK_CARD;
-    let (x, y) = (-w / 2.0, -h / 2.0);
-    let t = tint(app).rgb;
-    cb::fill_rounded_rect(cr, x - 2.0, y + 8.0, w + 4.0, h + 4.0, 24.0, (0.0, 0.0, 0.0, 0.26));
-    cb::fill_rounded_rect_gradient(cr, x, y, w, h, 22.0, shade(t, 0.74, 1.0), shade(t, 0.30, 1.0), 0.0, 1.0);
-    cb::stroke_rounded_rect(cr, x + 0.5, y + 0.5, w - 1.0, h - 1.0, 22.0, faded(INK, 0.14 + 0.2 * front), 1.0);
-    icon(cr, app, x + 26.0, y + 28.0, 96.0, 1.0);
-    let room = (w - 52.0) as i32;
-    let (_, name_h) = cb::draw_pango_text_wrapped(cr, x + 26.0, y + 158.0, &app.name, "Inter, Sans Bold 25px", INK, room, Some(2));
-    if front > 0.01 {
-        cb::draw_pango_text_wrapped(cr, x + 26.0, y + 166.0 + name_h as f64, &about(app), "Inter, Sans 14px", faded(INK, 0.82 * front), room, Some(4));
-    }
+/// A floating plate for text, readable over any wallpaper.
+fn deck_plate(cr: *mut Cairo, r: Rect, style: &Style) {
+    cb::drop_shadow(cr, r.x, r.y, r.w, r.h, r.h / 2.0, 18.0, 6.0, 0.34);
+    cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, faded(style.card_bg, 0.97));
+    cb::stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, r.h / 2.0, faded(INK, 0.16), 1.0);
 }
 
 impl CardView for DeckLauncher {
     fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, _theme: &Theme) {
         let fg = style.fg;
+        let k = style.scale;
+        if self.faces_scale != k {
+            self.faces.clear();
+            self.plate = None;
+            self.faces_scale = k;
+        }
         let p = &mut self.picker;
         let n = p.results.len();
         let wraps = p.wraps();
@@ -920,7 +1062,8 @@ impl CardView for DeckLauncher {
             self.fan.set((place + turn) as f64, SPRING_FAN, style);
         }
         let fan = self.fan.animated(0.002);
-        let (cx, cy) = (card.x + card.w / 2.0, card.y + card.h / 2.0 + 26.0);
+        let moving = !self.fan.settled(0.002);
+        let (cx, cy) = ((card.x + card.w / 2.0).round(), (card.y + 206.0).round());
 
         // Hit places, front card first because it overlaps its neighbours.
         p.hits.clear();
@@ -935,56 +1078,98 @@ impl CardView for DeckLauncher {
             }
         }
 
-        unsafe {
-            cb::cairo_save(cr);
-            cb::rounded_rect_path(cr, card.x, card.y, card.w, card.h, style.radius);
-            cb::cairo_clip(cr);
-        }
-        ui::card_surface(cr, card.x, card.y, card.w, card.h, style);
-        let glow_to = p.results.get(p.selected).map_or(NEUTRAL, tint).rgb;
-        for (v, t) in self.glow.iter_mut().zip([glow_to.0, glow_to.1, glow_to.2]) {
-            if (v.target() - t).abs() > 1e-6 {
-                v.set(t, SPRING_OPEN, style);
-            }
-        }
-        let glow = (self.glow[0].animated(0.004), self.glow[1].animated(0.004), self.glow[2].animated(0.004));
-        cb::fill_rounded_rect_gradient(cr, card.x, card.y, card.w, card.h, 0.0, shade(glow, 1.0, 0.0), shade(glow, 0.9, 0.5), 0.15, 1.0);
-
         let (mut from, mut to) = (fan.floor() as i64 - DECK_REACH, fan.ceil() as i64 + DECK_REACH);
         if !wraps {
             (from, to) = (from.max(0), to.min(n as i64 - 1));
         }
-        let mut order: Vec<i64> = (from..=to).collect();
+        let mut order: Vec<i64> = if n == 0 { Vec::new() } else { (from..=to).collect() };
         order.sort_by(|a, b| (*b as f64 - fan).abs().total_cmp(&(*a as f64 - fan).abs()));
-        for i in order {
+        let (face_w, face_h) = (DECK_CARD.0 + 2.0 * DECK_MARGIN, DECK_CARD.1 + 2.0 * DECK_MARGIN);
+        for &i in &order {
             let d = i as f64 - fan;
             let pose = deck_pose(d);
             if pose.alpha <= 0.01 {
                 continue;
             }
-            unsafe {
-                cb::cairo_save(cr);
+            let app = &p.results[i.rem_euclid(n as i64) as usize];
+            let face = self.faces.entry(app.id.clone()).or_insert_with(|| deck_face(app, k));
+            let front = (1.0 - d.abs()).clamp(0.0, 1.0);
+            let hold = |cr: *mut Cairo| unsafe {
                 cb::cairo_translate(cr, cx + pose.x, cy + pose.y);
                 cb::cairo_rotate(cr, pose.angle);
                 cb::cairo_scale(cr, pose.scale, pose.scale);
-                cb::cairo_push_group(cr);
-            }
-            draw_deck_card(cr, &p.results[i.rem_euclid(n.max(1) as i64) as usize], (1.0 - d.abs()).clamp(0.0, 1.0));
-            unsafe {
-                cb::cairo_pop_group_to_source(cr);
-                cb::cairo_paint_with_alpha(cr, pose.alpha);
-                cb::cairo_restore(cr);
+            };
+            // The next card towards the front hides most of this one: skip those pixels.
+            let nearer = deck_pose(d - d.signum());
+            match deck_cover(&nearer).filter(|_| d.abs() >= 1.0) {
+                Some((w, h)) => {
+                    for part in deck_uncovered(cx + nearer.x, cy + nearer.y, w, h) {
+                        unsafe {
+                            cb::cairo_save(cr);
+                            cb::cairo_rectangle(cr, part.x, part.y, part.w, part.h);
+                            cb::cairo_clip(cr);
+                        }
+                        hold(cr);
+                        face.base.paint(cr, face_w, face_h, k, pose.alpha, moving && d.abs() >= 1.5);
+                        unsafe { cb::cairo_restore(cr) };
+                    }
+                }
+                None => {
+                    unsafe { cb::cairo_save(cr) };
+                    hold(cr);
+                    face.base.paint(cr, face_w, face_h, k, pose.alpha, false);
+                    if front > 0.01 {
+                        unsafe {
+                            cb::cairo_translate(cr, -DECK_CARD.0 / 2.0 + 26.0 + DECK_DETAIL.0 / 2.0, -DECK_CARD.1 / 2.0 + face.detail_y + DECK_DETAIL.1 / 2.0);
+                        }
+                        face.detail.paint(cr, DECK_DETAIL.0, DECK_DETAIL.1, k, pose.alpha * front, false);
+                    }
+                    unsafe { cb::cairo_restore(cr) };
+                }
             }
         }
+        // While nothing moves, prepare one more card each frame so none is drawn mid-flight.
+        if n > 0 && self.fan.settled(0.002) && p.opened.elapsed() >= DECK_SETTLE {
+            let ahead = (1..=DECK_AHEAD).flat_map(|d| [d, -d]).map(|d| p.selected as i64 + d);
+            let missing = ahead
+                .filter(|i| wraps || (0..n as i64).contains(i))
+                .map(|i| &p.results[i.rem_euclid(n as i64) as usize])
+                .find(|app| !self.faces.contains_key(&app.id));
+            if let Some(app) = missing {
+                self.faces.insert(app.id.clone(), deck_face(app, k));
+                ui::keep_animating();
+            }
+        }
+        if self.faces.len() > DECK_FACES {
+            let keep: std::collections::HashSet<&str> =
+                (-DECK_AHEAD..=DECK_AHEAD).map(|d| p.selected as i64 + d).filter(|i| wraps || (0..n as i64).contains(i)).map(|i| p.results[i.rem_euclid(n as i64) as usize].id.as_str()).collect();
+            self.faces.retain(|id, _| keep.contains(id.as_str()));
+        }
+
         if n == 0 {
-            centred_text(cr, card, "No apps match", "Inter, Sans Medium 20px", fg);
+            let plate = Rect { x: cx - 130.0, y: cy - 32.0, w: 260.0, h: 64.0 };
+            deck_plate(cr, plate, style);
+            centred_text(cr, plate, "No apps match", "Inter, Sans Medium 18px", fg);
         }
-        search_field(cr, &p.query, card.x + 20.0, card.y + 20.0, 340.0, fg, faded(fg, 0.10));
-        if n > 0 {
-            counter(cr, p.selected, n, card.x + card.w - 20.0, card.y + 26.0, fg, faded(fg, 0.10));
+        self.bar = Rect { x: cx - 190.0, y: cy + 214.0, w: 380.0, h: 46.0 };
+        let (bar_w, bar_h) = (self.bar.w + 2.0 * DECK_BAR_MARGIN, self.bar.h + 2.0 * DECK_BAR_MARGIN);
+        let bar = self.bar;
+        let plate = self.plate.get_or_insert_with(|| {
+            Sprite::new(bar_w, bar_h, k, |cr| deck_plate(cr, Rect { x: DECK_BAR_MARGIN, y: DECK_BAR_MARGIN, w: bar.w, h: bar.h }, style))
+        });
+        unsafe {
+            cb::cairo_save(cr);
+            cb::cairo_translate(cr, bar.x + bar.w / 2.0, bar.y + bar.h / 2.0);
         }
+        plate.paint(cr, bar_w, bar_h, k, 1.0, false);
         unsafe { cb::cairo_restore(cr) };
-        ui::card_edge(cr, card.x, card.y, card.w, card.h, style);
+        search_field(cr, &p.query, self.bar.x + 8.0, self.bar.y + 1.0, self.bar.w - 88.0, fg, (0.0, 0.0, 0.0, 0.0));
+        if n > 0 {
+            let label = format!("{} / {n}", p.selected + 1);
+            let font = "Inter, Sans Medium 13px";
+            let (tw, th) = cb::measure_pango_text(cr, &label, font, 4000, Some(1));
+            cb::draw_pango_text(cr, self.bar.x + self.bar.w - 20.0 - tw as f64, self.bar.y + (self.bar.h - th as f64) / 2.0, &label, font, faded(fg, 0.72), None);
+        }
     }
 
     /// Cards move under the pointer, so hovering does not select; a click brings a card forward.
@@ -993,6 +1178,7 @@ impl CardView for DeckLauncher {
         false
     }
 
+    /// Nothing is drawn between the cards, so a click there is a click outside.
     fn click(&mut self, x: f64, y: f64, _shift: bool) -> Effect {
         self.picker.mouse_active = true;
         match self.picker.hit(x, y) {
@@ -1001,7 +1187,8 @@ impl CardView for DeckLauncher {
                 self.picker.select(i);
                 Effect::Redraw
             }
-            None => Effect::None,
+            None if self.bar.contains(x, y) => Effect::None,
+            None => Effect::Close,
         }
     }
 
@@ -1028,6 +1215,9 @@ impl CardView for DeckLauncher {
         let batch = TINT_BATCH.load(Ordering::SeqCst);
         let changed = batch != self.batch;
         self.batch = batch;
+        if changed {
+            self.faces.clear();
+        }
         changed
     }
 
@@ -1132,12 +1322,47 @@ mod tests {
     }
 
     #[test]
+    fn initials_come_from_words_or_capitals() {
+        assert_eq!(initials("Deck Craft"), "DC");
+        assert_eq!(initials("DeckCraft"), "DC");
+        assert_eq!(initials("brisk"), "Br");
+        assert_eq!(initials("---"), "?");
+    }
+
+    #[test]
+    fn apps_without_icons_get_their_own_lasting_colour() {
+        assert_eq!(monogram_tint("WordCraft"), monogram_tint("WordCraft"));
+        let hues: std::collections::HashSet<u32> = ["WordCraft", "DeckCraft", "GridCraft", "PdfCraft"].iter().map(|n| monogram_tint(n).hue as u32).collect();
+        assert_eq!(hues.len(), 4);
+        let (r, g, b) = rgb_of(120.0, 1.0, 1.0);
+        assert_eq!((r, g, b), (0.0, 1.0, 0.0));
+    }
+
+    #[test]
     fn a_resting_pointer_does_not_select() {
         let mut p = Picker::new(Vec::new());
         p.opened = Instant::now() - Duration::from_secs(1);
         assert!(!p.pointer_moved(40.0, 40.0));
         assert!(!p.pointer_moved(40.0, 40.0));
         assert!(p.pointer_moved(41.0, 40.0));
+    }
+
+    #[test]
+    fn the_covered_box_stays_inside_the_card() {
+        for d in [1.0, 2.0, 3.0] {
+            let pose = deck_pose(d);
+            let (w, h) = deck_cover(&pose).unwrap();
+            let (sin, cos) = pose.angle.sin_cos();
+            for (x, y) in [(w, h), (-w, h), (w, -h), (-w, -h)] {
+                let (cx, cy) = (x * cos + y * sin, -x * sin + y * cos);
+                assert!(cx.abs() <= DECK_CARD.0 / 2.0 * pose.scale && cy.abs() <= DECK_CARD.1 / 2.0 * pose.scale, "{d}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fading_card_hides_nothing() {
+        assert!(deck_cover(&Pose { alpha: 0.5, ..deck_pose(1.0) }).is_none());
     }
 
     #[test]

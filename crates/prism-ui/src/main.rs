@@ -1044,7 +1044,8 @@ impl UiState {
             let k = pose.scale;
             (cx + (x + pose.tx * s - cx) * k, cy + (y + pose.ty * s - cy) * k, w * k, h * k)
         };
-        let enabled = self.style.shadows && !self.settings_hidden();
+        let floating = matches!(self.mode, UiMode::Launcher) && launcher_themes::floating(&self.config.launcher_theme);
+        let enabled = self.style.shadows && !self.settings_hidden() && !floating;
         let (radius, alpha) = (self.style.radius, pose.alpha);
         match self.shadow.as_mut() {
             Some(sh) => sh.update(&shm, qh, rest, radius, s, visible, alpha, enabled),
@@ -1964,6 +1965,7 @@ impl Overlay {
             UiMode::Osd { .. } => (Layer::Overlay, "prism-osd", Anchor::Bottom, KeyboardInteractivity::None),
             // The carousel has no card background; it must not be blurred.
             UiMode::Wallpaper => (Layer::Overlay, "prism-wallpaper", Anchor::Top | Anchor::Left, KeyboardInteractivity::Exclusive),
+            UiMode::Launcher if launcher_themes::floating(&state.config.launcher_theme) => (Layer::Overlay, "prism-wallpaper", Anchor::Top | Anchor::Left, KeyboardInteractivity::Exclusive),
             _ => (Layer::Overlay, "prism-modal", Anchor::Top | Anchor::Left, KeyboardInteractivity::Exclusive),
         };
         // Blurred card namespaces get a "-solid" twin when blur is turned off (see ui::Style::namespace).
