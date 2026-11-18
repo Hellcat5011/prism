@@ -83,9 +83,6 @@ pub struct Config {
     /// Applying a wallpaper offers the colour filters first.
     #[serde(default = "default_wallpaper_filters_enabled")]
     pub wallpaper_filters_enabled: bool,
-    /// Filters reach the lock screen, greeter and previews, not the desktop wallpaper.
-    #[serde(default)]
-    pub wallpaper_keep_desktop: bool,
 
     #[serde(default = "default_matugen_mode")]
     pub matugen_mode: String,
@@ -612,7 +609,6 @@ impl Default for Config {
             wallpaper_transition: default_wallpaper_transition(),
             wallpaper_dir: default_wallpaper_dir(),
             wallpaper_filters_enabled: default_wallpaper_filters_enabled(),
-            wallpaper_keep_desktop: false,
             matugen_mode: default_matugen_mode(),
             matugen_scheme: default_matugen_scheme(),
             search_include_hidden: false,

@@ -480,6 +480,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                 if state.nc.as_mut().map(|v| v.leave()).unwrap_or(false) {
                     state.render_and_commit(qh);
                 }
+                if state.wallpaper.as_mut().map(|v| v.leave()).unwrap_or(false) {
+                    state.render_and_commit(qh);
+                }
             }
             wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
                 let (ox, oy) = state.pointer_origin();
@@ -2303,7 +2306,6 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     // Built-in wallpaper daemon (Settings > Wallpaper > Wallpaper Daemon = Built-in).
     let mut background = if daemon { background::Background::new(&conn, &globals, waker.clone()) } else { None };
     let mut config_seq = desktop.as_ref().map(|d| d.config_seq()).unwrap_or(0);
-    let mut keep_desktop = prism_common::Config::load().wallpaper_keep_desktop;
     if daemon {
         prompt::init(waker.clone());
         apply_agents(&prism_common::Config::load());
@@ -2509,10 +2511,6 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 let cfg = prism_common::Config::load();
                 b.apply_config(&cfg);
                 apply_agents(&cfg);
-                if cfg.wallpaper_keep_desktop != keep_desktop {
-                    keep_desktop = cfg.wallpaper_keep_desktop;
-                    wallpaper::reapply_filter(&cfg);
-                }
                 ok &= b.dispatch();
             }
         }

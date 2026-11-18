@@ -56,14 +56,6 @@ pub fn active_filter() -> Filter {
         .unwrap_or_default()
 }
 
-/// The file the desktop shows for `image_path` under `filter`: the image itself while
-/// `wallpaper_keep_desktop` is on, else its filtered copy.
-pub fn desktop_image(image_path: &Path, filter: Filter) -> Result<PathBuf, String> {
-    if crate::Config::load().wallpaper_keep_desktop {
-        return Ok(image_path.to_path_buf());
-    }
-    render_filtered(image_path, filter)
-}
 
 /// The picture to put on screen: the filtered copy of the current wallpaper when a filter is on.
 /// `get_current_wallpaper` stays the original (depth masks are generated from it).
@@ -111,8 +103,7 @@ pub fn set_wallpaper(
     set_wallpaper_filtered(image_path, Filter::Normal, daemon, scheme, mode)
 }
 
-/// `set_wallpaper` with a colour filter. The lock screen and greeter copies always get it, the
-/// desktop as `desktop_image` decides.
+/// `set_wallpaper` with a colour filter, also applied to the lock screen and greeter copies.
 pub fn set_wallpaper_filtered(
     image_path: &Path,
     filter: Filter,
@@ -131,7 +122,7 @@ pub fn set_wallpaper_filtered(
     let wa_jpg = home.join(".wa.jpg");
     let wa_thumb = home.join(".wa-thumb.jpg");
 
-    let shown = desktop_image(image_path, filter)?;
+    let shown = render_filtered(image_path, filter)?;
 
     // Downscaled copies for the lock screen, settings previews and matugen.
     if crate::pixbuf::save_jpeg_filtered(image_path, &wa_jpg, 1920, 95, filter).is_err() {

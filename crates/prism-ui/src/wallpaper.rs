@@ -51,12 +51,17 @@ const TILE_LABEL_H: f64 = 24.0;
 const STRIP_PAD: f64 = 14.0;
 const STRIP_BUTTON_W: f64 = 96.0;
 const STRIP_BUTTON_H: f64 = 34.0;
-/// The two switches above the carousel.
-const PILL_LABELS: [&str; 2] = ["Use Wallpaper Filters", "Keep Desktop Wallpaper Original"];
+/// The switch above the carousel.
+const PILL_LABEL: &str = "Use Wallpaper Filters";
 const PILL_H: f64 = 40.0;
-const PILL_GAP: f64 = 12.0;
 const PILL_TOP: f64 = 11.0;
 const PILL_SWITCH: (f64, f64) = (40.0, 24.0);
+/// What the switch does when on and when off.
+const PILL_TIP_ON: &str = "Choose a filter each time you apply a wallpaper.";
+const PILL_TIP_OFF: &str = "New wallpapers apply right away, with no filter.";
+const TIP_PAD: f64 = 12.0;
+const TIP_LINE: f64 = 22.0;
+const TIP_LABEL_W: f64 = 38.0;
 /// Decoded height of the tile previews (drawn at TILE, sharp on scaled outputs).
 const TILE_PX: i32 = 160;
 /// Hover ids after the tiles.
@@ -155,11 +160,9 @@ pub struct WallpaperView {
     preview_rx: Receiver<PreviewOut>,
     strip: Option<FilterStrip>,
     filters_on: bool,
-    keep_desktop: bool,
-    pill_rects: [Rect; 2],
-    pill_hover: Option<usize>,
-    pill_hovers: Fades<usize>,
-    pill_knobs: Fades<usize>,
+    pill_rect: Rect,
+    pill_hover: bool,
+    pill_fades: Fades<usize>,
     apply_rx: Option<Receiver<Result<(), String>>>,
     applying: bool,
     error: Option<String>,
@@ -207,7 +210,7 @@ impl WallpaperView {
             order.extend(base.iter().copied());
         }
 
-        // Fresh from disk: Settings may have changed them since this overlay's config was read.
+        // Fresh from disk: Settings may have changed it since this overlay's config was read.
         let switches = prism_common::Config::load();
         WallpaperView {
             entries,
@@ -222,11 +225,9 @@ impl WallpaperView {
             preview_rx,
             strip: None,
             filters_on: switches.wallpaper_filters_enabled,
-            keep_desktop: switches.wallpaper_keep_desktop,
-            pill_rects: [Rect::default(); 2],
-            pill_hover: None,
-            pill_hovers: Fades::default(),
-            pill_knobs: Fades::default(),
+            pill_rect: Rect::default(),
+            pill_hover: false,
+            pill_fades: Fades::default(),
             apply_rx: None,
             applying: false,
             error: None,
@@ -323,27 +324,22 @@ impl WallpaperView {
         }
     }
 
-    fn toggle_pill(&mut self, i: usize) {
-        if i == 0 {
-            self.filters_on = !self.filters_on;
-            if !self.filters_on {
-                if let Some(p) = self.strip.as_mut() {
-                    p.close();
-                }
+    fn toggle_filters(&mut self) {
+        self.filters_on = !self.filters_on;
+        if !self.filters_on {
+            if let Some(p) = self.strip.as_mut() {
+                p.close();
             }
-        } else if self.filters_on {
-            self.keep_desktop = !self.keep_desktop;
         }
-        let (filters_on, keep_desktop) = (self.filters_on, self.keep_desktop);
+        let filters_on = self.filters_on;
         std::thread::spawn(move || {
             let mut c = prism_common::Config::load();
             c.wallpaper_filters_enabled = filters_on;
-            c.wallpaper_keep_desktop = keep_desktop;
             let _ = c.save();
         });
     }
 
-    fn draw_pills(&mut self, cr: *mut Cairo, panel_x: f64, panel_y: f64, width: f64, style: &Style, theme: &prism_common::Theme) {
+    fn draw_pill(&mut self, cr: *mut Cairo, panel_x: f64, panel_y: f64, width: f64, style: &Style, theme: &prism_common::Theme) {
         let palette = Palette {
             fg: style.fg,
             accent: style.accent,
@@ -355,34 +351,56 @@ impl WallpaperView {
         };
         let label = TextStyle { family: &style.font_family, px: 13.0, bold: true, color: style.fg };
         // Label, its padding, the switch and the space around it.
-        let widths = PILL_LABELS.map(|t| measure(cr, t, &label).0.ceil() + 18.0 + 14.0 + PILL_SWITCH.0 + 8.0);
-        let total = widths[0] + PILL_GAP + widths[1];
-        let mut x = panel_x + (width - total) / 2.0;
-        let y = panel_y + PILL_TOP;
-        let dim = self.pill_knobs.settled_level(2, !self.filters_on, crate::ui::SPRING_HOVER, style);
-        for i in 0..2 {
-            let r = Rect { x, y, w: widths[i], h: PILL_H };
-            self.pill_rects[i] = r;
-            x += widths[i] + PILL_GAP;
-            let enabled = i == 0 || self.filters_on;
-            let on = if i == 0 { self.filters_on } else { self.keep_desktop };
-            let knob = self.pill_knobs.settled_level(i, on, crate::ui::SPRING_KNOB, style);
-            let hover = self.pill_hovers.level(i, enabled && self.pill_hover == Some(i), style);
-            let alpha = if i == 0 { 1.0 } else { 1.0 - 0.6 * dim };
-            unsafe { cairo_push_group(cr) };
-            fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, (0.0, 0.0, 0.0, 0.6));
-            fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, style.card_bg);
-            if hover > 0.0 {
-                fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, (style.fg.0, style.fg.1, style.fg.2, 0.08 * hover));
-            }
-            draw_in_box(cr, PILL_LABELS[i], &label, r.x + 18.0, r.y, r.w - 18.0 - PILL_SWITCH.0 - 8.0, r.h, Align::Start);
-            let sw = Rect { x: r.x + r.w - PILL_SWITCH.0 - 8.0, y: r.y + (r.h - PILL_SWITCH.1) / 2.0, w: PILL_SWITCH.0, h: PILL_SWITCH.1 };
-            uikit::switch(cr, sw, knob, hover, &palette);
-            unsafe {
-                cairo_pop_group_to_source(cr);
-                cairo_paint_with_alpha(cr, alpha);
-            }
+        let w = measure(cr, PILL_LABEL, &label).0.ceil() + 18.0 + 14.0 + PILL_SWITCH.0 + 8.0;
+        let r = Rect { x: panel_x + (width - w) / 2.0, y: panel_y + PILL_TOP, w, h: PILL_H };
+        self.pill_rect = r;
+        let knob = self.pill_fades.settled_level(0, self.filters_on, crate::ui::SPRING_KNOB, style);
+        let hover = self.pill_fades.level(1, self.pill_hover, style);
+        fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, (0.0, 0.0, 0.0, 0.6));
+        fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, style.card_bg);
+        if hover > 0.0 {
+            fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, (style.fg.0, style.fg.1, style.fg.2, 0.08 * hover));
         }
+        draw_in_box(cr, PILL_LABEL, &label, r.x + 18.0, r.y, r.w - 18.0 - PILL_SWITCH.0 - 8.0, r.h, Align::Start);
+        let sw = Rect { x: r.x + r.w - PILL_SWITCH.0 - 8.0, y: r.y + (r.h - PILL_SWITCH.1) / 2.0, w: PILL_SWITCH.0, h: PILL_SWITCH.1 };
+        uikit::switch(cr, sw, knob, hover, &palette);
+        if hover > 0.01 {
+            self.draw_pill_tip(cr, hover, panel_x, width, style);
+        }
+    }
+
+    /// What the switch does in each position; its current one stands out.
+    fn draw_pill_tip(&self, cr: *mut Cairo, level: f64, panel_x: f64, width: f64, style: &Style) {
+        let text = |bold: bool, color| TextStyle { family: &style.font_family, px: 12.0, bold, color };
+        let lines = [("ON", PILL_TIP_ON, self.filters_on), ("OFF", PILL_TIP_OFF, !self.filters_on)];
+        let widest = lines.iter().map(|l| measure(cr, l.1, &text(true, style.fg)).0).fold(0.0, f64::max);
+        let w = (2.0 * TIP_PAD + TIP_LABEL_W + widest.ceil()).min(width - 16.0);
+        let h = 2.0 * TIP_PAD + lines.len() as f64 * TIP_LINE;
+        let pill = self.pill_rect;
+        let x = (pill.x + (pill.w - w) / 2.0).clamp(panel_x + 8.0, panel_x + width - w - 8.0);
+        let y = pill.y + pill.h + 8.0 - (1.0 - level) * 6.0;
+        unsafe { cairo_push_group(cr) };
+        drop_shadow(cr, x, y, w, h, 12.0, 14.0, 4.0, 0.3);
+        fill_rounded_rect(cr, x, y, w, h, 12.0, (0.0, 0.0, 0.0, 0.82));
+        fill_rounded_rect(cr, x, y, w, h, 12.0, style.card_bg);
+        let mut ly = y + TIP_PAD;
+        for (label, tip, current) in lines {
+            let a = if current { 1.0 } else { 0.6 };
+            let label_color = if current { style.accent } else { (style.fg.0, style.fg.1, style.fg.2, 0.6) };
+            draw_in_box(cr, label, &text(true, label_color), x + TIP_PAD, ly, TIP_LABEL_W, TIP_LINE, Align::Start);
+            draw_in_box(cr, tip, &text(current, (style.fg.0, style.fg.1, style.fg.2, a)), x + TIP_PAD + TIP_LABEL_W, ly, w - 2.0 * TIP_PAD - TIP_LABEL_W, TIP_LINE, Align::Start);
+            ly += TIP_LINE;
+        }
+        unsafe {
+            cairo_pop_group_to_source(cr);
+            cairo_paint_with_alpha(cr, level.clamp(0.0, 1.0));
+        }
+    }
+
+    /// The pointer left the selector.
+    pub fn leave(&mut self) -> bool {
+        let strip = self.strip.as_mut().is_some_and(|p| p.hover.take().is_some());
+        std::mem::take(&mut self.pill_hover) || strip
     }
 
     fn open_strip(&mut self, style: &Style) {
@@ -520,10 +538,9 @@ impl WallpaperView {
 
     /// Pointer moved. Returns (redraw, over something clickable).
     pub fn motion(&mut self, x: f64, y: f64) -> (bool, bool) {
-        let pill = self.pill_rects.iter().position(|r| r.contains(x, y));
-        let pill_changed = pill != self.pill_hover;
-        self.pill_hover = pill;
-        let pill_over = pill.is_some_and(|i| i == 0 || self.filters_on);
+        let pill_over = self.pill_rect.contains(x, y);
+        let pill_changed = pill_over != self.pill_hover;
+        self.pill_hover = pill_over;
         if !self.picking() {
             return (pill_changed, pill_over);
         }
@@ -693,7 +710,7 @@ impl WallpaperView {
         // Topmost slices were drawn last; hit-test them first.
         self.hits.reverse();
         self.draw_strip(cr, panel_x, panel_y, width, style, theme);
-        self.draw_pills(cr, panel_x, panel_y, width, style, theme);
+        self.draw_pill(cr, panel_x, panel_y, width, style, theme);
     }
 
     pub fn key(&mut self, code: u32, style: &Style) -> Effect {
@@ -745,8 +762,8 @@ impl WallpaperView {
         if self.applying {
             return Effect::None;
         }
-        if let Some(i) = self.pill_rects.iter().position(|r| r.contains(x, y)) {
-            self.toggle_pill(i);
+        if self.pill_rect.contains(x, y) {
+            self.toggle_filters();
             return Effect::Redraw;
         }
         let hit = self.hits.iter().find(|(_, poly)| point_in_poly(x, y, poly)).map(|(k, _)| *k);
@@ -796,7 +813,7 @@ impl WallpaperView {
         let (tx, rx) = std::sync::mpsc::channel();
         let w = self.waker.clone();
         std::thread::spawn(move || {
-            let r = prism_common::wallpaper::desktop_image(&path, filter).and_then(|shown| {
+            let r = prism_common::wallpaper::render_filtered(&path, filter).and_then(|shown| {
                 if daemon == "prism" {
                     crate::background::request_show(&shown);
                 }
@@ -817,24 +834,6 @@ impl Drop for WallpaperView {
             unsafe { cairo_surface_destroy(*s) };
         }
     }
-}
-
-/// The desktop switch changed: put the current wallpaper's filter on or off the desktop.
-pub fn reapply_filter(cfg: &prism_common::Config) {
-    let filter = prism_common::wallpaper::active_filter();
-    let Some(path) = prism_common::wallpaper::get_current_wallpaper().filter(|_| filter != Filter::Normal) else { return };
-    let (daemon, scheme, mode) = (cfg.wallpaper_daemon.clone(), cfg.matugen_scheme.clone(), cfg.matugen_mode.clone());
-    std::thread::spawn(move || {
-        let r = prism_common::wallpaper::desktop_image(&path, filter).and_then(|shown| {
-            if daemon == "prism" {
-                crate::background::request_show(&shown);
-            }
-            prism_common::wallpaper::set_wallpaper_filtered(&path, filter, Some(&daemon), Some(&scheme), Some(&mode))
-        });
-        if let Err(e) = r {
-            eprintln!("[prism-ui/wallpaper] {e}");
-        }
-    });
 }
 
 fn expand_home(p: &str) -> PathBuf {

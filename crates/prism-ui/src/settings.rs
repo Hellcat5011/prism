@@ -107,19 +107,15 @@ enum Control {
     Buttons(&'static [(&'static str, Action, ButtonKind)]),
     /// Toggle pills: (label, value) options, any number on.
     Pills { options: &'static [(&'static str, &'static str)], get: fn(&Config) -> Vec<String>, set: fn(&mut Config, Vec<String>) },
+    /// Small print at the end of a tab (the row subtitle); not focusable, hidden in search results.
+    Note,
     /// Section heading (the row title) grouping the rows after it; not focusable, hidden
     /// in search results and when its section has no visible rows.
     Heading,
 }
 
 const LOCK_THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Stencil", "stencil"), ("Horizon", "horizon"), ("Sentence", "sentence"), ("Aperture", "aperture"), ("Tide", "tide")];
-const KEEP_DESKTOP_ROW: &str = "Keep Desktop Wallpaper Original";
-
-/// Greyed out and not changeable: the option has no effect with the current settings.
-fn row_disabled(r: &Row, c: &Config) -> bool {
-    r.title == KEEP_DESKTOP_ROW && !c.wallpaper_filters_enabled
-}
-
+const THEME_FILTER_NOTE: &str = "Every theme shows your current wallpaper, including any wallpaper filter applied to it.";
 struct Row {
     tab: usize,
     title: &'static str,
@@ -152,7 +148,7 @@ impl Control {
             Control::Slider { get, .. } => Some(get(c).to_string()),
             Control::Text { get, .. } | Control::Combo { get, .. } => Some(get(c)),
             Control::Pills { get, .. } => Some(get(c).join(",")),
-            Control::Buttons(_) | Control::Heading => None,
+            Control::Buttons(_) | Control::Heading | Control::Note => None,
         }
     }
 
@@ -166,13 +162,17 @@ impl Control {
             }
             Control::Combo { get, set, .. } => set(to, &get(from)),
             Control::Pills { get, set, .. } => set(to, get(from)),
-            Control::Buttons(_) | Control::Heading => {}
+            Control::Buttons(_) | Control::Heading | Control::Note => {}
         }
     }
 }
 
 fn always(_: &Config) -> bool {
     true
+}
+
+fn note(tab: usize, subtitle: &'static str) -> Row {
+    Row { tab, title: "", subtitle, control: Control::Note, visible: always }
 }
 
 fn heading(tab: usize, title: &'static str) -> Row {
@@ -213,8 +213,6 @@ fn rows() -> Vec<Row> {
             control: Combo { options: || opts(&[("Random", "random"), ("Fade", "fade"), ("Wipe", "wipe"), ("Grow", "grow"), ("None", "none")]), get: |c| c.wallpaper_transition.clone(), set: |c, v| c.wallpaper_transition = v.to_string(), fonts: false } },
         Row { tab: 0, title: "Use Wallpaper Filters", subtitle: "Choose a colour filter when applying a wallpaper.", visible: always,
             control: Switch(|c| c.wallpaper_filters_enabled, |c, v| c.wallpaper_filters_enabled = v) },
-        Row { tab: 0, title: KEEP_DESKTOP_ROW, subtitle: "Filters apply to the lock screen, greeter and previews, not the desktop.", visible: always,
-            control: Switch(|c| c.wallpaper_keep_desktop, |c, v| c.wallpaper_keep_desktop = v) },
         heading(0, "Depth Effect"),
         Row { tab: 0, title: "Wallpaper Depth", subtitle: "Makes desktop widgets pass behind wallpaper foregrounds.", visible: always,
             control: Switch(|c| c.depth_enabled, |c, v| c.depth_enabled = v) },
@@ -240,11 +238,13 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.show_lockscreen_session_controls, |c, v| c.show_lockscreen_session_controls = v) },
         Row { tab: 1, title: "Lockscreen Alignment", subtitle: "Align the lockscreen elements to the left or right edge (Classic theme).", visible: |c| c.lockscreen_theme == "classic" || c.greeter_theme == "classic",
             control: Combo { options: || opts(&[("Left", "left"), ("Right", "right")]), get: |c| c.lockscreen_alignment.clone(), set: |c, v| c.lockscreen_alignment = v.to_string(), fonts: false } },
+        note(1, THEME_FILTER_NOTE),
         // ── Greeter ──
         Row { tab: 2, title: "Greeter Theme", subtitle: "The design of the login screen.", visible: always,
             control: Combo { options: || { let mut o = opts(&[("Mirror the Lock Screen", "mirror")]); o.extend(opts(LOCK_THEMES)); o }, get: |c| c.greeter_theme.clone(), set: |c, v| c.greeter_theme = v.to_string(), fonts: false } },
         Row { tab: 2, title: "Remember Last User", subtitle: "Pre-select the last user and session on the next boot (applies after logout).", visible: always,
             control: Switch(|c| c.remember_last_user, |c, v| c.remember_last_user = v) },
+        note(2, THEME_FILTER_NOTE),
         // ── Display ──
         heading(3, "Monitor"),
         Row { tab: 3, title: "Monitor", subtitle: "Which monitor the settings below change.", visible: |_| crate::displays::count() > 1,
@@ -702,7 +702,8 @@ impl SettingsView {
         v.sort_by_key(|&i| (self.rows[i].tab, i));
         // Headings: not in search results, and only with at least one row of their section.
         let heading = |i: usize| matches!(self.rows[i].control, Control::Heading);
-        let v: Vec<usize> = v.into_iter().filter(|&i| q.is_empty() || !heading(i)).collect();
+        let small_print = |i: usize| matches!(self.rows[i].control, Control::Note);
+        let v: Vec<usize> = v.into_iter().filter(|&i| q.is_empty() || !(heading(i) || small_print(i))).collect();
         (0..v.len()).filter(|&k| !heading(v[k]) || v.get(k + 1).is_some_and(|&n| !heading(n))).map(|k| v[k]).collect()
     }
 
@@ -843,6 +844,10 @@ impl SettingsView {
                 heights.push(if k == 0 { HEADING_H - HEADING_GAP } else { HEADING_H });
                 continue;
             }
+            if matches!(r.control, Control::Note) {
+                heights.push(wrapped(cr, r.subtitle, &TextStyle { family: &p.family, px: 11.5, bold: false, color: p.fg }, list.w, None) + 28.0);
+                continue;
+            }
             let sub = row_subtitle(r);
             let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. }) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
@@ -891,7 +896,7 @@ impl SettingsView {
                 Control::Buttons(btns) => self.focus_order.extend((0..btns.len()).map(|b| Hit::Button(i, b))),
                 Control::Pills { options, .. } => self.focus_order.extend((0..options.len()).map(|b| Hit::Button(i, b))),
                 Control::Text { browse: true, .. } => self.focus_order.extend([Hit::Control(i), Hit::Browse(i)]),
-                Control::Heading => {}
+                Control::Heading | Control::Note => {}
                 _ => self.focus_order.push(Hit::Control(i)),
             }
             let mut h = heights[k];
@@ -911,6 +916,11 @@ impl SettingsView {
                 y += h;
                 continue;
             }
+            if matches!(self.rows[i].control, Control::Note) {
+                wrapped(cr, self.rows[i].subtitle, &TextStyle { family: &p.family, px: 11.5, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.55) }, list.w, Some((list.x, y + 14.0)));
+                y += h;
+                continue;
+            }
             if group_start[k] {
                 let ty = if k == 0 { y } else { y + 8.0 };
                 draw_in_box(cr, &TABS[self.rows[i].tab].to_uppercase(), &TextStyle { family: &format!("{} Semi-Bold", p.family), px: 11.0, bold: false, color: (p.accent.0, p.accent.1, p.accent.2, 0.9) }, list.x, ty, list.w, GROUP_H - 8.0, Align::Start);
@@ -919,9 +929,7 @@ impl SettingsView {
             }
             let r = &self.rows[i];
             let ry = y + 14.0;
-            let disabled = row_disabled(r, &draft);
-            let title_color = if disabled { (p.fg.0, p.fg.1, p.fg.2, 0.4) } else { p.fg };
-            let (_, _, tw, _) = draw_in_box(cr, r.title, &TextStyle { family: &title_fam, px: 15.0, bold: false, color: title_color }, list.x, ry, text_w, 20.0, Align::Start);
+            let (_, _, tw, _) = draw_in_box(cr, r.title, &TextStyle { family: &title_fam, px: 15.0, bold: false, color: p.fg }, list.x, ry, text_w, 20.0, Align::Start);
             let modified = r.control.value(&draft) != r.control.value(&self.baseline);
             if modified {
                 // Changed-this-session marker after the title, and a revert button.
@@ -947,16 +955,7 @@ impl SettingsView {
                 Control::Switch(get, _) => {
                     let sr = Rect { x: list.x + list.w - 50.0, y: mid - 14.0, w: 50.0, h: 28.0 };
                     let knob = self.knobs.settled_level(i, get(&draft), crate::ui::SPRING_KNOB, style);
-                    if disabled {
-                        unsafe { cairo_push_group(cr) };
-                        uikit::switch(cr, sr, knob, 0.0, &p);
-                        unsafe {
-                            cairo_pop_group_to_source(cr);
-                            cairo_paint_with_alpha(cr, 0.4);
-                        }
-                    } else {
-                        uikit::switch(cr, sr, knob, hov, &p);
-                    }
+                    uikit::switch(cr, sr, knob, hov, &p);
                     self.control_rects.push((i, sr));
                 }
                 Control::Slider { min, max, get, fmt, .. } => {
@@ -1023,7 +1022,7 @@ impl SettingsView {
                         bx += w + 10.0;
                     }
                 }
-                Control::Heading => {}
+                Control::Heading | Control::Note => {}
             }
             let next_heading = visible.get(k + 1).is_some_and(|&n| matches!(self.rows[n].control, Control::Heading));
             if k + 1 < visible.len() && !next_heading && !group_start.get(k + 1).copied().unwrap_or(false) {
@@ -1229,7 +1228,6 @@ impl SettingsView {
                 self.toggle_pill(i, b);
             }
             Hit::Control(i) => match &self.rows[i].control {
-                Control::Switch(..) if row_disabled(&self.rows[i], &self.config) => {}
                 Control::Switch(get, set) => {
                     let mut after = self.config.clone();
                     set(&mut after, !get(&self.config));
@@ -1247,7 +1245,7 @@ impl SettingsView {
                     }
                 }
                 Control::Combo { .. } => self.combo = Some((i, Dropdown::default())),
-                Control::Buttons(_) | Control::Pills { .. } | Control::Heading => {}
+                Control::Buttons(_) | Control::Pills { .. } | Control::Heading | Control::Note => {}
             },
         }
         Effect::Redraw
@@ -1420,7 +1418,7 @@ impl SettingsView {
                             let before = self.config.clone();
                             self.change(before, after);
                         } else if let Control::Switch(get, set) = self.rows[i].control {
-                            if get(&self.config) != (dir > 0) && !row_disabled(&self.rows[i], &self.config) {
+                            if get(&self.config) != (dir > 0) {
                                 let mut after = self.config.clone();
                                 set(&mut after, dir > 0);
                                 let before = self.config.clone();
@@ -1509,7 +1507,6 @@ impl SettingsView {
                 self.toggle_pill(i, b);
             }
             Some(Hit::Control(i)) => match &self.rows[i].control {
-                Control::Switch(..) if row_disabled(&self.rows[i], &self.config) => {}
                 Control::Switch(get, set) => {
                     let mut after = self.config.clone();
                     set(&mut after, !get(&self.config));
@@ -1522,7 +1519,7 @@ impl SettingsView {
                     let dd = Dropdown { hover: options().iter().position(|(_, v)| *v == cur), ..Dropdown::default() };
                     self.combo = Some((i, dd));
                 }
-                Control::Slider { .. } | Control::Buttons(_) | Control::Pills { .. } | Control::Heading => {}
+                Control::Slider { .. } | Control::Buttons(_) | Control::Pills { .. } | Control::Heading | Control::Note => {}
             },
             _ => {}
         }
