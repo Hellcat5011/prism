@@ -43,3 +43,15 @@ to-do
 # Process & socket files
 *.pid
 *.sock
+
+# Local notes, agent configuration and development leftovers
+/CLAUDE.md
+/AGENTS.md
+/*_PLAN.md
+/.claude/
+/data/.gitkeep
+/crates/prism-capture/examples/
+/assets/screenshots/Desktop-with-widgets.png
+/assets/screenshots/Screenshot_*.png
+/assets/screenshots/control-center.png
+/assets/screenshots/settings.png
