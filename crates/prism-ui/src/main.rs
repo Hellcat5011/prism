@@ -15,6 +15,7 @@ mod clipboard;
 mod emoji;
 mod keybinds;
 mod launcher;
+mod launcher_themes;
 mod nc;
 mod osd;
 mod phone;
@@ -1075,7 +1076,10 @@ impl UiState {
             (((sw - w) / 2.0).round() as i32, ((sh - h) / 2.0).round() as i32, w as i32, h as i32)
         };
         match &self.mode {
-            UiMode::Launcher => centered(launcher::CARD_W, launcher::CARD_H),
+            UiMode::Launcher => {
+                let (w, h) = launcher_themes::card_size(&self.config.launcher_theme);
+                centered(w, h)
+            }
             UiMode::Spotlight => {
                 let w = spotlight::CARD_W.min(sw - 40.0);
                 let h = self.view.as_ref().and_then(|v| v.height()).unwrap_or(60.0);
@@ -1683,7 +1687,10 @@ impl Preloader {
             }
             // The launcher's wallpaper panel, at the size it is drawn (design px).
             if let Some(path) = cairo_backend::wallpaper_panel_path() {
-                let (w, h) = (launcher::panel_w(launcher::CARD_W), launcher::CARD_H);
+                let (w, h) = match launcher_themes::card_size(&Config::load().launcher_theme) {
+                    (w, h) if w == launcher::CARD_W => (launcher::panel_w(w), h),
+                    size => size,
+                };
                 if let Some(d) = cairo_backend::decode_image_cover(&path, w.round() as i32, h.round() as i32) {
                     let _ = tx.send(Preloaded::Image(d));
                 }
@@ -1903,7 +1910,7 @@ impl Overlay {
             state.nc = Some(nc::NcView::new(waker.clone()));
         }
         match state.mode {
-            UiMode::Launcher => state.view = Some(Box::new(launcher::LauncherView::new(std::mem::take(&mut state.apps)))),
+            UiMode::Launcher => state.view = Some(launcher_themes::view(&state.config.launcher_theme, std::mem::take(&mut state.apps))),
             UiMode::Spotlight => {
                 state.view = Some(Box::new(spotlight::SpotlightView::new(std::mem::take(&mut state.apps), state.config.clone(), waker.clone())))
             }

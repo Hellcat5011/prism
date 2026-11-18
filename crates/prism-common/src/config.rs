@@ -70,6 +70,9 @@ pub struct Config {
     /// Greeter design: one of the lock screen designs, or "mirror" to follow the lock screen.
     #[serde(default = "default_greeter_theme")]
     pub greeter_theme: String,
+    /// Launcher design: classic, slices, marquee or prose.
+    #[serde(default = "default_launcher_theme")]
+    pub launcher_theme: String,
 
     /// "prism" (built-in, prism-ui draws the background), "awww" or "swww".
     #[serde(default = "default_wallpaper_daemon")]
@@ -570,6 +573,7 @@ fn default_day_temp() -> u32 { 6500 }
 fn default_night_temp() -> u32 { 4500 }
 fn default_lockscreen_theme() -> String { "classic".to_string() }
 fn default_greeter_theme() -> String { "mirror".to_string() }
+fn default_launcher_theme() -> String { "classic".to_string() }
 fn default_wallpaper_daemon() -> String { "prism".to_string() }
 fn default_wallpaper_transition() -> String { "random".to_string() }
 fn default_wallpaper_dir() -> String { "~/Pictures/Wallpapers".to_string() }
@@ -605,6 +609,7 @@ impl Default for Config {
             show_lockscreen_session_controls: default_true(),
             lockscreen_theme: default_lockscreen_theme(),
             greeter_theme: default_greeter_theme(),
+            launcher_theme: default_launcher_theme(),
             wallpaper_daemon: default_wallpaper_daemon(),
             wallpaper_transition: default_wallpaper_transition(),
             wallpaper_dir: default_wallpaper_dir(),

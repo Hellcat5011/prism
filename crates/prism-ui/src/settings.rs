@@ -339,6 +339,8 @@ fn rows() -> Vec<Row> {
         Row { tab: 5, title: "Blur Strength", subtitle: "Blur passes and offset used by the compositor (level 1 to 5).",
             visible: |c| c.blur_enabled && prism_common::blur::compositor().is_some(),
             control: Slider { min: 1.0, max: 5.0, step: 1.0, get: |c| prism_common::blur::level(c.blur_strength) as f64, set: |c, v| c.blur_strength = v.round() as f32, fmt: |v| format!("Level {:.0}", v) } },
+        Row { tab: 5, title: "Launcher Theme", subtitle: "The design of the app launcher.", visible: always,
+            control: Combo { options: || opts(crate::launcher_themes::THEMES), get: |c| c.launcher_theme.clone(), set: |c, v| c.launcher_theme = v.to_string(), fonts: false } },
         Row { tab: 5, title: "Window Shadows", subtitle: "Soft drop shadow under cards.", visible: always,
             control: Switch(|c| c.shadows_enabled, |c, v| c.shadows_enabled = v) },
         Row { tab: 5, title: "Window Background Opacity", subtitle: "Opacity of every card's background.", visible: always,
