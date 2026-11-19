@@ -19,6 +19,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 pub mod bar;
+pub mod cat;
 pub mod dbus;
 pub mod dock;
 pub mod edit;
@@ -195,6 +196,8 @@ struct Desk {
     waker: Waker,
     windows: windows::Windows,
     panels: panel::Panels,
+    cat: cat::CatState,
+    cat_drawn: Instant,
     /// The next context menu opens beside its anchor: true to the right, false to the left.
     menu_beside: Option<bool>,
     /// Bumped on every config reload.
@@ -315,6 +318,8 @@ impl Desktop {
             waker,
             windows: windows::Windows::default(),
             panels: panel::Panels::default(),
+            cat: cat::CatState::new(),
+            cat_drawn: Instant::now(),
             menu_beside: None,
             config_seq: 0,
             config,
@@ -434,6 +439,7 @@ impl Desktop {
         }
         d.sync_time(false, &qh);
         let panels = d.panels_tick(&qh);
+        let cat = d.cat_tick(&qh);
         // Wake at the next wall-clock second (analog clock) or minute.
         let ms_to_second = 1000 - now.millis as i32 + 15;
         let next = if d.has(WidgetId::AnalogClock) || phone_playing {
@@ -441,6 +447,7 @@ impl Desktop {
         } else {
             ((59 - now.second as i32) * 1000 + ms_to_second).max(50)
         };
+        let next = cat.map_or(next, |c| c.min(next));
         panels.map_or(next, |p| p.min(next))
     }
 }
@@ -453,6 +460,27 @@ impl Desk {
             self.screen = (w as f64 / s, h as f64 / s);
             crate::ui::set_screen_height(self.screen.1);
         }
+    }
+
+    /// Next frame of the cat; returns ms until the one after. Asleep it breathes slowly on few
+    /// frames, and a cat nobody can see (the compositor holds back its frame callback) does not draw.
+    fn cat_tick(&mut self, qh: &QueueHandle<Self>) -> Option<i32> {
+        const AWAKE_MS: i32 = 33;
+        const ASLEEP_MS: i32 = 125;
+        const COVERED_MS: i32 = 250;
+        let i = self.widget_at(WidgetId::Cat)?;
+        // This runs on every wake of the event loop, far more often than the cat needs a frame.
+        let every = if self.cat.resting() { ASLEEP_MS } else { AWAKE_MS };
+        let waited = self.cat_drawn.elapsed().as_millis() as i32;
+        if waited < every {
+            return Some(every - waited);
+        }
+        if self.widgets[i].frame_cb.is_some() {
+            return Some(COVERED_MS);
+        }
+        self.cat_drawn = Instant::now();
+        self.mark(WidgetId::Cat, qh);
+        Some(every)
     }
 
     fn has(&self, id: WidgetId) -> bool {
@@ -773,6 +801,11 @@ impl Desk {
             WidgetId::Batteries => {
                 let devices = crate::device_battery::snapshot();
                 draw_batteries(cr, w, h, &p, &self.look, devices.as_deref())
+            }
+            WidgetId::Cat => {
+                draw_background(cr, w, h, &self.look, p.transparent_bg);
+                cat::draw(cr, w, h, &self.look, &mut self.cat);
+                Vec::new()
             }
         };
         // Only widgets sent to the background pass behind the wallpaper scenery (QML DepthMask).
@@ -1629,6 +1662,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 };
                 d.hover_hit = None;
                 d.panels.hover = None;
+                d.cat.hover(d.ptr_on == PointerOn::Widget(WidgetId::Cat));
                 d.panel_pointer();
                 d.on_motion(qh);
             }
@@ -1638,6 +1672,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 d.ptr_on = PointerOn::None;
                 d.hover_hit = None;
                 d.pressed = false;
+                d.cat.hover(false);
                 d.panel_pointer();
                 if let PointerOn::Panel(id) = prev {
                     d.panel_left(id, qh);

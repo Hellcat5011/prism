@@ -38,7 +38,7 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   in Settings.
 - **Dock**: pinned and running apps on the bottom, left or right edge. Right-click an app to pin or remove it. It can
   stay up, auto-hide, or hide only while windows are on screen, and hovering the screen edge brings it back.
-- **Desktop widgets**: clock, analog clock, calendar, media player, phone, device batteries, system tray and shortcuts on the bottom layer,
+- **Desktop widgets**: clock, analog clock, calendar, media player, phone, device batteries, an animated cat, system tray and shortcuts on the bottom layer,
   arranged in an on-screen edit mode. Widgets can be "sent to the background" so the wallpaper's foreground
   (a neural depth mask) passes in front of them.
 - **System tray**: StatusNotifierItem host with tooltips and dbusmenu context menus (scrollable when long).

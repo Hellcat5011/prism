@@ -356,6 +356,8 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.desktop_layout.phone.visible, |c, v| c.desktop_layout.phone.visible = v) },
         Row { tab: 2, title: "Batteries", subtitle: "Battery levels of connected headphones, speakers, controllers and other devices.", visible: always,
             control: Switch(|c| c.desktop_layout.batteries.visible, |c, v| c.desktop_layout.batteries.visible = v) },
+        Row { tab: 2, title: "Cat", subtitle: "A black cat that sleeps on your desktop. Hover over it to wake it up and watch it play.", visible: always,
+            control: Switch(|c| c.desktop_layout.cat.visible, |c, v| c.desktop_layout.set_cat_visible(v)) },
         // ── Bar ──
         heading(3, "Bar"),
         Row { tab: 3, title: "Show Bar", subtitle: "A panel along one edge of the screen.", visible: always,

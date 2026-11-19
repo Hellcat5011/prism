@@ -352,6 +352,10 @@ impl Edit {
                     let devices = crate::device_battery::snapshot();
                     super::widgets::draw_batteries(cr, r.w, r.h, &p, &look, devices.as_deref());
                 }
+                WidgetId::Cat => {
+                    super::widgets::draw_background(cr, r.w, r.h, &look, p.transparent_bg);
+                    super::cat::draw_still(cr, r.w, r.h, &look);
+                }
             }
             if let Some(path) = depth_mask {
                 super::cut_depth_mask(cr, path, (sw, sh), r, 1.0);
@@ -630,7 +634,11 @@ impl Edit {
             Some(Action::Font(id)) => self.font_dd = Some((id, crate::uikit::Dropdown::default())),
             Some(Action::Add) => self.add_open = !self.add_open,
             Some(Action::AddWidget(id)) => {
-                id.cfg_mut(&mut self.layout).visible = true;
+                if id == WidgetId::Cat {
+                    self.layout.set_cat_visible(true);
+                } else {
+                    id.cfg_mut(&mut self.layout).visible = true;
+                }
                 self.add_open = false;
             }
             Some(Action::Save) => {

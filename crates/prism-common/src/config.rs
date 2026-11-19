@@ -465,6 +465,26 @@ pub struct DesktopLayoutConfig {
     pub phone: WidgetPosition,
     #[serde(default = "default_batteries_widget")]
     pub batteries: WidgetPosition,
+    #[serde(default = "default_cat_widget")]
+    pub cat: WidgetPosition,
+}
+
+/// The Cat widget at 100%: the size its drawing is designed for, in pixels.
+pub const CAT_SIZE: (f64, f64) = (320.0, 290.0);
+
+impl DesktopLayoutConfig {
+    /// Show or hide the Cat widget. It always arrives at 100%, whatever size it had before.
+    pub fn set_cat_visible(&mut self, visible: bool) {
+        if visible && !self.cat.visible {
+            (self.cat.w, self.cat.h) = CAT_SIZE;
+        }
+        self.cat.visible = visible;
+    }
+}
+
+/// Cat widget (a black cat asleep on the wallpaper until hovered): hidden until enabled.
+pub fn default_cat_widget() -> WidgetPosition {
+    WidgetPosition { x: 30.0, y: -640.0, w: CAT_SIZE.0, h: CAT_SIZE.1, visible: false, transparent_bg: true, send_to_background: false, vertical: false, hide_date: false, font_family: String::new(), shortcuts: ShortcutsConfig::default() }
 }
 
 /// Batteries widget (connected headphones, speakers, controllers, ...): hidden until enabled.
@@ -586,6 +606,7 @@ impl DesktopLayoutConfig {
             },
             phone: default_phone_widget(),
             batteries: default_batteries_widget(),
+            cat: default_cat_widget(),
         }
     }
 }
@@ -601,6 +622,7 @@ impl Default for DesktopLayoutConfig {
             shortcuts: default_shortcuts_widget(),
             phone: default_phone_widget(),
             batteries: default_batteries_widget(),
+            cat: default_cat_widget(),
         }
     }
 }
@@ -1013,6 +1035,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_cat_is_added_at_full_size() {
+        let mut layout = DesktopLayoutConfig::default();
+        // Resized earlier, as a fraction of the screen, then removed.
+        (layout.cat.w, layout.cat.h) = (0.1, 0.15);
+        layout.set_cat_visible(true);
+        assert!(layout.cat.visible);
+        assert_eq!((layout.cat.w, layout.cat.h), CAT_SIZE);
+        // Resizing it afterwards sticks, also when it is shown again without being removed.
+        (layout.cat.w, layout.cat.h) = (0.2, 0.2);
+        layout.set_cat_visible(true);
+        assert_eq!((layout.cat.w, layout.cat.h), (0.2, 0.2));
+        layout.set_cat_visible(false);
+        assert!(!layout.cat.visible);
+        assert_eq!((layout.cat.w, layout.cat.h), (0.2, 0.2));
+    }
 
     #[test]
     fn a_picture_goes_back_to_the_daemon_used_before_the_video() {
