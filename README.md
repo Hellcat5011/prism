@@ -237,6 +237,10 @@ Include the snippet for your compositor. It sets up the keybinds and, for MangoW
 `prismd` starts with `graphical-session.target`, so start Niri with `niri-session`. Older Hyprland releases may need
 UWSM to reach that target.
 
+`prismd.service` also starts `xdg-desktop-autostart.target`, which runs the XDG autostart entries
+(`~/.config/autostart`, `/etc/xdg/autostart`) once per session. MangoWM does not run them otherwise. Do not also
+launch those apps from the compositor config (`exec-once`, `dex -a`), or they run twice.
+
 ### Theme
 
 Add the template in `deploy/matugen/prism-colors.json` to `~/.config/matugen/config.toml` as
