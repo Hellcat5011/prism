@@ -1,0 +1,6 @@
+# cargo audit settings.
+[advisories]
+# zbus_names, zvariant and zvariant_derive were merged into zbus 6.0 (2026-10-16) and are no
+# longer released on their own. zbus 5.19 still works and has no known vulnerability; moving to
+# zbus 6 means replacing its removed blocking API in about 30 files. Revisit once zbus 6 settles.
+ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]
