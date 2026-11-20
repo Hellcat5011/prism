@@ -232,7 +232,7 @@ Include the snippet for your compositor. It sets up the keybinds and, for MangoW
 |---|---|
 | MangoWM (`~/.config/mango/config.conf`) | `source=/path/to/prism/deploy/prism-mango.conf` |
 | Niri (`~/.config/niri/config.kdl`) | `include "/path/to/prism/deploy/prism-niri.kdl"` |
-| Hyprland (`~/.config/hypr/hyprland.conf`) | `source = /path/to/prism/deploy/prism-hyprland.conf` |
+| Hyprland 0.55+ (`~/.config/hypr/hyprland.lua`) | `require("prism")`, after `ln -s /path/to/prism/deploy/prism-hyprland.lua ~/.config/hypr/prism.lua` |
 
 `prismd` starts with `graphical-session.target`, so start Niri with `niri-session`. Older Hyprland releases may need
 UWSM to reach that target.
