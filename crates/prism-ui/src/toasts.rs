@@ -613,7 +613,12 @@ impl Stack {
         let style = self.style.clone();
         if let Some(p) = self.popup_mut(uid) {
             if let Some(i) = action_at(&p.actions, p.card_h, x, y) {
-                invoke_action(p.nid, p.actions[i].0.clone());
+                if p.actions[i].0 == crate::nc::INLINE_REPLY {
+                    // Popups take no keyboard: type the reply in the notification center.
+                    crate::nc::open_reply(p.nid);
+                } else {
+                    invoke_action(p.nid, p.actions[i].0.clone());
+                }
             }
             start_leave(p, &style, Instant::now());
         }
@@ -656,6 +661,16 @@ fn action_at(actions: &[(String, String)], card_h: f64, x: f64, y: f64) -> Optio
 }
 
 /// Send the chosen action to the app (through prismd, which owns the D-Bus name).
+/// Send an inline reply (the app gets NotificationReplied).
+pub fn send_reply(id: u32, text: String) {
+    std::thread::spawn(move || {
+        let cmd = prism_common::IpcCommand::Notif(prism_common::ipc::NotifAction::Reply { id, text });
+        if let Err(e) = prism_common::ipc::request(&cmd) {
+            eprintln!("[prism-ui] notification reply: {e}");
+        }
+    });
+}
+
 pub fn invoke_action(id: u32, action: String) {
     std::thread::spawn(move || {
         let cmd = prism_common::IpcCommand::Notif(prism_common::ipc::NotifAction::Invoke { id, action });

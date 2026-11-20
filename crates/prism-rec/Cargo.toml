@@ -10,5 +10,5 @@ prism-capture = { path = "../prism-capture" }
 libc = { workspace = true }
 serde_json = { workspace = true }
 wayland-client = { workspace = true }
-pipewire = "0.10"
+pipewire = { version = "0.10", features = ["v0_3_34"] }
 ffmpeg-next = { version = "9.1", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }

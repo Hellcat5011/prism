@@ -14,6 +14,16 @@ pub enum RecordTarget {
     Region { output: String, x: i32, y: i32, w: i32, h: i32 },
 }
 
+/// Screen sharing for the ScreenCast portal: `prism-rec --cast '<CastJob JSON>'`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct CastJob {
+    /// Output name (wl_output name), or
+    pub output: Option<String>,
+    /// window identifier (ext-foreign-toplevel).
+    pub window: Option<String>,
+    pub cursor: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RecordJob {
     pub target: RecordTarget,

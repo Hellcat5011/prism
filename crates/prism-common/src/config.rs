@@ -295,6 +295,27 @@ pub struct Config {
     /// prism-ui is the polkit authentication agent (replaces polkit-gnome).
     #[serde(default)]
     pub polkit_agent_enabled: bool,
+    /// Notify when package updates are available (Arch: checkupdates, yay/paru -Qua).
+    #[serde(default = "default_true")]
+    pub update_notifications: bool,
+    /// Tray icon while updates are available.
+    #[serde(default = "default_true")]
+    pub updates_tray: bool,
+    /// Tray icon while a removable drive is plugged in.
+    #[serde(default = "default_true")]
+    pub drives_tray: bool,
+    /// prism-ui shows gnome-keyring's password prompts (replaces gcr-prompter).
+    #[serde(default = "default_true")]
+    pub keyring_prompter_enabled: bool,
+    /// prismd announces removable drives (replaces udiskie).
+    #[serde(default = "default_true")]
+    pub drives_enabled: bool,
+    /// ... and mounts them as they are plugged in.
+    #[serde(default = "default_true")]
+    pub drives_automount: bool,
+    /// prism-ui is the xdg-desktop-portal backend for screenshots and screen sharing.
+    #[serde(default = "default_true")]
+    pub portal_enabled: bool,
     /// prism-ui is a NetworkManager secret agent: asks for Wi-Fi / VPN passwords (replaces nm-applet).
     #[serde(default)]
     pub network_agent_enabled: bool,
@@ -322,7 +343,7 @@ pub struct Config {
 }
 
 pub fn default_nc_tiles() -> Vec<String> {
-    ["network", "bluetooth", "vpn", "notifications", "caffeine"].iter().map(|s| s.to_string()).collect()
+    ["network", "bluetooth", "vpn", "notifications", "caffeine", "game"].iter().map(|s| s.to_string()).collect()
 }
 
 fn default_download_dir() -> String {
@@ -663,12 +684,13 @@ fn default_depth_threshold() -> u32 { 30 }
 fn default_depth_feather() -> u32 { 8 }
 
 /// Every module the bar can show: config id and the name shown in Settings.
-pub const BAR_MODULES: [(&str, &str); 8] = [
+pub const BAR_MODULES: [(&str, &str); 9] = [
     ("launcher", "Launcher"),
     ("workspaces", "Workspaces"),
     ("mpris", "Media Player"),
     ("clock", "Clock"),
     ("sysmon", "System Monitor"),
+    ("updates", "Updates"),
     ("tray", "System Tray"),
     ("notifications", "Notifications"),
     ("power", "Power"),
@@ -702,6 +724,11 @@ pub struct BarConfig {
     pub sysmon_memory: bool,
     pub sysmon_temperature: bool,
     pub media_title: bool,
+    /// Updates module: what to run in a terminal when it is clicked (empty: yay, paru or
+    /// pacman, whichever is installed).
+    pub updates_command: String,
+    /// Hours between update checks.
+    pub updates_interval_hours: u32,
 }
 
 impl Default for BarConfig {
@@ -718,7 +745,7 @@ impl Default for BarConfig {
             reserve_space: true,
             left: list(&["launcher", "workspaces"]),
             center: list(&["clock"]),
-            right: list(&["mpris", "sysmon", "tray", "notifications", "power"]),
+            right: list(&["mpris", "sysmon", "updates", "tray", "notifications", "power"]),
             workspace_style: "numbers".into(),
             workspace_hide_empty: false,
             clock_format: "%H:%M".into(),
@@ -727,6 +754,8 @@ impl Default for BarConfig {
             sysmon_memory: true,
             sysmon_temperature: false,
             media_title: true,
+            updates_command: String::new(),
+            updates_interval_hours: 3,
         }
     }
 }
@@ -901,6 +930,13 @@ impl Default for Config {
             bluetooth_receive_files: false,
             bluetooth_download_dir: default_download_dir(),
             polkit_agent_enabled: false,
+            portal_enabled: true,
+            keyring_prompter_enabled: true,
+            update_notifications: true,
+            updates_tray: true,
+            drives_tray: true,
+            drives_enabled: true,
+            drives_automount: true,
             network_agent_enabled: false,
             outputs: Vec::new(),
             display_output: String::new(),

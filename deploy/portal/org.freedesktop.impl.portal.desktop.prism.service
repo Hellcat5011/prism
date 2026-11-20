@@ -1,0 +1,5 @@
+# prism-ui owns this name while it runs; activation starts Prism if it is not running yet.
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.prism
+Exec=/bin/false
+SystemdService=prismd.service

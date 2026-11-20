@@ -154,14 +154,20 @@ fn human_size(n: u64) -> String {
 /// Post a notification and wait up to `timeout` for one of `actions`; None on timeout or
 /// dismissal (the notification is closed on timeout).
 pub(crate) fn ask(conn: &Connection, summary: &str, body: &str, icon: &str, actions: &[&str], timeout: Option<Duration>) -> Option<String> {
+    ask_as(conn, "Bluetooth", summary, body, icon, actions, timeout)
+}
+
+/// `ask`, posted as `app` (drives.rs).
+pub(crate) fn ask_as(conn: &Connection, app: &str, summary: &str, body: &str, icon: &str, actions: &[&str], timeout: Option<Duration>) -> Option<String> {
     let proxy = zbus::blocking::Proxy::new(conn, NOTIF, NOTIF_PATH, NOTIF).ok()?;
     let signals = proxy.receive_all_signals().ok()?;
     let mut hints: HashMap<&str, Value> = HashMap::new();
-    hints.insert("desktop-entry", Value::from("prism-bluetooth"));
+    let entry = format!("prism-{}", app.to_lowercase());
+    hints.insert("desktop-entry", Value::from(entry.as_str()));
     if timeout.is_some() {
         hints.insert("urgency", Value::U8(2));
     }
-    let reply = conn.call_method(Some(NOTIF), NOTIF_PATH, Some(NOTIF), "Notify", &("Bluetooth", 0u32, icon, summary, body, actions.to_vec(), hints, -1i32)).ok()?;
+    let reply = conn.call_method(Some(NOTIF), NOTIF_PATH, Some(NOTIF), "Notify", &(app, 0u32, icon, summary, body, actions.to_vec(), hints, -1i32)).ok()?;
     let id: u32 = reply.body().deserialize().ok()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

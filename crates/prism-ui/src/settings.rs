@@ -164,6 +164,46 @@ struct Row {
 }
 
 /// A row's subtitle; the depth status row shows the last runtime status.
+/// Labels and minimum widths of a Buttons / Pills row.
+fn button_labels(r: &Row) -> Vec<(&'static str, f64)> {
+    match &r.control {
+        Control::Buttons(btns) => btns.iter().map(|(l, _, _)| (*l, 120.0)).collect(),
+        Control::Pills { options, .. } => options.iter().map(|(l, _)| (*l, 100.0)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Where a button goes in a wrapped row (offsets from the row's top left).
+#[derive(Clone, Copy)]
+struct Place {
+    x: f64,
+    y: f64,
+    w: f64,
+}
+
+/// Lay buttons out left to right, starting a new line when the next one would pass `max_w`.
+fn flow(cr: *mut Cairo, labels: &[(&str, f64)], family: &str, max_w: f64) -> Vec<Place> {
+    const GAP: f64 = 10.0;
+    let (mut x, mut y) = (0.0, 0.0);
+    labels
+        .iter()
+        .map(|(label, min_w)| {
+            let w = (crate::desktop::text::measure(cr, label, &TextStyle { family, px: 13.0, bold: true, color: (0.0, 0.0, 0.0, 1.0) }).0 + 40.0).max(*min_w).min(max_w);
+            if x > 0.0 && x + w > max_w {
+                x = 0.0;
+                y += 34.0 + GAP;
+            }
+            let p = Place { x, y, w };
+            x += w + GAP;
+            p
+        })
+        .collect()
+}
+
+fn flow_height(places: &[Place]) -> f64 {
+    places.iter().map(|p| p.y + 34.0).fold(34.0, f64::max)
+}
+
 fn row_subtitle(r: &Row) -> std::borrow::Cow<'static, str> {
     if r.title == DEPTH_STATUS_ROW {
         let s = DEPTH_STATUS.lock().unwrap();
@@ -468,7 +508,7 @@ fn rows() -> Vec<Row> {
                 fonts: false,
             } },
         Row { tab: 7, title: "Control Centre Tiles", subtitle: "Tiles shown in the Control Centre; the others close up the gap.", visible: always,
-            control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
+            control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine"), ("Game Mode", "game")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
         // ── Lock Screen ──
         heading(8, "Design"),
         Row { tab: 8, title: "Lock Screen Theme", subtitle: "The design of the lock screen.", visible: always,
@@ -634,6 +674,27 @@ fn rows() -> Vec<Row> {
         heading(15, "Authentication"),
         Row { tab: 15, title: "Polkit Agent", subtitle: "Ask for your password when an app needs administrator rights. Replaces polkit-gnome (stop it first: only one agent per session).", visible: always,
             control: Switch(|c| c.polkit_agent_enabled, |c, v| c.polkit_agent_enabled = v) },
+        Row { tab: 15, title: "Keyring Prompts", subtitle: "Ask for the keyring password (gnome-keyring) in a Prism card. Replaces gcr-prompter; restart Prism after turning it off.", visible: always,
+            control: Switch(|c| c.keyring_prompter_enabled, |c, v| c.keyring_prompter_enabled = v) },
+        heading(15, "Updates"),
+        Row { tab: 15, title: "Update Notifications", subtitle: "Check for package updates every few hours and say when there are new ones (checkupdates, and yay or paru for the AUR). The bar's Updates module shows the count.", visible: always,
+            control: Switch(|c| c.update_notifications, |c, v| c.update_notifications = v) },
+        Row { tab: 15, title: "Updates Tray Icon", subtitle: "A tray icon while updates are available: Update Now and Check Again.", visible: always,
+            control: Switch(|c| c.updates_tray, |c, v| c.updates_tray = v) },
+        Row { tab: 15, title: "Check Every", subtitle: "Hours between checks.", visible: always,
+            control: Combo { options: || opts(&[("Hour", "1"), ("3 hours", "3"), ("6 hours", "6"), ("12 hours", "12"), ("Day", "24")]), get: |c| c.bar.updates_interval_hours.to_string(), set: |c, v| c.bar.updates_interval_hours = v.parse().unwrap_or(3), fonts: false } },
+        Row { tab: 15, title: "Update Command", subtitle: "Run in a terminal by Update (empty: yay, paru or sudo pacman -Syu).", visible: always,
+            control: Text { get: |c| c.bar.updates_command.clone(), set: |c, v| { c.bar.updates_command = v.trim().to_string(); true }, placeholder: "yay", browse: false } },
+        heading(15, "Removable Drives"),
+        Row { tab: 15, title: "Drive Notifications", subtitle: "Announce USB drives and SD cards as they are plugged in, with Open and Eject. Replaces udiskie.", visible: always,
+            control: Switch(|c| c.drives_enabled, |c, v| c.drives_enabled = v) },
+        Row { tab: 15, title: "Drives Tray Icon", subtitle: "A tray icon while a removable drive is plugged in: open or eject each one.", visible: always,
+            control: Switch(|c| c.drives_tray, |c, v| c.drives_tray = v) },
+        Row { tab: 15, title: "Mount Automatically", subtitle: "Mount a plugged-in drive right away (under /run/media).", visible: |c| c.drives_enabled,
+            control: Switch(|c| c.drives_automount, |c, v| c.drives_automount = v) },
+        heading(15, "Desktop Portal"),
+        Row { tab: 15, title: "Screenshots and Screen Sharing", subtitle: "Apps take screenshots, pick colours and share your screen through Prism (xdg-desktop-portal). Replaces xdg-desktop-portal-wlr; restart Prism after turning it off.", visible: always,
+            control: Switch(|c| c.portal_enabled, |c, v| c.portal_enabled = v) },
         heading(15, "Music Player Daemon"),
         Row { tab: 15, title: "MPD Media Controls", subtitle: "Show MPD as a media player (MPRIS) for media keys, the media widget and the phone. Replaces mpd-mpris.", visible: always,
             control: Switch(|c| c.mpd_mpris_enabled, |c, v| c.mpd_mpris_enabled = v) },
@@ -1169,7 +1230,7 @@ impl SettingsView {
             let sub = row_subtitle(r);
             let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
-                Control::Buttons(_) | Control::Pills { .. } => th + 12.0 + 34.0,
+                Control::Buttons(_) | Control::Pills { .. } => th + 12.0 + flow_height(&flow(cr, &button_labels(r), &p.family, list.w)),
                 Control::BarModules => th + 12.0 + board_height(&self.config.bar),
                 _ => th.max(36.0),
             };
@@ -1318,29 +1379,25 @@ impl SettingsView {
                     self.control_rects.push((i, tr));
                 }
                 Control::Buttons(btns) => {
-                    let mut bx = list.x;
-                    let by = y + h - 14.0 - 34.0;
-                    for (b, (label, _, kind)) in btns.iter().enumerate() {
-                        let w = (crate::desktop::text::measure(cr, label, &TextStyle { family: &p.family, px: 13.0, bold: true, color: p.fg }).0 + 40.0).max(120.0);
-                        let br = Rect { x: bx, y: by, w, h: 34.0 };
+                    let places = flow(cr, &button_labels(r), &p.family, list.w);
+                    let top = y + h - 14.0 - flow_height(&places);
+                    for (b, ((label, _, kind), pl)) in btns.iter().zip(&places).enumerate() {
+                        let br = Rect { x: list.x + pl.x, y: top + pl.y, w: pl.w, h: 34.0 };
                         let bh = self.hover_fade.level(Hit::Button(i, b), self.hover == Some(Hit::Button(i, b)), style);
                         uikit::button(cr, br, label, *kind, bh, true, &p);
                         self.hits.push((Hit::Button(i, b), br));
-                        bx += w + 10.0;
                     }
                 }
                 Control::Pills { options, get, .. } => {
                     let on = get(&self.config);
-                    let mut bx = list.x;
-                    let by = y + h - 14.0 - 34.0;
-                    for (b, (label, value)) in options.iter().enumerate() {
-                        let w = (crate::desktop::text::measure(cr, label, &TextStyle { family: &p.family, px: 13.0, bold: true, color: p.fg }).0 + 40.0).max(100.0);
-                        let br = Rect { x: bx, y: by, w, h: 34.0 };
+                    let places = flow(cr, &button_labels(r), &p.family, list.w);
+                    let top = y + h - 14.0 - flow_height(&places);
+                    for (b, ((label, value), pl)) in options.iter().zip(&places).enumerate() {
+                        let br = Rect { x: list.x + pl.x, y: top + pl.y, w: pl.w, h: 34.0 };
                         let bh = self.hover_fade.level(Hit::Button(i, b), self.hover == Some(Hit::Button(i, b)), style);
                         let kind = if on.iter().any(|v| v == value) { ButtonKind::Primary } else { ButtonKind::Outline };
                         uikit::button(cr, br, label, kind, bh, true, &p);
                         self.hits.push((Hit::Button(i, b), br));
-                        bx += w + 10.0;
                     }
                 }
                 Control::BarModules => {

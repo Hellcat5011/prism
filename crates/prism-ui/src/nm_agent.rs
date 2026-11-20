@@ -164,6 +164,7 @@ fn ask(conn: &ConnSettings, path: &str, setting: &str, hints: &[String]) -> Resu
         icon: if setting == "vpn" { "lock" } else { "wifi" },
         fields: fields.iter().map(|(_, label, secret, v)| Field { label: label.clone(), secret: *secret, value: v.clone() }).collect(),
         ok_label: "Connect".into(),
+        choices: Vec::new(),
     })
     .ok_or_else(|| AgentError::NoSecrets("prompt unavailable".into()))?;
     let answer = loop {

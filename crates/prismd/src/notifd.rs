@@ -33,6 +33,8 @@ pub struct Incoming {
     pub image: Option<String>,
     /// Show the image as a large preview (Prism's private hint "x-prism-preview").
     pub preview: bool,
+    /// Placeholder of the inline reply field (hint "x-kde-reply-placeholder-text").
+    pub reply_placeholder: String,
     pub transient: bool,
     /// The sender asks for no sound (hint "suppress-sound").
     pub suppress_sound: bool,
@@ -62,7 +64,7 @@ struct Server {
 #[zbus::interface(name = "org.freedesktop.Notifications")]
 impl Server {
     fn get_capabilities(&self) -> Vec<String> {
-        ["actions", "body", "body-markup", "icon-static", "persistence"].iter().map(|s| s.to_string()).collect()
+        ["actions", "body", "body-markup", "icon-static", "persistence", "inline-reply"].iter().map(|s| s.to_string()).collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -94,6 +96,10 @@ impl Server {
 
     #[zbus(signal)]
     async fn action_invoked(emitter: &SignalEmitter<'_>, id: u32, action_key: String) -> zbus::Result<()>;
+
+    /// The user answered through the inline reply field (action "inline-reply").
+    #[zbus(signal)]
+    async fn notification_replied(emitter: &SignalEmitter<'_>, id: u32, text: String) -> zbus::Result<()>;
 }
 
 static CONN: OnceLock<Connection> = OnceLock::new();
@@ -133,6 +139,12 @@ fn emitter() -> Option<SignalEmitter<'static>> {
 pub fn emit_closed(id: u32, reason: u32) {
     if let Some(e) = emitter() {
         let _ = zbus::block_on(Server::notification_closed(&e, id, reason));
+    }
+}
+
+pub fn emit_replied(id: u32, text: &str) {
+    if let Some(e) = emitter() {
+        let _ = zbus::block_on(Server::notification_replied(&e, id, text.to_string()));
     }
 }
 
@@ -195,6 +207,7 @@ fn normalise(
         urgency,
         desktop_entry,
         preview: image.is_some() && bool_hint("x-prism-preview"),
+        reply_placeholder: string_hint("x-kde-reply-placeholder-text").unwrap_or_default(),
         image,
         transient: bool_hint("transient"),
         suppress_sound: bool_hint("suppress-sound"),

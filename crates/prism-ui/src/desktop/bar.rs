@@ -24,6 +24,7 @@ const ICON_BELL: &str = "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9 M10.3 21a1.94
 const ICON_POWER: &str = "M12 2v10 M18.4 6.6a9 9 0 1 1-12.77.04";
 const ICON_CPU: &str = "M6 6h12v12H6Z M9 9h6v6H9Z M9 2v2 M15 2v2 M9 20v2 M15 20v2 M2 9h2 M2 15h2 M20 9h2 M20 15h2";
 const ICON_MEMORY: &str = "M3 7h18v9H3Z M7 11v2 M12 11v2 M17 11v2 M6 16v3 M18 16v3";
+const ICON_PACKAGE: &str = "M16.5 9.4 7.55 4.24M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16zM3.27 6.96 12 12.01l8.73-5.05M12 22.08V12";
 const ICON_TEMPERATURE: &str = "M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0Z";
 // Filled.
 const ICON_PREVIOUS: &str = "M19 5v14L8 12Z M5 5h2v14H5Z";
@@ -59,6 +60,7 @@ pub struct BarView<'a> {
     pub tray_icons: &'a [TrayIcon],
     pub media: Option<&'a MediaState>,
     pub stats: Stats,
+    pub updates: Option<super::updates::Updates>,
     pub now: &'a LocalTime,
     pub hover: Option<PanelHit>,
 }
@@ -119,6 +121,11 @@ fn module_len(cr: *mut Cairo, id: &str, v: &BarView, vertical: bool, t: f64) -> 
                 let title = if v.cfg.media_title { measure(cr, &media_text(m), &font(v.look, 13.0, false, v.look.fg)).0.ceil().min(TITLE_MAX) + 10.0 } else { 0.0 };
                 title + 3.0 * cell(t)
             }
+        },
+        "updates" => match v.updates.map(|u| u.total()) {
+            None | Some(0) => 0.0,
+            Some(_) if vertical => cell(t),
+            Some(n) => cell(t) + measure(cr, &n.to_string(), &font(v.look, 13.0, true, v.look.fg)).0.ceil() + 8.0,
         },
         "launcher" | "notifications" | "power" => cell(t),
         _ => 0.0,
@@ -307,6 +314,25 @@ fn draw_media(cr: *mut Cairo, r: Rect, vertical: bool, t: f64, v: &BarView, st: 
     icon_button(cr, along(false, x + 2.0 * size, size, t), PanelHit::MediaNext, ICON_NEXT, true, v, st, hits);
 }
 
+/// Package icon with the number of updates (vertical: a dot instead of the number).
+fn draw_updates(cr: *mut Cairo, r: Rect, vertical: bool, t: f64, v: &BarView, st: &mut BarState, hits: &mut Vec<(PanelHit, Rect)>) {
+    let Some(n) = v.updates.map(|u| u.total()).filter(|n| *n > 0) else { return };
+    let level = st.fades.level(PanelHit::Updates, v.hover == Some(PanelHit::Updates), v.style);
+    let pad = centered(r, r.w.min(r.h));
+    let b = if vertical { pad } else { Rect { x: r.x, y: pad.y, w: r.w, h: pad.h } };
+    draw_hover(cr, b, level, v.look);
+    let size = cell(t);
+    let i = (size * 0.56).round();
+    let ix = if vertical { b.x + (b.w - i) / 2.0 } else { r.x + (size - i) / 2.0 };
+    crate::svg::draw_path(cr, ICON_PACKAGE, ix, b.y + (b.h - i) / 2.0, i, v.look.fg, Some(2.0));
+    if vertical {
+        fill_rounded_rect(cr, b.x + b.w - 9.0, b.y + 3.0, 6.0, 6.0, 3.0, v.look.fg);
+    } else {
+        draw_in_box(cr, &n.to_string(), &font(v.look, 13.0, true, v.look.fg), r.x + size - 2.0, r.y, r.w - size, r.h, Align::Start);
+    }
+    hits.push((PanelHit::Updates, b));
+}
+
 fn draw_module(cr: *mut Cairo, id: &str, r: Rect, vertical: bool, t: f64, v: &BarView, st: &mut BarState, hits: &mut Vec<(PanelHit, Rect)>) {
     match id {
         "workspaces" => draw_workspaces(cr, r, vertical, t, v, st, hits),
@@ -317,6 +343,7 @@ fn draw_module(cr: *mut Cairo, id: &str, r: Rect, vertical: bool, t: f64, v: &Ba
         "launcher" => icon_button(cr, r, PanelHit::Launcher, ICON_LAUNCHER, false, v, st, hits),
         "notifications" => icon_button(cr, r, PanelHit::Notifications, ICON_BELL, false, v, st, hits),
         "power" => icon_button(cr, r, PanelHit::Power, ICON_POWER, false, v, st, hits),
+        "updates" => draw_updates(cr, r, vertical, t, v, st, hits),
         _ => {}
     }
 }

@@ -22,7 +22,9 @@ mod nc;
 mod osd;
 mod phone;
 mod phone_client;
+mod keyring_prompter;
 mod picker;
+mod xdp;
 mod rec_indicator;
 mod nm_agent;
 mod polkit_agent;
@@ -34,6 +36,8 @@ mod shadow;
 mod spotlight;
 mod toasts;
 mod status;
+mod status_tray;
+mod window_watch;
 mod svg;
 mod tray;
 mod ui;
@@ -1820,6 +1824,9 @@ fn parse_mode(args: &[String]) -> UiMode {
 fn apply_agents(cfg: &prism_common::Config) {
     polkit_agent::apply(cfg);
     nm_agent::apply(cfg);
+    xdp::apply(cfg);
+    keyring_prompter::apply(cfg);
+    status_tray::apply(cfg);
     tray::apply(cfg);
 }
 
@@ -2172,6 +2179,9 @@ impl Overlay {
         if state.nc.as_mut().map(|v| v.poll()).unwrap_or(false) {
             state.render_and_commit(&qh);
         }
+        if state.nc.as_ref().is_some_and(|v| v.wants_close()) {
+            state.exit_requested = true;
+        }
         if let Some((redraw, close)) = state.wallpaper.as_mut().map(|w| w.poll()) {
             if close {
                 state.exit_requested = true;
@@ -2434,12 +2444,16 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut caffeinate = caffeinate::Caffeinate::new(&conn);
     let mut picker: Option<picker::Picker> = None;
     let mut shooter: Option<capture::Overlay> = None;
+    // Portal requests waiting for the screenshot overlay / colour picker.
+    let mut portal_shot: Option<std::sync::mpsc::Sender<Option<prism_capture::Image>>> = None;
+    let mut portal_color: Option<std::sync::mpsc::Sender<Option<(u8, u8, u8)>>> = None;
     let mut indicator: Option<rec_indicator::Indicator> = None;
     // Built-in wallpaper daemon (Settings > Wallpaper > Wallpaper Daemon = Built-in).
     let mut background = if daemon { background::Background::new(&conn, &globals, waker.clone()) } else { None };
     let mut config_seq = desktop.as_ref().map(|d| d.config_seq()).unwrap_or(0);
     if daemon {
         prompt::init(waker.clone());
+        xdp::init(waker.clone());
         apps_watch::start(waker.clone());
         apply_agents(&prism_common::Config::load());
         let mut p = Preloader::new(waker.clone());
@@ -2458,10 +2472,63 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 Err(e) => eprintln!("[prism-ui] cannot open prompt: {e}"),
             }
         }
+        // Portal (xdp.rs): screenshots and colour picks for apps.
+        for req in xdp::take() {
+            match req {
+                xdp::UiReq::Screenshot { interactive: false, reply } => {
+                    let cfg = Config::load();
+                    let _ = reply.send(capture::capture_screen_now(&conn, None, cfg.capture_cursor).map_err(|e| eprintln!("[prism-ui] portal screenshot: {e}")).ok());
+                }
+                xdp::UiReq::Screenshot { interactive: true, reply } => {
+                    if shooter.as_ref().is_some_and(|s| !s.finished()) {
+                        let _ = reply.send(None);
+                        continue;
+                    }
+                    for o in overlays.iter_mut().filter(|o| o.is_modal()) {
+                        o.close();
+                    }
+                    let cfg = Config::load();
+                    match capture::Overlay::open(&conn, &globals, capture::Kind::parse(&cfg.capture_last_mode), false, &cfg) {
+                        Ok(o) => {
+                            shooter = Some(o);
+                            portal_shot = Some(reply);
+                        }
+                        Err(e) => {
+                            eprintln!("[prism-ui] portal screenshot: {e}");
+                            let _ = reply.send(None);
+                        }
+                    }
+                }
+                xdp::UiReq::PickColor { reply } => {
+                    if picker.as_ref().is_some_and(|p| !p.finished()) {
+                        let _ = reply.send(None);
+                        continue;
+                    }
+                    for o in overlays.iter_mut().filter(|o| o.is_modal()) {
+                        o.close();
+                    }
+                    picker = picker::Picker::open(&conn, &globals);
+                    match picker.as_mut() {
+                        Some(p) => {
+                            p.set_quiet();
+                            portal_color = Some(reply);
+                        }
+                        None => {
+                            let _ = reply.send(None);
+                        }
+                    }
+                }
+            }
+        }
         // 1. Commands
         for cmd in cmd_rx.try_iter() {
             if let prism_common::UiCommand::Caffeinate(on) = cmd {
                 caffeinate.set(on, &globals);
+                continue;
+            }
+            if let prism_common::UiCommand::GameMode(on) = cmd {
+                // Cards opened from now on are built without animations and blur.
+                ui::set_game_mode(on);
                 continue;
             }
             if let prism_common::UiCommand::Wallpaper(path) = &cmd {
@@ -2579,6 +2646,14 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             let outcome = s.teardown();
             let _ = conn.flush();
             let mut cfg = Config::load();
+            if let Some(tx) = portal_shot.take() {
+                // For an app: the image goes back to it, nothing is saved or recorded here.
+                let _ = tx.send(match outcome {
+                    capture::Outcome::Image(img) => Some(img),
+                    _ => None,
+                });
+                continue;
+            }
             if let capture::Outcome::Record(job) = &outcome {
                 // Remember the recording options, then hand the job to prismd.
                 if cfg.capture_fps != job.fps || cfg.capture_audio_desktop != job.audio_desktop || cfg.capture_audio_mic != job.audio_mic {
@@ -2607,6 +2682,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         if let Some(p) = picker.as_mut() {
             if !p.tick() {
                 if let Some(p) = picker.take() {
+                    if let Some(tx) = portal_color.take() {
+                        let _ = tx.send(p.picked());
+                    }
                     p.teardown();
                 }
             }
@@ -2797,7 +2875,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

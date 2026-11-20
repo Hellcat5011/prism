@@ -30,6 +30,10 @@ pub struct Notification {
     /// private hint "x-prism-preview", sent by the screenshot notification).
     #[serde(default)]
     pub preview: bool,
+    /// Placeholder text of the inline reply field (for notifications with an "inline-reply"
+    /// action).
+    #[serde(default)]
+    pub reply_placeholder: String,
 }
 
 impl Notification {
@@ -52,6 +56,7 @@ impl Notification {
             desktop_entry: String::new(),
             image: None,
             preview: false,
+            reply_placeholder: String::new(),
         }
     }
 }

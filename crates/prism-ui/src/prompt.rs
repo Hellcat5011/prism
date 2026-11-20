@@ -29,6 +29,9 @@ const LABEL_H: f64 = 20.0;
 const ROW_GAP: f64 = 12.0;
 const BUTTON_H: f64 = 38.0;
 const TAB: u32 = 15;
+const CHOICE_H: f64 = 44.0;
+/// Rows shown at once; the list scrolls past this.
+const CHOICE_ROWS: usize = 6;
 
 pub struct Field {
     pub label: String,
@@ -46,6 +49,15 @@ pub struct Request {
     pub icon: &'static str,
     pub fields: Vec<Field>,
     pub ok_label: String,
+    /// A list to pick one entry from (the screen-share picker); the answer is its index.
+    pub choices: Vec<Choice>,
+}
+
+pub struct Choice {
+    pub title: String,
+    pub detail: String,
+    /// svg.rs icon name.
+    pub icon: &'static str,
 }
 
 pub enum Verdict {
@@ -66,6 +78,26 @@ impl Session {
     pub fn verdict(&self, v: Verdict) {
         let _ = self.verdict.send(v);
         self.waker.wake();
+    }
+}
+
+/// Closes a prompt from another thread (the caller gave up).
+#[derive(Clone)]
+pub struct Canceller {
+    verdict: Sender<Verdict>,
+    waker: Waker,
+}
+
+impl Canceller {
+    pub fn cancel(&self) {
+        let _ = self.verdict.send(Verdict::Cancel);
+        self.waker.wake();
+    }
+}
+
+impl Session {
+    pub fn canceller(&self) -> Canceller {
+        Canceller { verdict: self.verdict.clone(), waker: self.waker.clone() }
     }
 }
 
@@ -104,7 +136,7 @@ pub fn next_view() -> Option<PromptView> {
     let p = QUEUE.lock().unwrap().pop_front()?;
     let values = p.req.fields.iter().map(|f| Query::with_text(&f.value)).collect();
     let focus = p.req.fields.iter().position(|f| f.value.is_empty()).unwrap_or(0);
-    Some(PromptView { req: p.req, values, focus, answers: Some(p.answers), verdict: p.verdict, busy: false, error: None, hover: None, fields: Vec::new(), buttons: [Rect::default(); 2], close: false })
+    Some(PromptView { req: p.req, values, focus, answers: Some(p.answers), verdict: p.verdict, busy: false, error: None, hover: None, fields: Vec::new(), buttons: [Rect::default(); 2], close: false, selected: 0, first: 0, rows: Vec::new() })
 }
 
 pub struct PromptView {
@@ -121,13 +153,32 @@ pub struct PromptView {
     /// Cancel, OK.
     buttons: [Rect; 2],
     close: bool,
+    /// Choice list: the selected entry, the first one shown, and the shown rows.
+    selected: usize,
+    first: usize,
+    rows: Vec<(usize, Rect)>,
 }
 
 impl PromptView {
     /// Card height for its fields.
     pub fn card_h(&self) -> f64 {
         let n = self.req.fields.len() as f64;
-        PAD + 40.0 + 12.0 + 44.0 + if self.req.detail.is_empty() { 0.0 } else { 22.0 } + 16.0 + n * (LABEL_H + FIELD_H + ROW_GAP) + 22.0 + 12.0 + BUTTON_H + PAD
+        let list = self.req.choices.len().min(CHOICE_ROWS) as f64 * CHOICE_H;
+        PAD + 40.0 + 12.0 + 44.0 + if self.req.detail.is_empty() { 0.0 } else { 22.0 } + 16.0 + n * (LABEL_H + FIELD_H + ROW_GAP) + list + 22.0 + 12.0 + BUTTON_H + PAD
+    }
+
+    /// Select choice `i` and keep it in view.
+    fn select(&mut self, i: usize) {
+        let n = self.req.choices.len();
+        if n == 0 {
+            return;
+        }
+        self.selected = i.min(n - 1);
+        if self.selected < self.first {
+            self.first = self.selected;
+        } else if self.selected >= self.first + CHOICE_ROWS {
+            self.first = self.selected + 1 - CHOICE_ROWS;
+        }
     }
 
     fn submit(&mut self) -> Effect {
@@ -135,7 +186,7 @@ impl PromptView {
             return Effect::None;
         }
         if let Some(tx) = &self.answers {
-            let vals = self.values.iter().map(|q| q.text.clone()).collect();
+            let vals = if self.req.choices.is_empty() { self.values.iter().map(|q| q.text.clone()).collect() } else { vec![self.selected.to_string()] };
             if tx.send(Some(vals)).is_err() {
                 return Effect::Close;
             }
@@ -201,6 +252,29 @@ impl CardView for PromptView {
             self.fields.push(r);
             y += FIELD_H + ROW_GAP;
         }
+        self.rows.clear();
+        let shown = self.req.choices.len().min(CHOICE_ROWS);
+        for (k, i) in (self.first..self.first + shown).enumerate() {
+            let c = &self.req.choices[i];
+            let r = Rect { x, y: y + k as f64 * CHOICE_H, w, h: CHOICE_H - 4.0 };
+            let sel = i == self.selected;
+            let hover = self.hover == Some(100 + i);
+            if sel || hover {
+                let a = if sel { 0.16 } else { 0.07 };
+                cb::fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 10.0, (p.fg.0, p.fg.1, p.fg.2, a));
+            }
+            crate::svg::icon(cr, c.icon, r.x + 12.0, r.y + (r.h - 20.0) / 2.0, 20.0, p.fg, false);
+            let tx = r.x + 44.0;
+            let tw = r.w - 52.0;
+            if c.detail.is_empty() {
+                draw_in_box(cr, &c.title, &TextStyle { px: 13.5, ..body }, tx, r.y, tw, r.h, Align::Start);
+            } else {
+                draw_in_box(cr, &c.title, &TextStyle { px: 13.5, ..body }, tx, r.y + 3.0, tw, 20.0, Align::Start);
+                draw_in_box(cr, &c.detail, &TextStyle { color: (p.fg.0, p.fg.1, p.fg.2, 0.6), px: 11.5, ..body }, tx, r.y + 21.0, tw, 16.0, Align::Start);
+            }
+            self.rows.push((i, r));
+        }
+        y += shown as f64 * CHOICE_H;
         let status = if self.busy { Some(("Checking\u{2026}".to_string(), p.fg)) } else { self.error.clone().map(|e| (e, p.error)) };
         if let Some((t, c)) = status {
             draw_in_box(cr, &t, &TextStyle { color: c, px: 12.0, ..body }, x + 4.0, y, w, 18.0, Align::Start);
@@ -213,7 +287,12 @@ impl CardView for PromptView {
     }
 
     fn motion(&mut self, x: f64, y: f64) -> bool {
-        let h = self.buttons.iter().position(|r| r.contains(x, y)).or_else(|| self.fields.iter().position(|r| r.contains(x, y)).map(|i| 10 + i));
+        let h = self
+            .buttons
+            .iter()
+            .position(|r| r.contains(x, y))
+            .or_else(|| self.fields.iter().position(|r| r.contains(x, y)).map(|i| 10 + i))
+            .or_else(|| self.rows.iter().find(|(_, r)| r.contains(x, y)).map(|(i, _)| 100 + i));
         let changed = h != self.hover;
         self.hover = h;
         changed
@@ -230,12 +309,37 @@ impl CardView for PromptView {
             self.focus = i;
             return Effect::Redraw;
         }
+        if let Some(&(i, _)) = self.rows.iter().find(|(_, r)| r.contains(x, y)) {
+            // A second click on the selected entry takes it.
+            if i == self.selected {
+                return self.submit();
+            }
+            self.select(i);
+            return Effect::Redraw;
+        }
         Effect::None
+    }
+
+    fn scroll(&mut self, delta: f64) -> bool {
+        let n = self.req.choices.len();
+        if n <= CHOICE_ROWS || delta == 0.0 {
+            return false;
+        }
+        let max = n - CHOICE_ROWS;
+        self.first = if delta > 0.0 { (self.first + 1).min(max) } else { self.first.saturating_sub(1) };
+        true
     }
 
     fn key(&mut self, special: u32, typed: Option<char>, shift: bool, ctrl: bool) -> Effect {
         match special {
             ESC => return self.cancel(),
+            DOWN | UP | TAB if !self.req.choices.is_empty() => {
+                let n = self.req.choices.len();
+                let next = if special == UP || shift { (self.selected + n - 1) % n } else { (self.selected + 1) % n };
+                self.select(next);
+                return Effect::Redraw;
+            }
+            ENTER if !self.req.choices.is_empty() => return self.submit(),
             ENTER => {
                 // Enter moves to the next empty field, then submits.
                 if let Some(i) = (self.focus + 1..self.values.len()).find(|&i| self.values[i].text.is_empty()) {
@@ -288,7 +392,7 @@ impl CardView for PromptView {
     }
 
     fn clickable(&self) -> bool {
-        matches!(self.hover, Some(0) | Some(1))
+        matches!(self.hover, Some(0) | Some(1)) || self.hover.is_some_and(|h| h >= 100)
     }
 
     fn height(&self) -> Option<f64> {

@@ -113,6 +113,9 @@ struct State {
     xkb_ctx: xkb::Context,
     xkb: Option<xkb::State>,
     done: bool,
+    /// For the Screenshot portal: keep the colour, no clipboard or notification.
+    quiet: bool,
+    picked: Option<(u8, u8, u8)>,
 }
 
 impl Picker {
@@ -152,6 +155,8 @@ impl Picker {
                 xkb_ctx: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
                 xkb: None,
                 done: false,
+                quiet: false,
+                picked: None,
             },
         })
     }
@@ -166,6 +171,16 @@ impl Picker {
 
     pub fn finished(&self) -> bool {
         self.st.done
+    }
+
+    /// Picking only reports the colour (`picked`): for the Screenshot portal's PickColor.
+    pub fn set_quiet(&mut self) {
+        self.st.quiet = true;
+    }
+
+    /// The picked colour, once picked.
+    pub fn picked(&self) -> Option<(u8, u8, u8)> {
+        self.st.picked
     }
 
     pub fn close(&mut self) {
@@ -242,6 +257,12 @@ impl State {
         }
         let hex = self.hex();
         self.done = true;
+        if let Some(shot) = &self.shot {
+            self.picked = Some(shot.pixel(self.cursor.0, self.cursor.1));
+        }
+        if self.quiet {
+            return;
+        }
         std::thread::spawn(move || {
             // Kept in the clipboard history.
             prism_common::wlclip::copy_text(&hex, true);

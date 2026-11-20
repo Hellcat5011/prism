@@ -27,6 +27,7 @@ pub mod layout;
 pub mod panel;
 pub mod sysmon;
 pub mod text;
+pub mod updates;
 pub mod widgets;
 pub mod windows;
 

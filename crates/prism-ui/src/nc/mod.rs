@@ -33,6 +33,27 @@ use model::{BtBusy, DetailRow, Net};
 use widgets::{alpha, font, text_size, text_v, Pal, Tween, RADIUS};
 
 pub const CARD_W: f64 = 400.0;
+/// Height of the inline reply field.
+const REPLY_H: f64 = 40.0;
+/// Notification groups: the open header's height, entries shown before "Show N more", that
+/// row's height, the thread's text inset (timeline on its left), entry padding and gap, the
+/// edges a closed stack shows under it, and the open/close spring.
+const HEAD_OPEN: f64 = 26.0;
+const GROUP_LIMIT: usize = 4;
+const MORE_H: f64 = 26.0;
+const THREAD_X: f64 = 30.0;
+const ENTRY_PAD: f64 = 8.0;
+const ENTRY_GAP: f64 = 4.0;
+const PEEK: f64 = 5.0;
+const SPRING_GROUP: (f64, f64) = (0.34, 0.86);
+
+/// The notification a hit belongs to (its row, buttons or reply field).
+fn hit_nid(h: Hit) -> Option<u32> {
+    match h {
+        Hit::Entry(n) | Hit::EntryAction(n, _) | Hit::EntryCopy(n) | Hit::EntryClose(n) | Hit::ReplyField(n) | Hit::ReplySend(n) => Some(n),
+        _ => None,
+    }
+}
 
 /// Tab / tile ids. Pages: notifications, network, bluetooth, VPN; caffeine is a toggle tile.
 pub const TAB_NOTIFS: usize = 0;
@@ -40,8 +61,10 @@ pub const TAB_NET: usize = 1;
 pub const TAB_BT: usize = 2;
 const TILE_CAFFEINE: usize = 3;
 pub const TAB_VPN: usize = 4;
+const TILE_GAME: usize = 5;
+const TILES: usize = 6;
 /// Tile order on screen (QML order, VPN after Bluetooth) and their config names.
-const TILE_ORDER: [(usize, &str); 5] = [(TAB_NET, "network"), (TAB_BT, "bluetooth"), (TAB_VPN, "vpn"), (TAB_NOTIFS, "notifications"), (TILE_CAFFEINE, "caffeine")];
+const TILE_ORDER: [(usize, &str); TILES] = [(TAB_NET, "network"), (TAB_BT, "bluetooth"), (TAB_VPN, "vpn"), (TAB_NOTIFS, "notifications"), (TILE_CAFFEINE, "caffeine"), (TILE_GAME, "game")];
 const PAGES: [usize; 4] = [TAB_NOTIFS, TAB_NET, TAB_BT, TAB_VPN];
 
 /// Tab the next Control Centre opens on (tray icons), e.g. TAB_NET.
@@ -49,6 +72,24 @@ static OPEN_TAB: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
 
 pub fn open_on_tab(tab: usize) {
     *OPEN_TAB.lock().unwrap() = Some(tab);
+}
+
+/// Action key of an inline reply (freedesktop notification spec).
+pub const INLINE_REPLY: &str = "inline-reply";
+
+/// Notification whose reply field the next Control Centre opens with.
+static OPEN_REPLY: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+
+/// Open the Control Centre on the notifications page with the reply field of `id` (from a
+/// popup's Reply button).
+pub fn open_reply(id: u32) {
+    *OPEN_REPLY.lock().unwrap() = Some(id);
+    open_on_tab(TAB_NOTIFS);
+    std::thread::spawn(|| {
+        if let Err(e) = prism_common::ipc::request(&prism_common::IpcCommand::Notif(prism_common::ipc::NotifAction::Open)) {
+            eprintln!("[prism-ui] {e}");
+        }
+    });
 }
 /// Card inset from the screen edges (OverlayWindow anchors.margins 20 inside a window with
 /// 10 px top/bottom margins, panelHeight = window height - 20).
@@ -148,10 +189,16 @@ enum Hit {
     ClearAll,
     GroupHead(usize),
     GroupClear(usize),
+    /// "Show N more" under a long group.
+    GroupMore(usize),
+    /// Fade key of an entry's actions (never a hit target).
+    EntryReveal(u32),
     EntryCopy(u32),
     EntryClose(u32),
     /// (notification id, action index)
     EntryAction(u32, usize),
+    ReplyField(u32),
+    ReplySend(u32),
     Entry(u32),
     Volume,
     Brightness,
@@ -195,7 +242,7 @@ pub struct NcView {
     snap: StatusSnapshot,
     tab: usize,
     page: [Tween; 5],
-    tile_w: [Tween; 5],
+    tile_w: [Tween; TILES],
     /// Shown tiles (ids), from `nc_tiles`.
     tiles: Vec<usize>,
     /// VPN list filter (typed while the VPN page is open).
@@ -212,7 +259,10 @@ pub struct NcView {
     /// Animation time scale from the last draw (None: animations off).
     time_scale: Option<f64>,
     expanded: Option<String>,
-    expand: HashMap<String, Tween>,
+    /// Group expansion springs (0 collapsed, 1 open).
+    expand: HashMap<String, crate::ui::SpringValue>,
+    /// Groups showing all their entries (past GROUP_LIMIT).
+    show_all: std::collections::HashSet<String>,
     /// Entries sliding out after a dismiss: nid -> start.
     dismissing: Vec<(u32, Instant)>,
     sink_open: bool,
@@ -230,19 +280,29 @@ pub struct NcView {
     knobs: [Tween; 3],
     detail_values: Vec<String>,
     spin_start: Instant,
+    waker: Waker,
+    /// After a notification action: tells when the app opened or raised a window.
+    action_watch: Option<std::sync::mpsc::Receiver<()>>,
+    close: bool,
+    /// Inline reply being typed: notification id and text.
+    reply: Option<(u32, String)>,
 }
 
 impl NcView {
     pub fn new(waker: Waker) -> Self {
-        let status = status::spawn(waker);
+        let status = status::spawn(waker.clone());
         let names = prism_common::Config::load().nc_tiles;
         let tiles: Vec<usize> = TILE_ORDER.iter().filter(|(_, n)| names.iter().any(|x| x == n)).map(|(id, _)| *id).collect();
         let pages: Vec<usize> = tiles.iter().copied().filter(|t| PAGES.contains(t)).collect();
         let wanted = OPEN_TAB.lock().unwrap().take();
         let tab = wanted.filter(|t| PAGES.contains(t)).or(pages.contains(&TAB_NOTIFS).then_some(TAB_NOTIFS)).or(pages.first().copied()).unwrap_or(TAB_NOTIFS);
         let page: [Tween; 5] = std::array::from_fn(|i| Tween::new(if i == tab { 1.0 } else { 0.0 }));
-        let tile_w: [Tween; 5] = std::array::from_fn(|i| Tween::new(if i == tab && tiles.contains(&i) { f64::NAN } else if tiles.contains(&i) { 44.0 } else { 0.0 }));
+        let tile_w: [Tween; TILES] = std::array::from_fn(|i| Tween::new(if i == tab && tiles.contains(&i) { f64::NAN } else if tiles.contains(&i) { 44.0 } else { 0.0 }));
         NcView {
+            waker,
+            action_watch: None,
+            close: false,
+            reply: OPEN_REPLY.lock().unwrap().take().map(|id| (id, String::new())),
             status,
             snap: StatusSnapshot::default(),
             tab,
@@ -261,6 +321,7 @@ impl NcView {
             time_scale: Some(1.0),
             expanded: None,
             expand: HashMap::new(),
+            show_all: Default::default(),
             dismissing: Vec::new(),
             sink_open: false,
             sink_t: Tween::new(0.0),
@@ -288,11 +349,30 @@ impl NcView {
     }
 
     /// Take new snapshots and run timers. Returns true when a redraw is needed.
+    /// The centre should close (an action opened a window).
+    pub fn wants_close(&self) -> bool {
+        self.close
+    }
+
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
+        if let Some(rx) = &self.action_watch {
+            match rx.try_recv() {
+                Ok(()) => {
+                    self.action_watch = None;
+                    self.close = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.action_watch = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if let Some(s) = self.status.rx.try_iter().last() {
             self.snap = s;
             changed = true;
+            // The notification being answered went away (withdrawn by the app).
+            if self.reply.as_ref().is_some_and(|(id, _)| !self.snap.notifications.iter().any(|n| n.id == *id)) {
+                self.reply = None;
+            }
         }
         let now = Instant::now();
         // Finished slide-outs: remove from the store.
@@ -318,7 +398,6 @@ impl NcView {
     /// An animation is running (another frame is wanted).
     pub fn animating(&self) -> bool {
         self.page.iter().chain(self.tile_w.iter()).chain(self.knobs.iter()).any(|t| t.running())
-            || self.expand.values().any(|t| t.running())
             || self.sink_t.running()
             || self.eth_t.running()
             || !self.dismissing.is_empty()
@@ -477,10 +556,10 @@ impl NcView {
         let has_wide = self.tiles.contains(&self.tab);
         // One tile (the open page) is wide; the rest are 44 px icons. Hidden tiles shrink to 0.
         let wide = if has_wide { (w - (n - 1.0) * (44.0 + gap)).max(44.0) } else { 44.0 };
-        for i in 0..5 {
+        for i in 0..TILES {
             let target = if !self.tiles.contains(&i) {
                 0.0
-            } else if i == self.tab && i != TILE_CAFFEINE {
+            } else if i == self.tab && i != TILE_CAFFEINE && i != TILE_GAME {
                 wide
             } else {
                 44.0
@@ -578,6 +657,18 @@ impl NcView {
                 on: flags.caffeinate,
                 dimmed: !flags.caffeinate,
                 slashed: !flags.caffeinate,
+                badge: 0,
+                expanded_w: wide,
+            },
+            widgets::TileSpec {
+                icon: "gamepad",
+                title: "",
+                subtitle: "",
+                count: "",
+                selected: false,
+                on: flags.game_mode,
+                dimmed: !flags.game_mode,
+                slashed: false,
                 badge: 0,
                 expanded_w: wide,
             },
@@ -688,11 +779,15 @@ impl NcView {
         });
     }
 
+    /// Expansion of group `key` (0 collapsed, 1 open), on a spring.
     fn expand_t(&mut self, key: &str) -> f64 {
-        let open = self.expanded.as_deref() == Some(key);
-        let t = self.expand.entry(key.to_string()).or_insert_with(|| Tween::new(if open { 1.0 } else { 0.0 }));
-        t.set(if open { 1.0 } else { 0.0 }, ANIM_MED_MS);
-        t.value()
+        let to = if self.expanded.as_deref() == Some(key) { 1.0 } else { 0.0 };
+        let ts = self.time_scale;
+        let s = self.expand.entry(key.to_string()).or_insert_with(|| crate::ui::SpringValue::new(to));
+        if (s.target() - to).abs() > 1e-6 {
+            s.set_scaled(to, SPRING_GROUP, ts);
+        }
+        s.animated(0.002).clamp(0.0, 1.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -701,23 +796,47 @@ impl NcView {
         let latest = &items[0];
         let total = items.len();
         let critical = latest.urgency >= 2;
-        let tx = r.x + 12.0 + 46.0 + 12.0;
-        let tw = r.w - 24.0 - 46.0 - 12.0;
+        // The app icon shrinks into the header row as the group opens.
+        let icon = 46.0 + (HEAD_OPEN - 46.0) * e;
+        let tx = r.x + 12.0 + icon + 12.0;
+        let tw = r.w - 24.0 - icon - 12.0;
 
         // Head: pill row (20) + 3 + preview (collapses while expanded).
         let line_h = 19.0;
         let second = if total > 1 { true } else { !latest.body.is_empty() };
         let preview_full = line_h + if second { 2.0 + line_h } else { 0.0 };
         let preview_h = preview_full * (1.0 - e);
-        let text_h = 20.0 + 3.0 + preview_h;
-        let head_h = text_h.max(46.0);
+        let closed_h = (20.0 + 3.0 + preview_full).max(46.0);
+        let head_h = closed_h + (HEAD_OPEN - closed_h) * e;
 
-        // Details (entries) height.
-        let details_inner = self.entries_height(cr, r.w - 20.0, items);
-        let details_h = (details_inner + 10.0) * e;
+        // The thread: the latest GROUP_LIMIT entries unless all were asked for.
+        let shown = if self.show_all.contains(key) { total } else { total.min(GROUP_LIMIT) };
+        let more = total - shown;
+        let layout = if e > 0.0 { self.entry_layout(cr, r.w - 20.0, &items[..shown]) } else { Vec::new() };
+        let mut list_h: f64 = layout.iter().zip(&items[..shown]).map(|(l, n)| l.0 * self.collapse_factor(n.id)).sum::<f64>() + ENTRY_GAP * shown.saturating_sub(1) as f64;
+        if more > 0 {
+            list_h += 6.0 + MORE_H;
+        }
+        let details_h = (list_h + 10.0) * e;
         let card_h = 12.0 + head_h + details_h + 12.0;
+        // A closed group of several shows the edges of the cards under it.
+        let layers = (total.saturating_sub(1)).min(2);
+        let peek = layers as f64 * PEEK * (1.0 - e);
 
         let card = Rect { x: r.x, y: r.y, w: r.w, h: card_h };
+        if peek > 0.1 {
+            unsafe {
+                cb::cairo_save(cr);
+                cb::cairo_rectangle(cr, card.x, card.y + card_h, card.w, peek + 1.0);
+                cb::cairo_clip(cr);
+            }
+            for k in 1..=layers {
+                let inset = 12.0 * k as f64;
+                let a = (0.10 - 0.025 * k as f64) * (1.0 - e);
+                cb::fill_rounded_rect(cr, card.x + inset, card.y + PEEK * k as f64 * (1.0 - e), card.w - 2.0 * inset, card_h, RADIUS, alpha(p.fg, a));
+            }
+            unsafe { cb::cairo_restore(cr) };
+        }
         cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, RADIUS, alpha(p.fg, 0.12));
         if e > 0.0 {
             cb::fill_rounded_rect(cr, card.x, card.y, card.w, card.h, RADIUS, alpha(p.fg, 0.05 * e));
@@ -729,19 +848,36 @@ impl NcView {
         self.hits.push((Hit::GroupHead(gi), head));
         // Preview pictures show inside the entries; the group shows the app's icon.
         let head_image = if wants_preview(latest) { None } else { latest.image.as_deref() };
-        crate::toasts::draw_notif_icon(cr, head.x, head.y, 46.0, &latest.app_name, latest.icon.as_deref(), head_image, &latest.desktop_entry, p.fg, 1.0);
+        crate::toasts::draw_notif_icon(cr, head.x, head.y, icon, &latest.app_name, latest.icon.as_deref(), head_image, &latest.desktop_entry, p.fg, 1.0);
 
-        // Pill row: app name · time · [count ⌄]
+        // Pill row: app name · time · [count ⌄] closed; app name · Clear all · [Show less ⌃] open.
+        let row_y = head.y + (HEAD_OPEN - 20.0) / 2.0 * e;
         let small = font(11.0, "");
-        let time = time_label(latest.timestamp);
-        let pill_label = if total > 1 { total.to_string() } else { String::new() };
+        let open = e > 0.5;
+        let pill_label = if open { "Show less".to_string() } else if total > 1 { total.to_string() } else { String::new() };
         let pl_w = if pill_label.is_empty() { 0.0 } else { text_size(cr, &pill_label, &small).0 + 4.0 };
         let pill_w = pl_w + 12.0 + 14.0;
-        let pill = Rect { x: tx + tw - pill_w, y: head.y, w: pill_w, h: 20.0 };
+        let pill = Rect { x: tx + tw - pill_w, y: row_y, w: pill_w, h: 20.0 };
+        let time = time_label(latest.timestamp);
         let (time_w, _) = text_size(cr, &time, &small);
         let time_x = pill.x - 8.0 - time_w;
-        text_v(cr, tx, head.y, 20.0, &latest.app_name, &small, alpha(p.fg, 0.65), Some(time_x - tx - 8.0));
-        text_v(cr, time_x, head.y, 20.0, &time, &small, alpha(p.fg, 0.65), None);
+        // "Clear all" takes the time's place as the group opens.
+        let clear_label = "Clear all";
+        let (clear_w, _) = text_size(cr, clear_label, &small);
+        let clear = Rect { x: pill.x - 10.0 - clear_w - 12.0, y: row_y, w: clear_w + 12.0, h: 20.0 };
+        let name_end = if open { clear.x } else { time_x } - 8.0;
+        text_v(cr, tx, row_y, 20.0, &latest.app_name, &font(11.0 + 1.5 * e, if open { "Bold" } else { "" }), alpha(p.fg, 0.65 + 0.3 * e), Some(name_end - tx));
+        if e < 1.0 {
+            text_v(cr, time_x, row_y, 20.0, &time, &small, alpha(p.fg, 0.65 * (1.0 - e)), None);
+        }
+        if e > 0.0 {
+            let ch = hv!(self, Hit::GroupClear(gi));
+            cb::fill_rounded_rect(cr, clear.x, clear.y, clear.w, clear.h, 10.0, alpha(p.fg, 0.14 * ch * e));
+            text_v(cr, clear.x + 6.0, row_y, 20.0, clear_label, &small, alpha(p.fg, 0.8 * e), None);
+            if open {
+                self.hits.push((Hit::GroupClear(gi), clear));
+            }
+        }
         let ph = self.hover == Some(Hit::GroupHead(gi)) && pill.contains(self.pointer.0, self.pointer.1);
         cb::fill_rounded_rect(cr, pill.x, pill.y, pill.w, pill.h, 10.0, alpha(p.fg, if ph { 0.32 } else { 0.18 }));
         let mut px = pill.x + 7.0;
@@ -749,7 +885,7 @@ impl NcView {
             text_v(cr, px, pill.y, 20.0, &pill_label, &small, p.fg, None);
             px += pl_w;
         }
-        svg::icon(cr, if self.expanded.as_deref() == Some(key) { "chevron-up" } else { "chevron-down" }, px, pill.y + 4.0, 12.0, p.fg, false);
+        svg::icon(cr, if open { "chevron-up" } else { "chevron-down" }, px, pill.y + 4.0, 12.0, p.fg, false);
 
         // Preview lines.
         if preview_h > 0.5 {
@@ -788,39 +924,59 @@ impl NcView {
                 cb::cairo_clip(cr);
             }
             let before = self.hits.len();
-            self.draw_entries(cr, card.x + 10.0, dy + 10.0, card.w - 20.0, gi, items, p);
+            let end = self.draw_entries(cr, card.x + 10.0, dy + 10.0, card.w - 20.0, &items[..shown], &layout, e, p);
+            if more > 0 {
+                let label = format!("Show {more} more");
+                let (lw, _) = text_size(cr, &label, &small);
+                let mr = Rect { x: card.x + 10.0 + THREAD_X - 6.0, y: end + 6.0, w: lw + 24.0, h: MORE_H };
+                let mh = hv!(self, Hit::GroupMore(gi));
+                cb::fill_rounded_rect(cr, mr.x, mr.y, mr.w, mr.h, mr.h / 2.0, alpha(p.fg, (0.10 + 0.10 * mh) * e));
+                text_v(cr, mr.x + 12.0, mr.y, mr.h, &label, &small, alpha(p.fg, 0.85 * e), None);
+                self.hits.push((Hit::GroupMore(gi), mr));
+            }
             for h in self.hits[before..].iter_mut() {
                 h.1 = clip_rect(h.1, clip);
             }
             self.hits.retain(|(_, r)| r.h > 0.0);
             unsafe { cb::cairo_restore(cr) };
         }
-        card_h
+        card_h + peek
     }
 
-    fn entry_height(&self, cr: *mut Cairo, w: f64, n: &Notification) -> f64 {
-        let cw = w - 20.0;
-        let (_, sh) = text_size(cr, &n.summary, &font(14.0, "Bold"));
-        let body = plain(&n.body);
-        let bh = if body.is_empty() { 0.0 } else { cb::measure_pango_text(cr, &body, &font(13.0, ""), cw as i32, Some(8)).1 as f64 };
-        let text = sh + if bh > 0.0 { 3.0 + bh } else { 0.0 };
-        let ph = crate::toasts::preview_height(entry_preview(n), cw);
-        let pic = if ph > 0.0 { 8.0 + ph } else { 0.0 };
-        let (_, _, _, rows_h) = entry_actions(cr, 0.0, 0.0, cw, n);
-        10.0 + text + pic + 8.0 + rows_h + 10.0
+    /// How far an entry's buttons are shown: while the pointer is on it, or its reply is open.
+    fn reveal(&mut self, n: &Notification) -> f64 {
+        let on = self.hover.and_then(hit_nid) == Some(n.id) || self.reply.as_ref().is_some_and(|(id, _)| *id == n.id);
+        let ts = self.time_scale;
+        self.hover_fade.level_scaled(Hit::EntryReveal(n.id), on, ts)
     }
 
-    fn entries_height(&self, cr: *mut Cairo, w: f64, items: &[Notification]) -> f64 {
-        let mut h = 0.0;
-        for n in items {
-            h += self.entry_height(cr, w, n) * self.collapse_factor(n.id) + 8.0;
-        }
-        if items.len() > 1 {
-            h += 28.0;
-        } else {
-            h -= 8.0;
-        }
-        h
+    /// Per entry: (height, buttons shown 0..1, summary shown). A summary repeating the one
+    /// before it (a sender writing again) is left out, like a chat thread.
+    fn entry_layout(&mut self, cr: *mut Cairo, w: f64, items: &[Notification]) -> Vec<(f64, f64, bool)> {
+        let tw = w - THREAD_X - 4.0;
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let body = plain(&n.body);
+                let show_summary = i == 0 || items[i - 1].summary != n.summary || body.is_empty();
+                let reveal = self.reveal(n);
+                let (_, sh) = text_size(cr, &n.summary, &font(14.0, "Bold"));
+                let (tmw, _) = text_size(cr, &time_label(n.timestamp), &font(11.0, ""));
+                let body_w = if show_summary { tw } else { tw - tmw - 8.0 };
+                let bh = if body.is_empty() { 0.0 } else { cb::measure_pango_text(cr, &body, &font(13.0, ""), body_w as i32, Some(8)).1 as f64 };
+                let text = match (show_summary, bh > 0.0) {
+                    (true, true) => sh + 2.0 + bh,
+                    (true, false) => sh,
+                    (false, _) => bh,
+                };
+                let ph = crate::toasts::preview_height(entry_preview(n), tw);
+                let pic = if ph > 0.0 { 8.0 + ph } else { 0.0 };
+                let (_, _, _, rows_h) = entry_actions(cr, 0.0, 0.0, tw, n);
+                let reply = if self.reply.as_ref().is_some_and(|(id, _)| *id == n.id) { 8.0 + REPLY_H } else { 0.0 };
+                (ENTRY_PAD + text + pic + (8.0 + rows_h) * reveal + reply + ENTRY_PAD, reveal, show_summary)
+            })
+            .collect()
     }
 
     /// 1 while shown, shrinking to 0 during the collapse after a dismiss slide.
@@ -834,23 +990,41 @@ impl NcView {
         }
     }
 
+    /// The group's entries as a thread along a timeline: a dot per entry joined by a thin
+    /// line, no boxes; buttons fade in on the entry under the pointer. Entries cascade in as
+    /// the group opens (`e`). Returns where the list ends.
     #[allow(clippy::too_many_arguments)]
-    fn draw_entries(&mut self, cr: *mut Cairo, x: f64, mut y: f64, w: f64, gi: usize, items: &[Notification], p: &Pal) {
-        for n in items {
-            let full_h = self.entry_height(cr, w, n);
+    fn draw_entries(&mut self, cr: *mut Cairo, x: f64, mut y: f64, w: f64, items: &[Notification], layout: &[(f64, f64, bool)], e: f64, p: &Pal) -> f64 {
+        let count = items.len().max(1) as f64;
+        let step = (0.5 / count).min(0.12);
+        let line_x = x + 13.0;
+        let mut last_dot: Option<f64> = None;
+        for (i, (n, &(full_h, reveal, show_summary))) in items.iter().zip(layout).enumerate() {
             let k = self.collapse_factor(n.id);
             let h = full_h * k;
+            // Cascade: each entry follows the one above a little later.
+            let s = ((e - i as f64 * step) / (1.0 - (count - 1.0) * step)).clamp(0.0, 1.0);
+            let s = crate::ui::out_cubic(s);
+            let drop = -10.0 * (1.0 - s);
             // Slide right while dismissing or swiping.
             let (dx, a) = match self.dismissing.iter().find(|(id, _)| *id == n.id) {
                 Some((_, t)) => {
-                    let s = (t.elapsed().as_secs_f64() * 1000.0 / 180.0).clamp(0.0, 1.0);
+                    let f = (t.elapsed().as_secs_f64() * 1000.0 / 180.0).clamp(0.0, 1.0);
                     let from = if matches!(self.drag, Some(Drag::Entry(id, _)) if id == n.id) { self.swipe_dx } else { 0.0 };
-                    (from + (w - from) * crate::ui::in_cubic(s), 1.0 - s)
+                    (from + (w - from) * crate::ui::in_cubic(f), 1.0 - f)
                 }
                 None if matches!(self.drag, Some(Drag::Entry(id, _)) if id == n.id) => (self.swipe_dx, 1.0),
                 None => (0.0, 1.0),
             };
+            let a = a * s;
+            let fs = font(14.0, "Bold");
+            let (_, sh) = text_size(cr, &n.summary, &fs);
+            let dot_y = y + drop + ENTRY_PAD + if show_summary { sh / 2.0 } else { 9.0 };
             if h > 0.5 {
+                // Timeline segment from the previous dot.
+                if let Some(prev) = last_dot {
+                    cb::fill_rounded_rect(cr, line_x - 0.75, prev + 7.0, 1.5, (dot_y - prev - 14.0).max(0.0), 0.75, alpha(p.fg, 0.20 * s));
+                }
                 unsafe {
                     cb::cairo_save(cr);
                     cb::cairo_rectangle(cr, x, y, w, h);
@@ -858,24 +1032,34 @@ impl NcView {
                     cb::cairo_push_group(cr);
                 }
                 let cx = x + dx;
-                cb::fill_rounded_rect(cr, cx, y, w, full_h, RADIUS, alpha(p.inv, 0.55));
-                if n.urgency >= 2 {
-                    cb::stroke_rounded_rect(cr, cx + 0.75, y + 0.75, w - 1.5, full_h - 1.5, RADIUS, p.error, 1.5);
+                let top = y + drop;
+                // Soft highlight under the entry being pointed at.
+                if reveal > 0.0 {
+                    cb::fill_rounded_rect(cr, cx + THREAD_X - 8.0, top, w - THREAD_X + 8.0, full_h, RADIUS, alpha(p.fg, 0.06 * reveal));
                 }
-                let tx = cx + 10.0;
-                let tw = w - 20.0;
+                let dot = if i == 0 { p.primary } else { alpha(p.fg, 0.55) };
+                cb::fill_rounded_rect(cr, line_x + dx - 4.0, dot_y - 4.0, 8.0, 8.0, 4.0, dot);
+                if n.urgency >= 2 {
+                    cb::stroke_rounded_rect(cr, line_x + dx - 6.0, dot_y - 6.0, 12.0, 12.0, 6.0, p.error, 1.5);
+                }
+                let tx = cx + THREAD_X;
+                let tw = w - THREAD_X - 4.0;
                 let small = font(11.0, "");
                 let time = time_label(n.timestamp);
                 let (tmw, _) = text_size(cr, &time, &small);
-                let fs = font(14.0, "Bold");
-                let (_, sh) = text_size(cr, &n.summary, &fs);
-                text_v(cr, tx, y + 10.0, sh, &n.summary, &fs, p.fg, Some(tw - tmw - 8.0));
-                text_v(cr, tx + tw - tmw, y + 10.0, sh, &time, &small, alpha(p.fg, 0.55), None);
+                let mut by = top + ENTRY_PAD;
+                if show_summary {
+                    text_v(cr, tx, by, sh, &n.summary, &fs, p.fg, Some(tw - tmw - 8.0));
+                    text_v(cr, tx + tw - tmw, by, sh, &time, &small, alpha(p.fg, 0.5), None);
+                    by += sh;
+                } else {
+                    text_v(cr, tx + tw - tmw, by, 18.0, &time, &small, alpha(p.fg, 0.5), None);
+                }
                 let body = plain(&n.body);
-                let mut by = y + 10.0 + sh;
                 if !body.is_empty() {
-                    let (_, bh) = cb::draw_pango_text_wrapped(cr, tx, by + 3.0, &body, &font(13.0, ""), alpha(p.fg, 0.85), tw as i32, Some(8));
-                    by += 3.0 + bh as f64;
+                    let (bw, gap) = if show_summary { (tw, 2.0) } else { (tw - tmw - 8.0, 0.0) };
+                    let (_, bh) = cb::draw_pango_text_wrapped(cr, tx, by + gap, &body, &font(13.0, ""), alpha(p.fg, 0.85), bw as i32, Some(8));
+                    by += gap + bh as f64;
                 }
                 // Screenshot-style preview picture across the entry.
                 if let Some(path) = entry_preview(n) {
@@ -884,36 +1068,79 @@ impl NcView {
                     cb::stroke_rounded_rect(cr, tx + 0.5, by + 8.5, tw - 1.0, ph - 1.0, 10.0, alpha(p.fg, 0.12), 1.0);
                     by += 8.0 + ph;
                 }
+                // Buttons, faded and folded in while the pointer is elsewhere.
                 let acts: Vec<(String, String)> = n.actions.iter().take(3).cloned().collect();
-                let (copy, close, action_rects, _) = entry_actions(cr, tx, by + 8.0, tw, n);
-                for (i, (r, (_, label))) in action_rects.iter().zip(acts.iter()).enumerate() {
-                    widgets::button(cr, *r, label, "", true, false, true, hv!(self, Hit::EntryAction(n.id, i)), p);
+                let (copy, close, action_rects, rows_h) = entry_actions(cr, tx, by + 8.0, tw, n);
+                if reveal > 0.01 {
+                    unsafe {
+                        cb::cairo_save(cr);
+                        cb::cairo_rectangle(cr, tx - 2.0, by, tw + 4.0, (8.0 + rows_h) * reveal);
+                        cb::cairo_clip(cr);
+                        cb::cairo_push_group(cr);
+                    }
+                    for (j, (r, (_, label))) in action_rects.iter().zip(acts.iter()).enumerate() {
+                        widgets::button(cr, *r, label, "", true, false, true, hv!(self, Hit::EntryAction(n.id, j)), p);
+                    }
+                    widgets::button(cr, copy, "", "copy", true, false, true, hv!(self, Hit::EntryCopy(n.id)), p);
+                    widgets::button(cr, close, "", "close", true, false, true, hv!(self, Hit::EntryClose(n.id)), p);
+                    unsafe {
+                        cb::cairo_pop_group_to_source(cr);
+                        cb::cairo_paint_with_alpha(cr, reveal);
+                        cb::cairo_restore(cr);
+                    }
                 }
-                widgets::button(cr, copy, "", "copy", true, false, true, hv!(self, Hit::EntryCopy(n.id)), p);
-                widgets::button(cr, close, "", "close", true, false, true, hv!(self, Hit::EntryClose(n.id)), p);
+                by += (8.0 + rows_h) * reveal;
+                let mut reply_hits = Vec::new();
+                if let Some((_, text)) = self.reply.as_ref().filter(|(id, _)| *id == n.id) {
+                    let field = Rect { x: tx, y: by + 8.0, w: tw, h: REPLY_H };
+                    cb::fill_rounded_rect(cr, field.x, field.y, field.w, field.h, RADIUS, p.surface_variant);
+                    cb::stroke_rounded_rect(cr, field.x + 1.0, field.y + 1.0, field.w - 2.0, field.h - 2.0, RADIUS, p.primary, 2.0);
+                    let (bh, bw) = widgets::button_size(cr, "Send", "", true);
+                    let send = Rect { x: field.x + field.w - 6.0 - bw, y: field.y + (REPLY_H - bh) / 2.0, w: bw, h: bh };
+                    widgets::button(cr, send, "Send", "", true, false, !text.trim().is_empty(), hv!(self, Hit::ReplySend(n.id)), p);
+                    let f = font(14.0, "");
+                    let ix = field.x + 10.0;
+                    let iw = send.x - 8.0 - ix;
+                    if text.is_empty() {
+                        let hint = if n.reply_placeholder.is_empty() { "Reply" } else { n.reply_placeholder.as_str() };
+                        text_v(cr, ix, field.y, REPLY_H, hint, &f, p.on_surface_variant, Some(iw));
+                        cb::fill_rounded_rect(cr, ix, field.y + (REPLY_H - 18.0) / 2.0, 1.5, 18.0, 0.0, p.on_surface);
+                    } else {
+                        // Long replies: show the end, where the caret is.
+                        let mut shown: &str = text;
+                        while text_size(cr, shown, &f).0 > iw {
+                            let mut c = shown.chars();
+                            c.next();
+                            shown = c.as_str();
+                        }
+                        let tw2 = text_v(cr, ix, field.y, REPLY_H, shown, &f, p.on_surface, Some(iw));
+                        cb::fill_rounded_rect(cr, ix + tw2 + 1.0, field.y + (REPLY_H - 18.0) / 2.0, 1.5, 18.0, 0.0, p.on_surface);
+                    }
+                    reply_hits.push((Hit::ReplyField(n.id), field));
+                    reply_hits.push((Hit::ReplySend(n.id), send));
+                }
                 unsafe {
                     cb::cairo_pop_group_to_source(cr);
                     cb::cairo_paint_with_alpha(cr, a);
                     cb::cairo_restore(cr);
                 }
-                if dx == 0.0 && k >= 1.0 {
+                if dx == 0.0 && k >= 1.0 && s > 0.99 {
                     self.hits.push((Hit::Entry(n.id), Rect { x, y, w, h }));
-                    self.hits.push((Hit::EntryCopy(n.id), copy));
-                    self.hits.push((Hit::EntryClose(n.id), close));
-                    for (i, r) in action_rects.iter().enumerate() {
-                        self.hits.push((Hit::EntryAction(n.id, i), *r));
+                    if reveal > 0.5 {
+                        self.hits.push((Hit::EntryCopy(n.id), copy));
+                        self.hits.push((Hit::EntryClose(n.id), close));
+                        for (j, r) in action_rects.iter().enumerate() {
+                            self.hits.push((Hit::EntryAction(n.id, j), *r));
+                        }
                     }
+                    // The send button sits on the field: listed after it so it wins.
+                    self.hits.extend(reply_hits);
                 }
+                last_dot = Some(dot_y);
             }
-            y += h + 8.0;
+            y += h + ENTRY_GAP;
         }
-        if items.len() > 1 {
-            let label = format!("Clear {}", items.len());
-            let (bh, bw) = widgets::button_size(cr, &label, "", true);
-            let r = Rect { x: x + w - bw, y, w: bw, h: bh };
-            widgets::button(cr, r, &label, "", true, false, true, hv!(self, Hit::GroupClear(gi)), p);
-            self.hits.push((Hit::GroupClear(gi), r));
-        }
+        y - ENTRY_GAP
     }
 
     // ── Network page ─────────────────────────────────────────────────────
@@ -1599,6 +1826,7 @@ impl NcView {
                 }
             }
             Hit::Tile(TILE_CAFFEINE) => self.daemon(IpcCommand::Caffeinate(Some(!self.snap.flags.caffeinate))),
+            Hit::Tile(TILE_GAME) => self.daemon(IpcCommand::GameMode(Some(!self.snap.flags.game_mode))),
             Hit::Tile(t) => self.set_tab(t),
             Hit::Silent => {
                 self.snap.flags.silent = !self.snap.flags.silent;
@@ -1611,7 +1839,19 @@ impl NcView {
             }
             Hit::GroupHead(gi) => {
                 let key = self.groups().get(gi).map(|g| g.key.clone());
-                self.expanded = if self.expanded == key { None } else { key };
+                // Opening one group closes the other; a click on the open one closes it.
+                let was = self.expanded.take();
+                if let Some(old) = &was {
+                    self.show_all.remove(old);
+                }
+                if key != was {
+                    self.expanded = key;
+                }
+            }
+            Hit::GroupMore(gi) => {
+                if let Some(g) = self.groups().get(gi) {
+                    self.show_all.insert(g.key.clone());
+                }
             }
             Hit::GroupClear(gi) => {
                 if let Some(g) = self.groups().get(gi) {
@@ -1629,12 +1869,25 @@ impl NcView {
                 }
             }
             Hit::EntryClose(nid) => self.dismiss(nid),
+            Hit::ReplyField(_) | Hit::EntryReveal(_) => {}
+            Hit::ReplySend(nid) => return self.send_reply(nid),
             Hit::EntryAction(nid, i) => {
                 if let Some(key) = self.snap.notifications.iter().find(|n| n.id == nid).and_then(|n| n.actions.get(i)).map(|a| a.0.clone()) {
-                    // prismd tells the app and removes the notification.
+                    if key == INLINE_REPLY {
+                        // Type the answer here; the field toggles.
+                        self.reply = match self.reply.take() {
+                            Some((id, _)) if id == nid => None,
+                            _ => Some((nid, String::new())),
+                        };
+                        return Effect::Redraw;
+                    }
+                    // prismd tells the app and removes the notification. The centre closes only
+                    // if the app answers with a window (opens or raises one), not for actions
+                    // like "Mark as read".
+                    self.action_watch = Some(crate::window_watch::watch(std::time::Duration::from_secs(5), Some(self.waker.clone())));
                     crate::toasts::invoke_action(nid, key);
                     self.snap.notifications.retain(|n| n.id != nid);
-                    return Effect::Close;
+                    return Effect::Redraw;
                 }
             }
             Hit::Entry(_) => return Effect::None,
@@ -1786,7 +2039,28 @@ impl NcView {
         self.scroll[self.tab].by(delta)
     }
 
+    fn send_reply(&mut self, nid: u32) -> Effect {
+        let Some((id, text)) = self.reply.take_if(|(id, t)| *id == nid && !t.trim().is_empty()) else { return Effect::None };
+        crate::toasts::send_reply(id, text);
+        self.snap.notifications.retain(|n| n.id != id);
+        Effect::Redraw
+    }
+
     pub fn key(&mut self, special: u32, typed: Option<char>) -> Effect {
+        // An open reply field takes the keyboard; Esc closes the field, not the centre.
+        if let Some((nid, text)) = self.reply.as_mut() {
+            let nid = *nid;
+            match (special, typed) {
+                (ESC, _) => self.reply = None,
+                (ENTER, _) => return self.send_reply(nid),
+                (BACKSPACE, _) => {
+                    text.pop();
+                }
+                (_, Some(c)) if !c.is_control() => text.push(c),
+                _ => return Effect::None,
+            }
+            return Effect::Redraw;
+        }
         if special == ESC {
             if self.sink_open {
                 self.sink_open = false;

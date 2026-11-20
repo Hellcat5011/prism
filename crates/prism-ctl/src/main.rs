@@ -20,6 +20,7 @@ Targets & Commands:
   theme [reload|palette]
   notif [list|clear|send <summary> [body]|toggle|open|close|silent [on|off]|state]
   caffeinate [on|off]
+  gamemode [on|off]                 silent, performance profile, no animations or blur
   osd volume [+<step>%|-<step>%|mute|<value>]
   osd brightness [+<step>%|-<step>%|<value>]
   clipboard [toggle|open|close]
@@ -160,6 +161,7 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
             Ok(IpcCommand::Notif(act))
         }
         "caffeinate" => Ok(IpcCommand::Caffeinate(on_off(args.get(1)))),
+        "gamemode" | "game-mode" => Ok(IpcCommand::GameMode(on_off(args.get(1)))),
         "clipboard" => {
             let act = match action_str {
                 Some("open") => ClipboardAction::Open,

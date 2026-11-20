@@ -28,6 +28,32 @@ pub fn app_command(program: &str, args: &[String]) -> Command {
     }
 }
 
+/// The user's terminal: `$TERMINAL`, else the first installed of the common ones.
+pub fn terminal() -> Option<String> {
+    let found = |t: &str| t.contains('/') && Path::new(t).exists() || std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(t).is_file()));
+    if let Ok(t) = std::env::var("TERMINAL") {
+        if !t.is_empty() && found(&t) {
+            return Some(t);
+        }
+    }
+    ["xdg-terminal-exec", "ghostty", "kitty", "foot", "alacritty", "wezterm", "konsole", "gnome-terminal", "xfce4-terminal", "xterm"].into_iter().find(|t| found(t)).map(String::from)
+}
+
+/// A terminal running `args` (in an app scope, like `app_command`).
+pub fn terminal_command(args: &[String]) -> Option<Command> {
+    let term = terminal()?;
+    let name = Path::new(&term).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    let mut full: Vec<String> = match name.as_str() {
+        // These take the command directly (or after --).
+        "xdg-terminal-exec" | "kitty" => Vec::new(),
+        "gnome-terminal" => vec!["--".into()],
+        "wezterm" => vec!["start".into(), "--".into()],
+        _ => vec!["-e".into()],
+    };
+    full.extend(args.iter().cloned());
+    Some(app_command(&term, &full))
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct DesktopApp {
     pub id: String,

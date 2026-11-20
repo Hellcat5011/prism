@@ -93,6 +93,17 @@ pub struct Style {
     pub scale: f64,
 }
 
+/// Game mode (prismd's `GameMode`): no animations and no blur while on.
+static GAME_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_game_mode(on: bool) {
+    GAME_MODE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn game_mode() -> bool {
+    GAME_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Style {
     pub fn new(cfg: &Config, theme: &Theme) -> Self {
         let opacity = (cfg.background_opacity as f64).clamp(0.2, 1.0);
@@ -108,9 +119,9 @@ impl Style {
             fg: hex_to_rgba(&theme.on_primary_container, 1.0),
             accent: hex_to_rgba(&theme.primary, 1.0),
             font_family,
-            animations: cfg.animations_enabled,
+            animations: cfg.animations_enabled && !game_mode(),
             animation_speed: (cfg.animation_speed as f64).clamp(0.25, 4.0),
-            blur: cfg.blur_enabled,
+            blur: cfg.blur_enabled && !game_mode(),
             shadows: cfg.shadows_enabled,
             dim_enabled: cfg.dim_enabled,
             dim_opacity: (cfg.dim_opacity as f64).clamp(0.0, 0.9),

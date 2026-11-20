@@ -28,6 +28,14 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   `kdeconnectd` needed). Phone battery and status, its media with controls and album art, the PC's players on the
   phone (multimedia control), clipboard sync both ways, phone notifications with reply and dismiss, find my phone, files both ways, and the phone as a remote
   mouse and keyboard. Shown in a Phone card, a desktop widget and a Settings tab.
+- **Desktop portal**: screenshots, colour picking and screen sharing for apps (browsers, OBS, Discord) through
+  `xdg-desktop-portal`, with a picker for the screen or window to share. Replaces `xdg-desktop-portal-wlr`.
+- **System prompts**: polkit and NetworkManager password prompts, and gnome-keyring's unlock prompts (replaces
+  `gcr-prompter`), as Prism cards.
+- **Removable drives**: USB drives and SD cards are mounted when plugged in and announced with Open and Eject.
+- **Updates**: a notification and a bar module when package updates are available (`checkupdates`, `yay`/`paru`).
+- **Game mode**: one toggle (notification center, `prism-ctl gamemode`) for silent notifications, the performance
+  power profile and no animations or blur.
 - **Motion**: cards open and close on springs (and shrink back to the button they were opened from), rows fade in
   one after another, selection highlights glide between rows, lists scroll smoothly (touchpad scrolling follows
   the fingers and keeps its momentum), and switches and hover states animate. Cards cast a soft drop shadow

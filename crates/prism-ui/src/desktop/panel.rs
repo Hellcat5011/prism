@@ -58,6 +58,7 @@ pub enum PanelHit {
     MediaPrev,
     MediaPlay,
     MediaNext,
+    Updates,
     DockItem(usize),
 }
 
@@ -215,6 +216,9 @@ impl Desk {
             sysmon::start(self.waker.clone());
         }
         sysmon::set_wanted(wants_stats);
+        let wants_updates = bar_on && self.config.bar.section_of("updates").is_some();
+        let c = &self.config;
+        super::updates::configure(wants_updates || c.update_notifications || c.updates_tray, c.update_notifications, c.bar.updates_interval_hours, &self.waker);
         self.panels.dock_state.refresh(&self.windows.toplevels);
         let (bar, dock) = (self.bar_spec(), self.dock_spec());
         self.sync_panel(PanelId::Bar, bar, qh);
@@ -404,6 +408,7 @@ impl Desk {
             tray_icons: &self.tray_icons,
             media: self.media.as_ref(),
             stats: sysmon::snapshot(),
+            updates: super::updates::snapshot(),
             now: &now,
             hover: self.panels.hover,
         };
@@ -438,7 +443,7 @@ impl Desk {
         }
         let mut next: Option<i32> = None;
         if self.panels.bar.is_some() {
-            let stats = sysmon::generation();
+            let stats = sysmon::generation() + (super::updates::generation() << 32);
             let now = LocalTime::now();
             if stats != self.panels.stats_seen || bar::clock_text(&self.config.bar, &now) != self.panels.bar_state.clock {
                 self.panels.stats_seen = stats;
@@ -550,6 +555,8 @@ impl Desk {
             PanelHit::Launcher if button == BTN_LEFT => run_ctl(&["launcher", "toggle"]),
             PanelHit::Notifications if button == BTN_LEFT => run_ctl(&["notif", "toggle"]),
             PanelHit::Power if button == BTN_LEFT => run_ctl(&["power", "toggle"]),
+            PanelHit::Updates if button == BTN_LEFT => super::updates::run_update(&self.config.bar.updates_command),
+            PanelHit::Updates => super::updates::recheck(),
             PanelHit::MediaPrev if button == BTN_LEFT => self.media_cmd("Previous"),
             PanelHit::MediaPlay if button == BTN_LEFT => self.media_cmd("PlayPause"),
             PanelHit::MediaNext if button == BTN_LEFT => self.media_cmd("Next"),

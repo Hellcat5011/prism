@@ -45,7 +45,7 @@ echo "========================================================"
 echo "    Installing Prism (Rust Wayland desktop shell)       "
 echo "========================================================"
 
-echo "[1/7] Checking build dependencies..."
+echo "[1/8] Checking build dependencies..."
 missing=()
 command -v cargo >/dev/null 2>&1 || missing+=("cargo (Rust 1.77 or newer)")
 if command -v pkg-config >/dev/null 2>&1; then
@@ -84,10 +84,10 @@ if [ ${#missing[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "[2/7] Compiling (release)..."
+echo "[2/8] Compiling (release)..."
 cargo build --release --manifest-path "$REPO_DIR/Cargo.toml"
 
-echo "[3/7] Installing binaries to $BIN_DIR..."
+echo "[3/8] Installing binaries to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 for b in "${BINARIES[@]}"; do
     # install(1) writes a new file, so binaries that are running are replaced safely.
@@ -141,7 +141,7 @@ for b in prismd prism-ui prism-ctl; do
     fi
 done
 
-echo "[4/7] Installing helper scripts to $SHARE_DIR/scripts..."
+echo "[4/8] Installing helper scripts to $SHARE_DIR/scripts..."
 # Keybind parsers and the wallpaper depth generator; prismd and prism-ui look here.
 mkdir -p "$SHARE_DIR/scripts"
 install -m644 "$REPO_DIR"/scripts/*.py "$SHARE_DIR/scripts/"
@@ -149,7 +149,7 @@ install -m755 "$REPO_DIR"/scripts/*.sh "$SHARE_DIR/scripts/"
 # Replaced by the notification server in prismd.
 rm -f "$SHARE_DIR/scripts/prism-dbus-notif.py"
 
-echo "[5/7] Installing the systemd user service..."
+echo "[5/8] Installing the systemd user service..."
 mkdir -p "$SYSTEMD_USER_DIR"
 install -m644 "$SCRIPT_DIR/prismd.service" "$SYSTEMD_USER_DIR/prismd.service"
 if command -v systemctl >/dev/null 2>&1; then
@@ -163,7 +163,30 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
-echo "[6/7] Lock screen PAM service..."
+echo "[6/8] Desktop portal (screenshots and screen sharing for apps)..."
+# prism-ui serves org.freedesktop.impl.portal.desktop.prism. xdg-desktop-portal reads portal
+# descriptions from XDG_DATA_DIRS, so a drop-in adds ~/.local/share for it (no root needed).
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+install -Dm644 "$SCRIPT_DIR/portal/prism.portal" "$DATA_HOME/xdg-desktop-portal/portals/prism.portal"
+install -Dm644 "$SCRIPT_DIR/portal/org.freedesktop.impl.portal.desktop.prism.service" "$DATA_HOME/dbus-1/services/org.freedesktop.impl.portal.desktop.prism.service"
+install -Dm644 "$SCRIPT_DIR/portal/xdg-desktop-portal-prism.conf" "$SYSTEMD_USER_DIR/xdg-desktop-portal.service.d/prism.conf"
+# Which portal does what, per desktop (XDG_CURRENT_DESKTOP); an existing file is left alone.
+desktop="$(echo "${XDG_CURRENT_DESKTOP:-mango}" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')"
+portals_conf="$CONFIG_HOME/xdg-desktop-portal/$desktop-portals.conf"
+if [ ! -e "$portals_conf" ]; then
+    install -Dm644 "$SCRIPT_DIR/portal/mango-portals.conf" "$portals_conf"
+    echo "Prism handles Screenshot and ScreenCast ($portals_conf)."
+elif ! grep -q '=prism' "$portals_conf"; then
+    echo "Note: $portals_conf exists; to let Prism share screens and take screenshots for apps, set"
+    echo "      org.freedesktop.impl.portal.Screenshot=prism and org.freedesktop.impl.portal.ScreenCast=prism"
+fi
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload || true
+    systemctl --user try-restart xdg-desktop-portal.service || true
+fi
+
+echo "[7/8] Lock screen PAM service..."
 # prism-lock unlocks through /etc/pam.d/prism, else the "login" service. Prism's file includes
 # system-local-login (Arch and derivatives); without that file it would refuse every password.
 PAM_OK=0
@@ -179,7 +202,7 @@ else
     echo "Skipped: the lock screen uses the 'login' PAM service."
 fi
 
-echo "[7/7] Greeter..."
+echo "[8/8] Greeter..."
 GREETER_BIN=/usr/local/bin/prism-lock
 GREETD_CONF=/etc/greetd/config.toml
 if [ "$GREETER" = ask ]; then

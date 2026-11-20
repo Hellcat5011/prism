@@ -101,6 +101,7 @@ fn run(action_id: &str, message: &str, cookie: &str, identities: &[(String, Hash
         icon: "lock",
         fields: vec![Field { label: format!("Password for {user}"), secret: true, value: String::new() }],
         ok_label: "Authenticate".into(),
+        choices: Vec::new(),
     })
     .ok_or_else(|| PolkitError::Failed("prompt unavailable".into()))?;
     loop {

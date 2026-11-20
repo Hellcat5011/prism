@@ -13,6 +13,7 @@ mod bluelight;
 mod config_watch;
 mod depth;
 mod displays;
+mod drives;
 mod gamma;
 mod idle;
 mod mpd;
@@ -53,6 +54,53 @@ fn lock_state(state: &Mutex<DaemonState>) -> std::sync::MutexGuard<'_, DaemonSta
 /// Caffeinate (idle inhibitor held by prism-ui). Global so the prism-ui supervisor can
 /// re-apply it when prism-ui restarts.
 static CAFFEINATE: AtomicBool = AtomicBool::new(false);
+
+/// Game mode, and what it changed (silent mode, power profile) to put back afterwards.
+static GAME_MODE: AtomicBool = AtomicBool::new(false);
+static GAME_RESTORE: Mutex<Option<(bool, Option<String>)>> = Mutex::new(None);
+
+const PPD: &str = "org.freedesktop.UPower.PowerProfiles";
+const PPD_PATH: &str = "/org/freedesktop/UPower/PowerProfiles";
+
+fn power_profile() -> Option<String> {
+    let c = zbus::blocking::Connection::system().ok()?;
+    let p = zbus::blocking::Proxy::new(&c, PPD, PPD_PATH, PPD).ok()?;
+    p.get_property::<String>("ActiveProfile").ok()
+}
+
+fn set_power_profile(profile: &str) {
+    let r = zbus::blocking::Connection::system()
+        .and_then(|c| zbus::blocking::Proxy::new(&c, PPD, PPD_PATH, PPD).and_then(|p| p.set_property("ActiveProfile", profile).map_err(zbus::Error::from)));
+    if let Err(e) = r {
+        eprintln!("[prismd] power profile {profile}: {e}");
+    }
+}
+
+/// Turn game mode on or off: silent notifications (critical ones still show), the performance
+/// power profile, and no animations or blur in Prism. Off puts back what was there before.
+fn set_game_mode(state: &Mutex<DaemonState>, on: bool) {
+    if GAME_MODE.swap(on, Ordering::SeqCst) == on {
+        let _ = send_ui(&prism_common::UiCommand::GameMode(on));
+        return;
+    }
+    if on {
+        let profile = power_profile();
+        let silent = {
+            let mut st = lock_state(state);
+            std::mem::replace(&mut st.silent, true)
+        };
+        *GAME_RESTORE.lock().unwrap() = Some((silent, profile.clone()));
+        if profile.is_some_and(|p| p != "performance") {
+            set_power_profile("performance");
+        }
+    } else if let Some((silent, profile)) = GAME_RESTORE.lock().unwrap().take() {
+        lock_state(state).silent = silent;
+        if let Some(p) = profile.filter(|p| p != "performance") {
+            set_power_profile(&p);
+        }
+    }
+    let _ = send_ui(&prism_common::UiCommand::GameMode(on));
+}
 
 fn set_caffeinate(on: bool) -> Result<(), String> {
     CAFFEINATE.store(on, Ordering::SeqCst);
@@ -198,6 +246,16 @@ fn ensure_ui_daemon() {
             let started = std::time::Instant::now();
             match spawn_prism_ui(&["daemon"]) {
                 Ok(mut child) => {
+                    if GAME_MODE.load(Ordering::SeqCst) {
+                        thread::spawn(|| {
+                            for _ in 0..20 {
+                                thread::sleep(Duration::from_millis(250));
+                                if send_ui(&prism_common::UiCommand::GameMode(true)).is_ok() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
                     if CAFFEINATE.load(Ordering::SeqCst) {
                         // Re-apply once the new prism-ui has bound its socket.
                         thread::spawn(|| {
@@ -302,6 +360,7 @@ impl notifd::Handler for NotifHandler {
         n.desktop_entry = i.desktop_entry;
         n.image = i.image;
         n.preview = i.preview;
+        n.reply_placeholder = i.reply_placeholder;
         let (popup, silent) = {
             let mut st = lock_state(&state);
             if i.transient {
@@ -524,6 +583,7 @@ fn apply_config(st: &DaemonState) {
     apply_phone(&st.config);
     mpd::apply(&st.config);
     obex::apply(&st.config);
+    drives::apply(&st.config);
     displays::apply(&st.config);
     st.bluelight.update_config(&st.config);
     st.depth.update_config(&st.config);
@@ -955,6 +1015,14 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 }
                 IpcResponse::Ok(Some(format!("cleared:{}", ids.len())))
             }
+            Ok(IpcCommand::Notif(NotifAction::Reply { id, text })) => {
+                // Inline reply: the app gets the text, then the notification closes.
+                notifd::emit_replied(id, &text);
+                send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
+                lock_state(&state).notifications.remove(id);
+                notifd::emit_closed(id, notifd::CLOSED_DISMISSED);
+                IpcResponse::Ok(Some(format!("replied:{id}")))
+            }
             Ok(IpcCommand::Notif(NotifAction::Invoke { id, action })) => {
                 // Tell the app, then close the notification (spec: unless "resident").
                 notifd::emit_action(id, &action);
@@ -965,8 +1033,13 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
             Ok(IpcCommand::Notif(NotifAction::State)) => {
                 let st = lock_state(&state);
-                let flags = prism_common::ipc::DaemonFlags { silent: st.silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst) };
+                let flags = prism_common::ipc::DaemonFlags { silent: st.silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst), game_mode: GAME_MODE.load(Ordering::SeqCst) };
                 IpcResponse::Ok(serde_json::to_string(&flags).ok())
+            }
+            Ok(IpcCommand::GameMode(want)) => {
+                let on = want.unwrap_or(!GAME_MODE.load(Ordering::SeqCst));
+                set_game_mode(&state, on);
+                IpcResponse::Ok(Some(format!("game_mode:{on}")))
             }
             Ok(IpcCommand::Caffeinate(want)) => {
                 let on = want.unwrap_or(!CAFFEINATE.load(Ordering::SeqCst));
@@ -1415,6 +1488,7 @@ fn main() {
     apply_phone(&cfg);
     mpd::apply(&cfg);
     obex::apply(&cfg);
+    drives::apply(&cfg);
     displays::apply(&cfg);
     let state = Arc::new(Mutex::new(DaemonState {
         config: cfg,

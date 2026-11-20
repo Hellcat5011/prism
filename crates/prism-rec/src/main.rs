@@ -4,6 +4,7 @@
 //! system FFmpeg (NVENC when available).
 
 mod audio;
+mod cast;
 mod encode;
 
 use ffmpeg_next::format::Pixel;
@@ -12,13 +13,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_shm;
 
-static STOP: AtomicBool = AtomicBool::new(false);
+pub(crate) static STOP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--cast") {
+        unsafe {
+            libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        }
+        let job: prism_common::capture::CastJob = match std::env::args().nth(2).map(|a| serde_json::from_str(&a)) {
+            Some(Ok(j)) => j,
+            _ => {
+                eprintln!("usage: prism-rec --cast '<CastJob JSON>' (started by the ScreenCast portal)");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = cast::run(&job) {
+            eprintln!("[prism-rec] cast: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let Some(arg) = std::env::args().nth(1) else {
         eprintln!("usage: prism-rec '<RecordJob JSON>' (started by prismd)");
         std::process::exit(2);

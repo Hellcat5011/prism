@@ -792,15 +792,7 @@ pub fn finish(img: Image, cfg: &Config, save: bool, ) -> Result<std::path::PathB
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(format!("Screenshot_{}.png", timestamp()));
     let mut img = img;
-    unsafe {
-        let surf = shot_surface(&mut img);
-        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-        let r = cb::cairo_surface_write_to_png(surf, c.as_ptr());
-        cb::cairo_surface_destroy(surf);
-        if r != 0 {
-            return Err(format!("could not write {} (cairo status {r})", path.display()));
-        }
-    }
+    write_png(&mut img, &path)?;
     if cfg.capture_copy_to_clipboard {
         if let Ok(bytes) = std::fs::read(&path) {
             prism_common::wlclip::copy(&["image/png"], bytes, true);
@@ -811,6 +803,20 @@ pub fn finish(img: Image, cfg: &Config, save: bool, ) -> Result<std::path::PathB
 }
 
 pub use prism_common::capture::timestamp;
+
+/// Write `img` as PNG.
+pub fn write_png(img: &mut Image, path: &std::path::Path) -> Result<(), String> {
+    unsafe {
+        let surf = shot_surface(img);
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+        let r = cb::cairo_surface_write_to_png(surf, c.as_ptr());
+        cb::cairo_surface_destroy(surf);
+        if r != 0 {
+            return Err(format!("could not write {} (cairo status {r})", path.display()));
+        }
+    }
+    Ok(())
+}
 
 /// "Screenshot saved" with Open / Show in folder / Delete; actions are handled on a thread that
 /// waits for the user's choice.

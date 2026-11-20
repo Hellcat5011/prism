@@ -72,6 +72,8 @@ pub enum UiCommand {
     EditMode(String),
     /// Hold (true) or release an idle inhibitor (Caffeinate).
     Caffeinate(bool),
+    /// Game mode: no animations and no blur while on.
+    GameMode(bool),
     /// Screen colour picker: "toggle", "open" or "close".
     ColorPicker(String),
     /// Screen capture overlay and instant screenshots (prism-ui).
@@ -185,6 +187,10 @@ pub enum IpcCommand {
     /// Keep the session awake (idle inhibitor): on, off, or toggle (None).
     #[serde(rename = "caffeinate")]
     Caffeinate(Option<bool>),
+
+    /// Game mode (silent, performance power profile, no animations or blur): on, off, toggle.
+    #[serde(rename = "game_mode")]
+    GameMode(Option<bool>),
 
     /// Phone sync: forwarded to prism-phoned.
     #[serde(rename = "phone")]
@@ -316,6 +322,8 @@ pub enum NotifAction {
     State,
     /// The user picked an action of a notification (sent to the app as ActionInvoked).
     Invoke { id: u32, action: String },
+    /// The user typed an inline reply (sent to the app as NotificationReplied).
+    Reply { id: u32, text: String },
 }
 
 fn normal_urgency() -> u8 {
@@ -327,6 +335,8 @@ fn normal_urgency() -> u8 {
 pub struct DaemonFlags {
     pub silent: bool,
     pub caffeinate: bool,
+    #[serde(default)]
+    pub game_mode: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

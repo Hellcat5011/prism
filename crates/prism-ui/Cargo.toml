@@ -17,3 +17,11 @@ xkbcommon = { version = "0.8", features = ["wayland"] }
 zbus = "5"
 blocking = "1"
 md5 = "0.7"
+# gnome-keyring prompter secret exchange (keyring_prompter.rs)
+num-bigint = "0.4"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+hkdf = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
