@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # install.sh — Build and install Prism for the current user
 #
-#   ./deploy/install.sh             build, install to ~/.local/bin, restart prismd if it runs
-#   ./deploy/install.sh --greeter   also install prism-lock to /usr/local/bin for the greetd
-#                                   greeter (asks for your password through sudo)
+#   ./deploy/install.sh               build, install to ~/.local/bin, restart prismd if it runs
+#   ./deploy/install.sh --greeter     also set up the greetd greeter without asking
+#   ./deploy/install.sh --no-greeter  never touch the greeter, and do not ask
+#   ./deploy/install.sh --yes         answer yes to every question (PATH, PAM, greeter)
 #
-# Nothing else outside your home directory is changed: the remaining system steps (PAM
-# service, greetd config) are printed at the end for you to run.
+# Run from a terminal, it asks before changing anything outside ~/.local: adding ~/.local/bin
+# to your shell's PATH, installing the lock screen's PAM service (sudo), and setting up the
+# greeter (sudo: prism-lock in /usr/local/bin, /var/lib/greetd/prism and the greetd config,
+# the old one backed up).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,20 +19,33 @@ SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/prism"
 BINARIES=(prismd prism-ui prism-ctl prism-lock prism-phoned prism-rec prism-video)
 
-GREETER=0
+GREETER=ask
+YES=0
 for arg in "$@"; do
     case "$arg" in
         --greeter) GREETER=1 ;;
-        -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --no-greeter) GREETER=0 ;;
+        -y|--yes) YES=1 ;;
+        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
     esac
 done
+
+# ask "question" y|n: the default is taken for an empty answer, and without a terminal.
+ask() {
+    local hint="[y/N]" reply
+    [ "$2" = y ] && hint="[Y/n]"
+    if [ "$YES" = 1 ]; then return 0; fi
+    if [ ! -t 0 ]; then [ "$2" = y ]; return; fi
+    read -r -p "$1 $hint " reply || reply=""
+    case "${reply:-$2}" in [yY]*) return 0 ;; *) return 1 ;; esac
+}
 
 echo "========================================================"
 echo "    Installing Prism (Rust Wayland desktop shell)       "
 echo "========================================================"
 
-echo "[1/6] Checking build dependencies..."
+echo "[1/7] Checking build dependencies..."
 missing=()
 command -v cargo >/dev/null 2>&1 || missing+=("cargo (Rust 1.77 or newer)")
 if command -v pkg-config >/dev/null 2>&1; then
@@ -68,19 +84,55 @@ if [ ${#missing[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "[2/6] Compiling (release)..."
+echo "[2/7] Compiling (release)..."
 cargo build --release --manifest-path "$REPO_DIR/Cargo.toml"
 
-echo "[3/6] Installing binaries to $BIN_DIR..."
+echo "[3/7] Installing binaries to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 for b in "${BINARIES[@]}"; do
     # install(1) writes a new file, so binaries that are running are replaced safely.
     install -m755 "$REPO_DIR/target/release/$b" "$BIN_DIR/$b"
 done
 echo "Installed: ${BINARIES[*]}"
+
+# prism-ctl must be found by name: from a terminal, and from the compositor's keybinds.
+# (Some distributions add ~/.local/bin to PATH at login only if it already existed then.)
+add_to_path() {
+    local line='export PATH="$HOME/.local/bin:$PATH"' shell rc
+    shell="$(basename "${SHELL:-bash}")"
+    case "$shell" in
+        zsh) rc="$HOME/.zshenv" ;;
+        fish) rc="" ;;
+        *) rc="$HOME/.bashrc" ;;
+    esac
+    # Login shells (which start the compositor from a TTY) read ~/.profile or ~/.bash_profile.
+    for f in "$rc" "$HOME/.profile" "$HOME/.bash_profile"; do
+        [ -n "$f" ] || continue
+        [ "$f" = "$rc" ] || [ -f "$f" ] || continue
+        grep -qs '\.local/bin' "$f" && grep -qs 'PATH' "$f" && continue
+        printf '\n# Added by the Prism installer\n%s\n' "$line" >> "$f"
+        echo "  added to $f"
+    done
+    if [ "$shell" = fish ] || [ -d "${XDG_CONFIG_HOME:-$HOME/.config}/fish" ]; then
+        local conf="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/prism-path.fish"
+        if [ ! -e "$conf" ]; then
+            mkdir -p "$(dirname "$conf")"
+            echo "fish_add_path -g $BIN_DIR  # Added by the Prism installer" > "$conf"
+            echo "  added $conf"
+        fi
+    fi
+}
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
-    *) echo "Note: $BIN_DIR is not in your PATH; compositor keybinds call prism-ctl from there." ;;
+    *)
+        echo "$BIN_DIR is not in your PATH: prism-ctl (terminal and compositor keybinds) would not be found."
+        if ask "Add it to your shell's PATH?" y; then
+            add_to_path
+            echo "  Open a new terminal (log out and in for the compositor) to use it."
+        else
+            echo "  Skipped: add $BIN_DIR to PATH yourself."
+        fi
+        ;;
 esac
 for b in prismd prism-ui prism-ctl; do
     if [ -e "/usr/local/bin/$b" ]; then
@@ -89,7 +141,7 @@ for b in prismd prism-ui prism-ctl; do
     fi
 done
 
-echo "[4/6] Installing helper scripts to $SHARE_DIR/scripts..."
+echo "[4/7] Installing helper scripts to $SHARE_DIR/scripts..."
 # Keybind parsers and the wallpaper depth generator; prismd and prism-ui look here.
 mkdir -p "$SHARE_DIR/scripts"
 install -m644 "$REPO_DIR"/scripts/*.py "$SHARE_DIR/scripts/"
@@ -97,7 +149,7 @@ install -m755 "$REPO_DIR"/scripts/*.sh "$SHARE_DIR/scripts/"
 # Replaced by the notification server in prismd.
 rm -f "$SHARE_DIR/scripts/prism-dbus-notif.py"
 
-echo "[5/6] Installing the systemd user service..."
+echo "[5/7] Installing the systemd user service..."
 mkdir -p "$SYSTEMD_USER_DIR"
 install -m644 "$SCRIPT_DIR/prismd.service" "$SYSTEMD_USER_DIR/prismd.service"
 if command -v systemctl >/dev/null 2>&1; then
@@ -111,16 +163,75 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
-echo "[6/6] Greeter binary..."
-if [ "$GREETER" = 1 ]; then
-    echo "Installing prism-lock to /usr/local/bin for the greetd greeter (sudo)..."
-    sudo install -m755 "$REPO_DIR/target/release/prism-lock" "$REPO_DIR/target/release/prism-video" /usr/local/bin/
-    echo "Installed prism-lock and prism-video to /usr/local/bin."
-elif [ -e /usr/local/bin/prism-lock ] && ! cmp -s "$REPO_DIR/target/release/prism-lock" /usr/local/bin/prism-lock; then
-    echo "The greeter's /usr/local/bin/prism-lock is from an older build; update it with:"
-    echo "  $0 --greeter"
+echo "[6/7] Lock screen PAM service..."
+# prism-lock unlocks through /etc/pam.d/prism, else the "login" service. Prism's file includes
+# system-local-login (Arch and derivatives); without that file it would refuse every password.
+PAM_OK=0
+if [ -e /etc/pam.d/prism ]; then
+    PAM_OK=1
+    echo "Installed (/etc/pam.d/prism)."
+elif [ ! -e /etc/pam.d/system-local-login ]; then
+    echo "Skipped: this system has no /etc/pam.d/system-local-login, so the lock screen uses 'login'."
+elif ask "Install the lock screen's PAM service /etc/pam.d/prism (sudo; otherwise 'login' is used)?" y; then
+    sudo install -Dm644 "$SCRIPT_DIR/pam.d/prism" /etc/pam.d/prism && PAM_OK=1
+    echo "Installed /etc/pam.d/prism."
 else
-    echo "Skipped (use --greeter to install prism-lock for greetd)."
+    echo "Skipped: the lock screen uses the 'login' PAM service."
+fi
+
+echo "[7/7] Greeter..."
+GREETER_BIN=/usr/local/bin/prism-lock
+GREETD_CONF=/etc/greetd/config.toml
+if [ "$GREETER" = ask ]; then
+    if [ -e "$GREETER_BIN" ]; then
+        # Set up before: only the binaries need to follow the session's build.
+        if cmp -s "$REPO_DIR/target/release/prism-lock" "$GREETER_BIN"; then
+            GREETER=0
+            echo "The greeter is up to date."
+        elif ask "The greeter ($GREETER_BIN) is from an older build. Update it (sudo)?" y; then
+            GREETER=1
+        else
+            GREETER=0
+        fi
+    elif ask "Also install the Prism login screen (greetd greeter under cage; needs sudo)?" n; then
+        GREETER=1
+    else
+        GREETER=0
+        echo "Skipped (run again with --greeter to set it up later)."
+    fi
+fi
+if [ "$GREETER" = 1 ]; then
+    missing=()
+    command -v greetd >/dev/null 2>&1 || [ -x /usr/bin/greetd ] || missing+=(greetd)
+    command -v cage >/dev/null 2>&1 || missing+=(cage)
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "The greeter needs: ${missing[*]}. Install it and run this again with --greeter." >&2
+    else
+        echo "Setting up the greeter (sudo)..."
+        sudo install -m755 "$REPO_DIR/target/release/prism-lock" "$REPO_DIR/target/release/prism-video" /usr/local/bin/
+        echo "  installed prism-lock and prism-video to /usr/local/bin"
+        # Your session copies the wallpaper, palette and settings here; the greeter reads them.
+        if [ ! -d /var/lib/greetd/prism ]; then
+            greeter_group=greeter
+            getent group greeter >/dev/null 2>&1 || greeter_group="$(id -gn)"
+            sudo install -d -m755 -o "$(id -un)" -g "$greeter_group" /var/lib/greetd/prism
+            echo "  created /var/lib/greetd/prism"
+        fi
+        if ! sudo grep -qs 'prism-lock' "$GREETD_CONF"; then
+            if sudo test -e "$GREETD_CONF"; then
+                backup="$GREETD_CONF.bak.$(date +%Y%m%d%H%M%S)"
+                sudo cp "$GREETD_CONF" "$backup"
+                echo "  backed up the old greetd config to $backup"
+            fi
+            sudo install -Dm644 "$SCRIPT_DIR/greetd/config.toml" "$GREETD_CONF"
+            echo "  installed $GREETD_CONF"
+        fi
+        if ! systemctl is-enabled --quiet greetd 2>/dev/null; then
+            echo "  greetd is not enabled. To switch to it, disable your current display manager"
+            echo "  (e.g. 'sudo systemctl disable sddm') and run 'sudo systemctl enable greetd'."
+        fi
+        echo "  Test it before rebooting: from a TTY run 'sudo systemctl restart greetd'."
+    fi
 fi
 
 echo ""
@@ -134,15 +245,11 @@ echo " - Theme: add the template in $SCRIPT_DIR/matugen/prism-colors.json to"
 echo "   ~/.config/matugen/config.toml as [templates.prism-rust], output ~/.config/prism/colors.json."
 echo " - Phone sync (KDE Connect app): allow UDP 1716 and TCP 1714-1764 through your firewall,"
 echo "   e.g. 'sudo ufw allow 1714:1764/udp && sudo ufw allow 1714:1764/tcp'."
-echo ""
-echo "Lock screen and greeter (run these yourself; they change system files):"
-echo " - PAM service for unlocking (otherwise 'login' is used):"
-echo "     sudo install -Dm644 $SCRIPT_DIR/pam.d/prism /etc/pam.d/prism"
+if [ "$PAM_OK" = 0 ] && [ -e /etc/pam.d/system-local-login ]; then
+    echo " - Lock screen PAM service (otherwise 'login' is used):"
+    echo "     sudo install -Dm644 $SCRIPT_DIR/pam.d/prism /etc/pam.d/prism"
+fi
 echo " - Check the lock screen accepts your password without locking anything:"
 echo "     prism-lock --check-auth"
-echo " - Greeter: install prism-lock for greetd ($0 --greeter), then greetd on cage:"
-echo "     sudo cp /etc/greetd/config.toml /etc/greetd/config.toml.bak"
-echo "     sudo install -m644 $SCRIPT_DIR/greetd/config.toml /etc/greetd/config.toml"
-echo "   Test before rebooting: from a TTY run 'sudo systemctl restart greetd'."
 echo ""
 echo "Installation completed successfully!"

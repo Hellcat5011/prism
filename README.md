@@ -196,9 +196,14 @@ The installer checks the build dependencies, builds the workspace and installs:
 - helper scripts to `~/.local/share/prism/scripts/`;
 - `prismd.service` to `~/.config/systemd/user/`.
 
-Run it again to update: it restarts `prismd` when it is running (apps you opened keep running). It changes
-nothing outside your home directory unless you pass `--greeter` (below). `prismd` starts `prism-ui` itself. Do not
-also start `prismd` from the compositor config.
+Run from a terminal, it asks whether to add `~/.local/bin` to your shell's PATH when it is missing (so `prism-ctl`
+works from a terminal and from compositor keybinds), whether to install the lock screen's PAM service, and, on the
+first install, whether to set up the login screen (greeter, below). Nothing outside your home directory changes unless you say yes there.
+`--greeter`, `--no-greeter` and `--yes` answer without asking.
+
+Run it again to update: it restarts `prismd` when it is running (apps you opened keep running) and offers to update
+the greeter when it is installed. `prismd` starts `prism-ui` itself. Do not also start `prismd` from the compositor
+config.
 
 ### Compositor
 
@@ -227,11 +232,10 @@ sudo install -Dm644 deploy/pam.d/prism /etc/pam.d/prism
 # Check your password works before relying on the lock screen
 prism-lock --check-auth
 
-# Greeter: greetd runs /usr/local/bin/prism-lock under cage (asks for your password through sudo;
-# run it again after updates so the greeter matches your session)
+# Greeter (needs greetd and cage): answer yes when the installer asks, or pass --greeter.
+# Through sudo it installs prism-lock to /usr/local/bin, /var/lib/greetd/prism
+# and deploy/greetd/config.toml as /etc/greetd/config.toml (the old one backed up)
 ./deploy/install.sh --greeter
-sudo cp /etc/greetd/config.toml /etc/greetd/config.toml.bak
-sudo install -m644 deploy/greetd/config.toml /etc/greetd/config.toml
 ```
 
 Test the greeter from a TTY (`sudo systemctl restart greetd`) before rebooting. The greeter reads the wallpaper,
