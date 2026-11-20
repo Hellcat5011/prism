@@ -34,6 +34,7 @@ const SPRING_HEIGHT: (f64, f64) = (0.18, 1.0);
 
 #[derive(Clone, Debug, PartialEq)]
 enum Kind {
+    Answer(crate::quick::Answer),
     App(DesktopApp),
     Folder(String),
     File(String),
@@ -72,6 +73,8 @@ pub struct SpotlightView {
     config: Config,
     query: Query,
     app_items: Vec<Item>,
+    /// Quick answers: results and commands above the sections, the web search below.
+    answers: Vec<Item>,
     folders: Vec<FileResult>,
     files: Vec<FileResult>,
     results: Vec<Item>,
@@ -110,6 +113,7 @@ impl SpotlightView {
             config,
             query: Query::default(),
             app_items: Vec::new(),
+            answers: Vec::new(),
             folders: Vec::new(),
             files: Vec::new(),
             results: Vec::new(),
@@ -173,6 +177,11 @@ impl SpotlightView {
     fn apply_filter(&mut self) {
         let q = self.q();
         self.generation += 1;
+        self.answers = if self.config.quick_answers {
+            crate::quick::answers(&q, !self.config.web_search_url.trim().is_empty()).into_iter().map(answer_item).collect()
+        } else {
+            Vec::new()
+        };
         if q.is_empty() {
             self.app_items.clear();
             self.folders.clear();
@@ -217,7 +226,8 @@ impl SpotlightView {
         };
         let sections = [!self.app_items.is_empty(), !folders.is_empty(), !files.is_empty()].iter().filter(|b| **b).count();
         let show_headers = sections >= 2;
-        let mut merged = Vec::new();
+        let (web, top): (Vec<Item>, Vec<Item>) = self.answers.iter().cloned().partition(|a| matches!(a.kind, Kind::Answer(crate::quick::Answer::Web(_))));
+        let mut merged = top;
         for sec in section_order(&c.search_section_order) {
             let src = match sec {
                 "apps" => &self.app_items,
@@ -232,6 +242,7 @@ impl SpotlightView {
                 merged.push(it);
             }
         }
+        merged.extend(web);
         let keep = (!reset).then(|| self.results.get(self.selected).map(|r| r.id.clone())).flatten();
         self.results = merged;
         self.selected = match keep {
@@ -287,6 +298,7 @@ impl SpotlightView {
             return Effect::None;
         }
         match &item.kind {
+            Kind::Answer(a) => a.run(shift, &self.config.web_search_url),
             Kind::App(app) => match app.launch() {
                 Ok(child) => crate::reap(child),
                 Err(e) => eprintln!("[prism-ui] cannot launch {}: {}", app.name, e),
@@ -436,6 +448,7 @@ impl SpotlightView {
             Kind::Folder(_) => "inode-directory",
             Kind::File(_) => "text-x-generic",
             Kind::App(_) => "application-x-executable",
+            Kind::Answer(_) => "system-search",
         };
         draw_icon(cr, &item.icon, fallback, row.x + 12.0, row.y + 11.0, 28.0);
         let tx = row.x + 12.0 + 28.0 + 12.0;
@@ -448,6 +461,9 @@ impl SpotlightView {
                     Kind::Folder(_) => "Shift+↵ Parent  ↵ Open",
                     Kind::File(_) => "Shift+↵ Folder  ↵ Open",
                     Kind::App(_) => "↵ Open",
+                    Kind::Answer(crate::quick::Answer::Value { .. }) => "↵ Copy",
+                    Kind::Answer(crate::quick::Answer::Command(_)) => "Shift+↵ Terminal  ↵ Run",
+                    Kind::Answer(crate::quick::Answer::Web(_)) => "↵ Search",
                 }
             };
             let hf = "Inter, Sans 10px";
@@ -563,6 +579,10 @@ fn section_order(s: &str) -> Vec<&'static str> {
         }
     }
     out
+}
+
+fn answer_item(a: crate::quick::Answer) -> Item {
+    Item { id: format!("quick:{}", a.title()), section: "", title: a.title(), subtitle: a.subtitle(), icon: a.icon().into(), kind: Kind::Answer(a) }
 }
 
 fn app_item(app: DesktopApp) -> Item {

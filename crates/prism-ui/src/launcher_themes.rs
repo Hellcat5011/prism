@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use prism_common::apps::{search_apps, DesktopApp};
+use prism_common::apps::DesktopApp;
 use prism_common::Theme;
 
 use crate::cairo_backend::{self as cb, Cairo};
@@ -259,12 +259,15 @@ impl Picker {
     }
 
     fn filter(&mut self) {
-        self.results = search_apps(&self.apps, &self.query.text);
+        self.results = crate::quick::launcher_results(&self.apps, &self.query.text);
         self.selected = 0;
     }
 
     fn launch(&self, i: usize) -> Effect {
         if let Some(app) = self.results.get(i) {
+            if crate::quick::launch_entry(app, false) {
+                return Effect::Close;
+            }
             match app.launch() {
                 Ok(child) => crate::reap(child),
                 Err(e) => eprintln!("[prism-ui] cannot launch {}: {}", app.name, e),
@@ -939,14 +942,28 @@ const CAIRO_FILTER_FAST: i32 = 0;
 /// and half height of the largest upright box inside it.
 fn deck_cover(pose: &Pose) -> Option<(f64, f64)> {
     let (sin, cos) = (pose.angle.abs().sin(), pose.angle.cos());
-    let (hw, hh) = (DECK_CARD.0 / 2.0 * pose.scale, DECK_CARD.1 / 2.0 * pose.scale);
+    // The card inset by its corner radius: that much is solid whatever the rounded corners.
+    let (hw, hh) = ((DECK_CARD.0 / 2.0 - 22.0) * pose.scale, (DECK_CARD.1 / 2.0 - 22.0) * pose.scale);
     let (w, h) = (hw * cos - hh * sin - 2.0, hh * cos - hw * sin - 2.0);
     (w > 0.0 && h > 0.0 && pose.alpha >= 0.999).then_some((w, h))
 }
 
 /// The screen around a covered box centred on (x, y): what is left to paint of the card behind.
-pub(crate) fn deck_uncovered(x: f64, y: f64, w: f64, h: f64) -> [Rect; 4] {
+/// The box is snapped inwards to whole device pixels, so the four parts meet on pixel edges: a
+/// fractional seam would be antialiased from both sides and show as a faint line.
+pub(crate) fn deck_uncovered(cr: *mut Cairo, x: f64, y: f64, w: f64, h: f64) -> [Rect; 4] {
     const FAR: f64 = 8000.0;
+    let (mut x0, mut y0, mut x1, mut y1) = (x - w, y - h, x + w, y + h);
+    unsafe {
+        cb::cairo_user_to_device(cr, &mut x0, &mut y0);
+        cb::cairo_user_to_device(cr, &mut x1, &mut y1);
+        let (mut a, mut b) = (x0.ceil(), y0.ceil());
+        let (mut c, mut d) = (x1.floor().max(a), y1.floor().max(b));
+        cb::cairo_device_to_user(cr, &mut a, &mut b);
+        cb::cairo_device_to_user(cr, &mut c, &mut d);
+        (x0, y0, x1, y1) = (a, b, c, d);
+    }
+    let (x, y, w, h) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (x1 - x0) / 2.0, (y1 - y0) / 2.0);
     [
         Rect { x: x - FAR, y: y - FAR, w: 2.0 * FAR, h: FAR - h },
         Rect { x: x - FAR, y: y + h, w: 2.0 * FAR, h: FAR - h },
@@ -1127,7 +1144,7 @@ impl CardView for DeckLauncher {
             let nearer = deck_pose(d - d.signum());
             match deck_cover(&nearer).filter(|_| d.abs() >= 1.0) {
                 Some((w, h)) => {
-                    for part in deck_uncovered(cx + nearer.x, cy + nearer.y, w, h) {
+                    for part in deck_uncovered(cr, cx + nearer.x, cy + nearer.y, w, h) {
                         unsafe {
                             cb::cairo_save(cr);
                             cb::cairo_rectangle(cr, part.x, part.y, part.w, part.h);

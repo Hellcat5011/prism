@@ -68,12 +68,32 @@ pub fn configure(wanted: bool, notify: bool, hours: u32, waker: &Waker) {
     }
 }
 
+/// pacman's log changes whenever packages are installed or upgraded.
+const PACMAN_LOG: &str = "/var/log/pacman.log";
+
+fn pacman_changed_at() -> Option<std::time::SystemTime> {
+    std::fs::metadata(PACMAN_LOG).and_then(|m| m.modified()).ok()
+}
+
+/// Checks once at start. With nothing to update it keeps checking every few hours. Once it has
+/// told the user, it goes idle: no more checks until the updates are installed (pacman's log
+/// changes, or an Update run finishes) or Prism restarts.
 fn run(waker: Waker) {
     // Let the session settle (network, mirrors) before the first check.
     std::thread::sleep(Duration::from_secs(60));
-    let mut notified = 0;
+    // Idle after a notification: the pacman log time when it was sent.
+    let mut idle_since: Option<Option<std::time::SystemTime>> = None;
+    let mut next_check = std::time::Instant::now();
     loop {
-        if WANTED.load(Ordering::Relaxed) {
+        let forced = std::mem::take(&mut *RECHECK.0.lock().unwrap());
+        if let Some(log_then) = idle_since {
+            // Installed since (or asked to look again): back to watching.
+            if forced || pacman_changed_at() != log_then {
+                idle_since = None;
+                next_check = std::time::Instant::now();
+            }
+        }
+        if idle_since.is_none() && WANTED.load(Ordering::Relaxed) && (forced || std::time::Instant::now() >= next_check) {
             if let Some(u) = check() {
                 let mut st = STATE.lock().unwrap();
                 if st.1 != Some(u) {
@@ -82,20 +102,19 @@ fn run(waker: Waker) {
                     drop(st);
                     waker.wake();
                 }
-                // Tell once per new batch (not again for the same or fewer).
-                if u.total() > notified && NOTIFY.load(Ordering::Relaxed) {
+                if u.total() > 0 && NOTIFY.load(Ordering::Relaxed) {
                     notify(u);
+                    idle_since = Some(pacman_changed_at());
                 }
-                notified = u.total();
             }
+            next_check = std::time::Instant::now() + Duration::from_secs(HOURS.load(Ordering::Relaxed) as u64 * 3600);
         }
+        // Idle or between checks: look at pacman's log (and for a recheck) every minute.
         let (lock, cv) = &RECHECK;
-        let hours = HOURS.load(Ordering::Relaxed) as u64;
-        let mut now = lock.lock().unwrap();
-        if !*now {
-            now = cv.wait_timeout(now, Duration::from_secs(hours * 3600)).unwrap().0;
+        let guard = lock.lock().unwrap();
+        if !*guard {
+            let _ = cv.wait_timeout(guard, Duration::from_secs(60)).unwrap();
         }
-        *now = false;
     }
 }
 

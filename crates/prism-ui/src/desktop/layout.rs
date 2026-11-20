@@ -21,11 +21,26 @@ pub enum WidgetId {
     Phone,
     Batteries,
     Cat,
+    Weather,
+    Notes,
+    Timer,
 }
 
 impl WidgetId {
-    pub const ALL: [WidgetId; 9] =
-        [WidgetId::Mpris, WidgetId::Tray, WidgetId::Clock, WidgetId::Calendar, WidgetId::AnalogClock, WidgetId::Shortcuts, WidgetId::Phone, WidgetId::Batteries, WidgetId::Cat];
+    pub const ALL: [WidgetId; 12] = [
+        WidgetId::Mpris,
+        WidgetId::Tray,
+        WidgetId::Clock,
+        WidgetId::Calendar,
+        WidgetId::AnalogClock,
+        WidgetId::Shortcuts,
+        WidgetId::Phone,
+        WidgetId::Batteries,
+        WidgetId::Cat,
+        WidgetId::Weather,
+        WidgetId::Notes,
+        WidgetId::Timer,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -38,6 +53,9 @@ impl WidgetId {
             WidgetId::Phone => "Phone",
             WidgetId::Batteries => "Batteries",
             WidgetId::Cat => "Cat",
+            WidgetId::Weather => "Weather",
+            WidgetId::Notes => "Notes",
+            WidgetId::Timer => "Timer",
         }
     }
 
@@ -52,6 +70,9 @@ impl WidgetId {
             WidgetId::Phone => (240.0, 100.0),
             WidgetId::Batteries => (200.0, 64.0),
             WidgetId::Cat => (120.0, 100.0),
+            WidgetId::Weather => (220.0, 90.0),
+            WidgetId::Notes => (160.0, 100.0),
+            WidgetId::Timer => (200.0, 90.0),
         }
     }
 
@@ -66,6 +87,9 @@ impl WidgetId {
             WidgetId::Phone => &l.phone,
             WidgetId::Batteries => &l.batteries,
             WidgetId::Cat => &l.cat,
+            WidgetId::Weather => &l.weather,
+            WidgetId::Notes => &l.notes,
+            WidgetId::Timer => &l.timer,
         }
     }
 
@@ -80,6 +104,9 @@ impl WidgetId {
             WidgetId::Phone => &mut l.phone,
             WidgetId::Batteries => &mut l.batteries,
             WidgetId::Cat => &mut l.cat,
+            WidgetId::Weather => &mut l.weather,
+            WidgetId::Notes => &mut l.notes,
+            WidgetId::Timer => &mut l.timer,
         }
     }
 }

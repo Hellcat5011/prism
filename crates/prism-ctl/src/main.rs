@@ -20,6 +20,10 @@ Targets & Commands:
   theme [reload|palette]
   notif [list|clear|send <summary> [body]|toggle|open|close|silent [on|off]|state]
   caffeinate [on|off]
+  notes [toggle|open|close]         the Notes card
+  timer [start <5m|90s|1h30m>|add <1m>|pause|resume|cancel|status]
+  stopwatch [toggle|reset]
+  switcher [next|prev|show|close]   window switcher (bind next/prev to Alt+Tab / Alt+Shift+Tab)
   gamemode [on|off]                 silent, performance profile, no animations or blur
   osd volume [+<step>%|-<step>%|mute|<value>]
   osd brightness [+<step>%|-<step>%|<value>]
@@ -33,7 +37,7 @@ Targets & Commands:
   bluetooth [status|toggle]
   keybinds [list|toggle|open|close]
   lock [lock|unlock|status]
-  screenshot [toggle|region|window|screen [--no-save] [--no-clipboard]|open <mode>|close|record|stop|status]
+  screenshot [toggle|region|window|text|screen [--no-save] [--no-clipboard]|open <mode>|close|record|stop|status]
   phone [toggle|open|close|status|refresh|connect <ip>|pair|unpair|accept|reject [device]
          |ping|ring|clipboard [text]|media [play|pause|next|previous]
          |send <file>...|send --text <text>|send --url <url>]
@@ -161,6 +165,30 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
             Ok(IpcCommand::Notif(act))
         }
         "caffeinate" => Ok(IpcCommand::Caffeinate(on_off(args.get(1)))),
+        "timer" => {
+            use prism_common::ipc::{parse_duration, TimerAction as T};
+            let arg = args.get(2).map(String::as_str).unwrap_or("");
+            let act = match args.get(1).map(String::as_str) {
+                Some("start") => T::Start(parse_duration(arg).ok_or("usage: prism-ctl timer start <5m|90s|1h30m|2:30>")?),
+                Some("add") => T::Add(parse_duration(arg.trim_start_matches('-')).ok_or("usage: prism-ctl timer add <1m>")? as i64 * if arg.starts_with('-') { -1 } else { 1 }),
+                Some("pause") => T::Pause,
+                Some("resume") => T::Resume,
+                Some("cancel") | Some("stop") => T::Cancel,
+                None | Some("status") => T::State,
+                Some(d) => T::Start(parse_duration(d).ok_or_else(|| format!("unknown timer action '{d}'"))?),
+            };
+            Ok(IpcCommand::Timer(act))
+        }
+        "stopwatch" => {
+            use prism_common::ipc::TimerAction as T;
+            Ok(IpcCommand::Timer(match args.get(1).map(String::as_str) {
+                Some("reset") => T::StopwatchReset,
+                None | Some("toggle") | Some("start") | Some("pause") => T::StopwatchToggle,
+                Some(other) => return Err(format!("unknown stopwatch action '{other}'")),
+            }))
+        }
+        "notes" => Ok(IpcCommand::Notes(args.get(1).cloned().unwrap_or_else(|| "toggle".into()))),
+        "switcher" => Ok(IpcCommand::Switcher(args.get(1).cloned().unwrap_or_else(|| "next".into()))),
         "gamemode" | "game-mode" => Ok(IpcCommand::GameMode(on_off(args.get(1)))),
         "clipboard" => {
             let act = match action_str {
@@ -379,6 +407,7 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 Some("close") => A::Close,
                 Some("region") => A::Open("region".into()),
                 Some("window") => A::Open("window".into()),
+                Some("text") | Some("ocr") => A::Open("text".into()),
                 Some("screen") | Some("output") => A::Screen { save: !flag("--no-save"), clipboard: !flag("--no-clipboard") },
                 Some("record") => A::Record,
                 Some("stop") => A::Stop,

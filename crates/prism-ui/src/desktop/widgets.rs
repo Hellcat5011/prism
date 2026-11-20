@@ -73,6 +73,12 @@ pub enum Hit {
     PhoneRing,
     PhonePlayPause,
     PhoneNext,
+    /// The Notes widget: open the editor.
+    NotesOpen,
+    /// The Weather widget: fetch again.
+    WeatherRefresh,
+    /// Timer widget buttons.
+    Timer(TimerButton),
 }
 
 pub type Hits = Vec<(Hit, Rect)>;
@@ -1030,4 +1036,171 @@ pub fn draw_batteries(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: 
         draw_in_box(cr, &more, &TextStyle { family: &family, px: 13.0, bold: true, color: muted }, r.x, r.y, r.w, r.h, Align::Center);
     }
     Hits::new()
+}
+
+/// Weather widget: glyph, temperature and conditions, the place, and three days ahead when tall
+/// enough. Click to fetch again.
+pub fn draw_weather(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, data: &(Option<crate::weather::Weather>, Option<String>)) -> Hits {
+    const PAD: f64 = 16.0;
+    draw_background(cr, w, h, look, p.transparent_bg);
+    let family = look.family_for(&p.font_family);
+    let muted = (look.fg.0, look.fg.1, look.fg.2, 0.65);
+    let hits = vec![(Hit::WeatherRefresh, Rect { x: 0.0, y: 0.0, w, h })];
+    let Some(wx) = &data.0 else {
+        let msg = data.1.clone().unwrap_or_else(|| "Loading weather\u{2026}".into());
+        draw_in_box(cr, &msg, &TextStyle { family: &family, px: 13.0, bold: true, color: muted }, PAD, 0.0, w - 2.0 * PAD, h, Align::Center);
+        return hits;
+    };
+    let (desc, glyph) = crate::weather::describe(wx.code);
+    let show_days = h >= 150.0 && !wx.days.is_empty();
+    let top_h = if show_days { h - 64.0 } else { h };
+    let g = (top_h - 2.0 * PAD).clamp(32.0, 64.0);
+    crate::svg::draw_path(cr, crate::weather::glyph_path(glyph, wx.is_day), PAD, (top_h - g) / 2.0, g, look.fg, Some(1.8));
+    let tx = PAD + g + 14.0;
+    let temp = format!("{:.0}{}", wx.temp, wx.unit);
+    draw_in_box(cr, &temp, &TextStyle { family: &family, px: 34.0, bold: true, color: look.fg }, tx, top_h / 2.0 - 40.0, w - tx - PAD, 44.0, Align::Start);
+    let line = if wx.place.is_empty() { format!("{desc} \u{b7} feels {:.0}\u{b0}", wx.feels) } else { format!("{desc} \u{b7} {}", wx.place) };
+    draw_in_box(cr, &line, &TextStyle { family: &family, px: 13.0, bold: false, color: muted }, tx, top_h / 2.0 + 6.0, w - tx - PAD, 20.0, Align::Start);
+    if show_days {
+        let n = wx.days.len().min(3) as f64;
+        let cw = (w - 2.0 * PAD) / n;
+        let y = h - 64.0;
+        fill_rounded_rect(cr, PAD, y - 2.0, w - 2.0 * PAD, 1.0, 0.0, (look.fg.0, look.fg.1, look.fg.2, 0.12));
+        for (i, d) in wx.days.iter().take(3).enumerate() {
+            let x = PAD + i as f64 * cw;
+            draw_in_box(cr, &d.name, &TextStyle { family: &family, px: 12.0, bold: true, color: muted }, x, y + 6.0, cw * 0.4, 20.0, Align::Start);
+            let (_, gl) = crate::weather::describe(d.code);
+            crate::svg::draw_path(cr, crate::weather::glyph_path(gl, true), x, y + 30.0, 20.0, look.fg, Some(1.8));
+            let range = format!("{:.0}\u{b0} / {:.0}\u{b0}", d.max, d.min);
+            draw_in_box(cr, &range, &TextStyle { family: &family, px: 12.0, bold: false, color: look.fg }, x + 26.0, y + 30.0, cw - 30.0, 20.0, Align::Start);
+        }
+    }
+    hits
+}
+
+/// Notes widget: the note's text, as much as fits. Click to edit.
+pub fn draw_notes(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, text: &str) -> Hits {
+    const PAD: f64 = 16.0;
+    draw_background(cr, w, h, look, p.transparent_bg);
+    let family = look.family_for(&p.font_family);
+    let muted = (look.fg.0, look.fg.1, look.fg.2, 0.6);
+    draw_in_box(cr, "Notes", &TextStyle { family: &family, px: 12.0, bold: true, color: muted }, PAD, PAD - 4.0, w - 2.0 * PAD, 18.0, Align::Start);
+    let body = if text.trim().is_empty() { "Click to write a note." } else { text };
+    let color = if text.trim().is_empty() { muted } else { look.fg };
+    let lines = (((h - PAD - 22.0 - PAD) / 19.0).floor() as i32).max(1);
+    draw_pango_text_wrapped(cr, PAD, PAD + 20.0, body, &format!("{family} 14px"), color, (w - 2.0 * PAD) as i32, Some(lines));
+    vec![(Hit::NotesOpen, Rect { x: 0.0, y: 0.0, w, h })]
+}
+
+/// A button on the Timer widget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimerButton {
+    Preset(u32),
+    Add,
+    PauseResume,
+    Cancel,
+    Stopwatch,
+    StopwatchReset,
+}
+
+impl TimerButton {
+    pub fn action(self, t: &prism_common::ipc::TimerState) -> prism_common::ipc::TimerAction {
+        use prism_common::ipc::TimerAction as A;
+        match self {
+            TimerButton::Preset(s) => A::Start(s as u64),
+            TimerButton::Add => A::Add(60),
+            TimerButton::PauseResume if t.end_ms.is_some() => A::Pause,
+            TimerButton::PauseResume => A::Resume,
+            TimerButton::Cancel => A::Cancel,
+            TimerButton::Stopwatch => A::StopwatchToggle,
+            TimerButton::StopwatchReset => A::StopwatchReset,
+        }
+    }
+}
+
+/// Timer widget: the countdown in a ring that empties, its buttons (or presets when none is
+/// set), and the stopwatch underneath when there is room.
+pub fn draw_timer(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, t: &prism_common::ipc::TimerState, hovered: Option<Hit>) -> Hits {
+    const PAD: f64 = 14.0;
+    draw_background(cr, w, h, look, p.transparent_bg);
+    let family = look.family_for(&p.font_family);
+    let muted = (look.fg.0, look.fg.1, look.fg.2, 0.6);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let left = t.remaining(now);
+    let show_sw = h >= 130.0;
+    let top_h = if show_sw { h - 44.0 } else { h };
+    let ring = ((top_h - 2.0 * PAD) / 2.0).clamp(24.0, 56.0);
+    let (cx, cy) = (PAD + ring, top_h / 2.0);
+    let frac = match left {
+        Some(l) if t.total_ms > 0 => (l as f64 / t.total_ms as f64).clamp(0.0, 1.0),
+        _ => 0.0,
+    };
+    stroke_circle(cr, cx, cy, ring, (look.fg.0, look.fg.1, look.fg.2, 0.15), 5.0);
+    if frac > 0.0 {
+        unsafe {
+            cairo_save(cr);
+            cairo_set_line_width(cr, 5.0);
+            let c = look.primary;
+            cairo_set_source_rgba(cr, c.0, c.1, c.2, 1.0);
+            let a0 = -std::f64::consts::FRAC_PI_2;
+            cairo_new_path(cr);
+            cairo_arc(cr, cx, cy, ring, a0, a0 + frac * std::f64::consts::TAU);
+            cairo_stroke(cr);
+            cairo_restore(cr);
+        }
+    }
+    let text = left.map(prism_common::ipc::clock_text).unwrap_or_else(|| "00:00".into());
+    let px = (ring * 0.42).clamp(13.0, 24.0);
+    draw_in_box(cr, &text, &TextStyle { family: &family, px, bold: true, color: if left.is_some() { look.fg } else { muted } }, cx - ring, cy - px, ring * 2.0, px * 2.0, Align::Center);
+    let mut hits = Hits::new();
+    let bx = cx + ring + 14.0;
+    let bw_total = w - bx - PAD;
+    let buttons: Vec<(String, TimerButton)> = if left.is_some() {
+        let pr = if t.end_ms.is_some() { "Pause" } else { "Resume" };
+        vec![(pr.into(), TimerButton::PauseResume), ("+1 min".into(), TimerButton::Add), ("Cancel".into(), TimerButton::Cancel)]
+    } else {
+        [5u32, 10, 25].iter().map(|m| (format!("{m} min"), TimerButton::Preset(m * 60))).collect()
+    };
+    if bw_total > 60.0 {
+        let n = buttons.len() as f64;
+        let bh = 28.0;
+        let gap = 6.0;
+        let total_h = n * bh + (n - 1.0) * gap;
+        let mut y = cy - total_h / 2.0;
+        for (label, b) in buttons {
+            let r = Rect { x: bx, y, w: bw_total, h: bh };
+            let hov = hovered == Some(Hit::Timer(b));
+            fill_rounded_rect(cr, r.x, r.y, r.w, r.h, bh / 2.0, (look.fg.0, look.fg.1, look.fg.2, if hov { 0.24 } else { 0.12 }));
+            draw_in_box(cr, &label, &TextStyle { family: &family, px: 12.0, bold: true, color: look.fg }, r.x, r.y, r.w, r.h, Align::Center);
+            hits.push((Hit::Timer(b), r));
+            y += bh + gap;
+        }
+    }
+    if show_sw {
+        let y = h - 40.0;
+        fill_rounded_rect(cr, PAD, y - 4.0, w - 2.0 * PAD, 1.0, 0.0, (look.fg.0, look.fg.1, look.fg.2, 0.12));
+        let ms = t.stopwatch(now);
+        draw_in_box(cr, "Stopwatch", &TextStyle { family: &family, px: 12.0, bold: true, color: muted }, PAD, y, 90.0, 28.0, Align::Start);
+        let sw = prism_common::ipc::clock_text(ms);
+        draw_in_box(cr, &sw, &TextStyle { family: &family, px: 16.0, bold: true, color: if ms > 0 { look.fg } else { muted } }, PAD + 86.0, y, 90.0, 28.0, Align::Start);
+        let go = if t.sw_start_ms.is_some() { "Pause" } else if ms > 0 { "Resume" } else { "Start" };
+        let mut x = w - PAD;
+        for (label, b) in [("Reset", TimerButton::StopwatchReset), (go, TimerButton::Stopwatch)] {
+            if b == TimerButton::StopwatchReset && ms == 0 {
+                continue;
+            }
+            let bw = 62.0;
+            x -= bw;
+            let r = Rect { x, y, w: bw, h: 26.0 };
+            if r.x < PAD + 170.0 {
+                break;
+            }
+            let hov = hovered == Some(Hit::Timer(b));
+            fill_rounded_rect(cr, r.x, r.y, r.w, r.h, 13.0, (look.fg.0, look.fg.1, look.fg.2, if hov { 0.24 } else { 0.12 }));
+            draw_in_box(cr, label, &TextStyle { family: &family, px: 12.0, bold: true, color: look.fg }, r.x, r.y, r.w, r.h, Align::Center);
+            hits.push((Hit::Timer(b), r));
+            x -= 6.0;
+        }
+    }
+    hits
 }

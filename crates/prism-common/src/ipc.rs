@@ -76,6 +76,8 @@ pub enum UiCommand {
     GameMode(bool),
     /// Screen colour picker: "toggle", "open" or "close".
     ColorPicker(String),
+    /// Window switcher: "next", "prev" or "close".
+    Switcher(String),
     /// Screen capture overlay and instant screenshots (prism-ui).
     Capture(CaptureAction),
     /// Recording state for the indicator: Some while prism-rec runs, None when it stopped.
@@ -191,6 +193,18 @@ pub enum IpcCommand {
     /// Game mode (silent, performance power profile, no animations or blur): on, off, toggle.
     #[serde(rename = "game_mode")]
     GameMode(Option<bool>),
+
+    /// Window switcher (Alt+Tab): "next", "prev" or "close".
+    #[serde(rename = "switcher")]
+    Switcher(String),
+
+    /// The Notes card: "toggle", "open" or "close".
+    #[serde(rename = "notes")]
+    Notes(String),
+
+    /// Timer and stopwatch.
+    #[serde(rename = "timer")]
+    Timer(TimerAction),
 
     /// Phone sync: forwarded to prism-phoned.
     #[serde(rename = "phone")]
@@ -337,6 +351,90 @@ pub struct DaemonFlags {
     pub caffeinate: bool,
     #[serde(default)]
     pub game_mode: bool,
+    #[serde(default)]
+    pub timer: TimerState,
+}
+
+/// The timer and stopwatch (kept by prismd; times are Unix milliseconds, so every reader
+/// counts the same way).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+pub struct TimerState {
+    /// A running countdown ends at this time.
+    pub end_ms: Option<i64>,
+    /// A paused countdown has this much left.
+    pub paused_ms: Option<i64>,
+    /// The countdown's length (for progress).
+    pub total_ms: i64,
+    /// The stopwatch runs since this time ...
+    pub sw_start_ms: Option<i64>,
+    /// ... on top of what it counted before (pauses).
+    pub sw_acc_ms: i64,
+}
+
+impl TimerState {
+    /// Countdown time left, if one is set (running or paused).
+    pub fn remaining(&self, now_ms: i64) -> Option<i64> {
+        self.end_ms.map(|e| (e - now_ms).max(0)).or(self.paused_ms)
+    }
+
+    pub fn stopwatch(&self, now_ms: i64) -> i64 {
+        self.sw_acc_ms + self.sw_start_ms.map(|s| (now_ms - s).max(0)).unwrap_or(0)
+    }
+
+    /// Something is counting (the view redraws every second).
+    pub fn ticking(&self) -> bool {
+        self.end_ms.is_some() || self.sw_start_ms.is_some()
+    }
+}
+
+/// "mm:ss", or "h:mm:ss" from an hour.
+pub fn clock_text(ms: i64) -> String {
+    let s = (ms.max(0) + 999) / 1000;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{:02}:{:02}", s / 60, s % 60) }
+}
+
+/// "5m", "90s", "1h30m", "2:30" or a bare number of minutes, in seconds.
+pub fn parse_duration(s: &str) -> Option<u64> {
+    let s = s.trim().to_lowercase();
+    if let Some((m, sec)) = s.split_once(':') {
+        return Some(m.parse::<u64>().ok()? * 60 + sec.parse::<u64>().ok()?);
+    }
+    if let Ok(m) = s.parse::<u64>() {
+        return Some(m * 60);
+    }
+    let (mut total, mut num) = (0u64, String::new());
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else {
+            let n: u64 = num.parse().ok()?;
+            num.clear();
+            total += n * match c {
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                _ => return None,
+            };
+        }
+    }
+    num.is_empty().then_some(total).filter(|t| *t > 0)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimerAction {
+    /// Count down this many seconds.
+    Start(u64),
+    /// Add (or take off) seconds.
+    Add(i64),
+    Pause,
+    Resume,
+    Cancel,
+    /// Start or pause the stopwatch.
+    StopwatchToggle,
+    StopwatchReset,
+    /// JSON `TimerState`.
+    State,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -547,5 +645,22 @@ pub fn request(cmd: &IpcCommand) -> Result<Option<String>, String> {
     match serde_json::from_str::<IpcResponse>(&line).map_err(|e| e.to_string())? {
         IpcResponse::Ok(v) => Ok(v),
         IpcResponse::Error(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("5m"), Some(300));
+        assert_eq!(parse_duration("90s"), Some(90));
+        assert_eq!(parse_duration("1h30m"), Some(5400));
+        assert_eq!(parse_duration("2:30"), Some(150));
+        assert_eq!(parse_duration("10"), Some(600));
+        assert_eq!(parse_duration("x"), None);
+        assert_eq!(clock_text(61_000), "01:01");
+        assert_eq!(clock_text(3_600_000), "1:00:00");
     }
 }

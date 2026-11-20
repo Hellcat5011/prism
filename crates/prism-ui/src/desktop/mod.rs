@@ -283,6 +283,9 @@ pub struct Desktop {
     phone_seen: u64,
     /// device_battery generation the Batteries widget was last drawn for.
     batteries_seen: u64,
+    weather_seen: u64,
+    notes_seen: u64,
+    timer_seen: (u64, i64),
 }
 
 impl Desktop {
@@ -291,6 +294,8 @@ impl Desktop {
         let qh = queue.handle();
         crate::phone_client::start(waker.clone());
         crate::device_battery::start(waker.clone());
+        crate::weather::start(waker.clone());
+        crate::notes::watch(waker.clone());
         let dbus = dbus::spawn(waker.clone());
 
         let config = Config::load();
@@ -382,6 +387,9 @@ impl Desktop {
             icon_gen: crate::icons::generation(),
             phone_seen: 0,
             batteries_seen: 0,
+            weather_seen: 0,
+            notes_seen: 0,
+            timer_seen: (0, 0),
         })
     }
 
@@ -427,6 +435,24 @@ impl Desktop {
         if batteries_gen != self.batteries_seen {
             self.batteries_seen = batteries_gen;
             d.mark(WidgetId::Batteries, &qh);
+        }
+        let weather_gen = crate::weather::generation();
+        if weather_gen != self.weather_seen {
+            self.weather_seen = weather_gen;
+            d.mark(WidgetId::Weather, &qh);
+        }
+        // The Timer widget: new state, or a second gone by while it counts.
+        crate::timer_client::set_wanted(d.config.desktop_layout.timer.visible, &d.waker);
+        let timer = crate::timer_client::snapshot();
+        let timer_key = (crate::timer_client::generation(), if timer.ticking() { now_secs() } else { 0 });
+        if timer_key != self.timer_seen {
+            self.timer_seen = timer_key;
+            d.mark(WidgetId::Timer, &qh);
+        }
+        let notes_gen = crate::notes::generation();
+        if notes_gen != self.notes_seen {
+            self.notes_seen = notes_gen;
+            d.mark(WidgetId::Notes, &qh);
         }
         let now = LocalTime::now();
         if now.minute != self.last_minute {
@@ -808,6 +834,15 @@ impl Desk {
                 cat::draw(cr, w, h, &self.look, &mut self.cat);
                 Vec::new()
             }
+            WidgetId::Weather => widgets::draw_weather(cr, w, h, &p, &self.look, &crate::weather::snapshot()),
+            WidgetId::Notes => widgets::draw_notes(cr, w, h, &p, &self.look, &crate::notes::text()),
+            WidgetId::Timer => {
+                let hovered = match self.ptr_on {
+                    PointerOn::Widget(WidgetId::Timer) => self.hover_hit,
+                    _ => None,
+                };
+                widgets::draw_timer(cr, w, h, &p, &self.look, &crate::timer_client::snapshot(), hovered)
+            }
         };
         // Only widgets sent to the background pass behind the wallpaper scenery (QML DepthMask).
         if p.send_to_background {
@@ -1034,6 +1069,13 @@ impl Desk {
                             }
                         });
                     }
+                    Hit::NotesOpen => {
+                        if let Ok(c) = std::process::Command::new("prism-ctl").args(["notes", "toggle"]).spawn() {
+                            crate::reap(c);
+                        }
+                    }
+                    Hit::WeatherRefresh => crate::weather::refresh(),
+                    Hit::Timer(b) => crate::timer_client::send(b.action(&crate::timer_client::snapshot())),
                     Hit::PhoneCard => {
                         if let Ok(c) = std::process::Command::new("prism-ctl").args(["phone", "toggle"]).spawn() {
                             crate::reap(c);
@@ -1732,3 +1774,7 @@ ignore_events!(
     WpViewporter,
     WpViewport
 );
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}

@@ -701,7 +701,7 @@ impl PowerView {
             let nearer = card_pose(d - d.signum());
             match card_cover(&nearer).filter(|_| d.abs() >= 1.0) {
                 Some((w, h)) => {
-                    for part in crate::launcher_themes::deck_uncovered(cx + nearer.x, cy + nearer.y, w, h) {
+                    for part in crate::launcher_themes::deck_uncovered(cr, cx + nearer.x, cy + nearer.y, w, h) {
                         unsafe {
                             cb::cairo_save(cr);
                             cb::cairo_rectangle(cr, part.x, part.y, part.w, part.h);
@@ -744,7 +744,8 @@ impl PowerView {
 /// and half height of the largest upright box inside it.
 fn card_cover(pose: &Pose) -> Option<(f64, f64)> {
     let (sin, cos) = (pose.angle.abs().sin(), pose.angle.cos());
-    let (hw, hh) = (CARD_FACE.0 / 2.0 * pose.scale, CARD_FACE.1 / 2.0 * pose.scale);
+    // The card inset by its corner radius: that much is solid whatever the rounded corners.
+    let (hw, hh) = ((CARD_FACE.0 / 2.0 - 22.0) * pose.scale, (CARD_FACE.1 / 2.0 - 22.0) * pose.scale);
     let (w, h) = (hw * cos - hh * sin - 2.0, hh * cos - hw * sin - 2.0);
     (w > 0.0 && h > 0.0).then_some((w, h))
 }

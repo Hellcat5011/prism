@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use prism_common::apps::{search_apps, DesktopApp};
+use prism_common::apps::DesktopApp;
 use prism_common::Theme;
 
 use crate::cairo_backend::{self as cb, Cairo};
@@ -229,7 +229,7 @@ impl LauncherView {
     }
 
     fn apply_filter(&mut self) {
-        self.results = search_apps(&self.apps, &self.query.text);
+        self.results = crate::quick::launcher_results(&self.apps, &self.query.text);
         self.selected = 0;
         self.scroll.reset(0.0);
         self.glide.reset();
@@ -237,6 +237,9 @@ impl LauncherView {
 
     fn launch(&self, i: usize) -> Effect {
         if let Some(app) = self.results.get(i) {
+            if crate::quick::launch_entry(app, false) {
+                return Effect::Close;
+            }
             match app.launch() {
                 Ok(child) => crate::reap(child),
                 Err(e) => eprintln!("[prism-ui] cannot launch {}: {}", app.name, e),

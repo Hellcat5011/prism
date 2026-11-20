@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+mod battery;
 mod bluelight;
 mod config_watch;
 mod depth;
@@ -55,6 +56,86 @@ fn lock_state(state: &Mutex<DaemonState>) -> std::sync::MutexGuard<'_, DaemonSta
 /// re-apply it when prism-ui restarts.
 static CAFFEINATE: AtomicBool = AtomicBool::new(false);
 
+/// Timer and stopwatch (shown in the Control Centre, `prism-ctl timer`).
+static TIMER: Mutex<prism_common::ipc::TimerState> = Mutex::new(prism_common::ipc::TimerState { end_ms: None, paused_ms: None, total_ms: 0, sw_start_ms: None, sw_acc_ms: 0 });
+static TIMER_WATCH: std::sync::Once = std::sync::Once::new();
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Apply a timer action; returns the new state.
+fn timer_action(a: prism_common::ipc::TimerAction) -> prism_common::ipc::TimerState {
+    use prism_common::ipc::TimerAction as A;
+    let now = now_ms();
+    let mut t = TIMER.lock().unwrap();
+    match a {
+        A::Start(secs) => {
+            let ms = secs.max(1) as i64 * 1000;
+            (t.end_ms, t.paused_ms, t.total_ms) = (Some(now + ms), None, ms);
+        }
+        A::Add(secs) => {
+            let d = secs * 1000;
+            if let Some(e) = t.end_ms.as_mut() {
+                *e = (*e + d).max(now + 1000);
+                t.total_ms = (t.total_ms + d).max(1000);
+            } else if let Some(p) = t.paused_ms.as_mut() {
+                *p = (*p + d).max(1000);
+                t.total_ms = (t.total_ms + d).max(1000);
+            } else if d > 0 {
+                (t.end_ms, t.total_ms) = (Some(now + d), d);
+            }
+        }
+        A::Pause => {
+            if let Some(e) = t.end_ms.take() {
+                t.paused_ms = Some((e - now).max(0));
+            }
+        }
+        A::Resume => {
+            if let Some(p) = t.paused_ms.take() {
+                t.end_ms = Some(now + p);
+            }
+        }
+        A::Cancel => (t.end_ms, t.paused_ms, t.total_ms) = (None, None, 0),
+        A::StopwatchToggle => match t.sw_start_ms.take() {
+            Some(s) => t.sw_acc_ms += now - s,
+            None => t.sw_start_ms = Some(now),
+        },
+        A::StopwatchReset => (t.sw_start_ms, t.sw_acc_ms) = (None, 0),
+        A::State => {}
+    }
+    let state = *t;
+    drop(t);
+    TIMER_WATCH.call_once(|| {
+        thread::spawn(|| loop {
+            thread::sleep(Duration::from_millis(250));
+            let fired = {
+                let mut t = TIMER.lock().unwrap();
+                match t.end_ms {
+                    Some(e) if e <= now_ms() => {
+                        (t.end_ms, t.paused_ms) = (None, None);
+                        Some(t.total_ms)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(total) = fired {
+                play_notification_sound();
+                let body = format!("Your {} timer is done.", prism_common::ipc::clock_text(total));
+                thread::spawn(move || {
+                    if let Ok(c) = zbus::blocking::Connection::session() {
+                        let mut hints: std::collections::HashMap<&str, zbus::zvariant::Value> = std::collections::HashMap::new();
+                        hints.insert("urgency", zbus::zvariant::Value::U8(2));
+                        const D: &str = "org.freedesktop.Notifications";
+                        let _ = c.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Timer", 0u32, "alarm-symbolic", "Time's up", body.as_str(), Vec::<&str>::new(), hints, -1i32));
+                    }
+                });
+            }
+        });
+    });
+    state
+}
+
 /// Game mode, and what it changed (silent mode, power profile) to put back afterwards.
 static GAME_MODE: AtomicBool = AtomicBool::new(false);
 static GAME_RESTORE: Mutex<Option<(bool, Option<String>)>> = Mutex::new(None);
@@ -62,13 +143,13 @@ static GAME_RESTORE: Mutex<Option<(bool, Option<String>)>> = Mutex::new(None);
 const PPD: &str = "org.freedesktop.UPower.PowerProfiles";
 const PPD_PATH: &str = "/org/freedesktop/UPower/PowerProfiles";
 
-fn power_profile() -> Option<String> {
+pub(crate) fn power_profile() -> Option<String> {
     let c = zbus::blocking::Connection::system().ok()?;
     let p = zbus::blocking::Proxy::new(&c, PPD, PPD_PATH, PPD).ok()?;
     p.get_property::<String>("ActiveProfile").ok()
 }
 
-fn set_power_profile(profile: &str) {
+pub(crate) fn set_power_profile(profile: &str) {
     let r = zbus::blocking::Connection::system()
         .and_then(|c| zbus::blocking::Proxy::new(&c, PPD, PPD_PATH, PPD).and_then(|p| p.set_property("ActiveProfile", profile).map_err(zbus::Error::from)));
     if let Err(e) = r {
@@ -100,6 +181,48 @@ fn set_game_mode(state: &Mutex<DaemonState>, on: bool) {
         }
     }
     let _ = send_ui(&prism_common::UiCommand::GameMode(on));
+}
+
+/// Minutes since midnight of "HH:MM".
+fn parse_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    let (h, m): (u32, u32) = (h.trim().parse().ok()?, m.trim().parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+/// Is `now` (minutes since midnight) inside [start, end)? The window may cross midnight.
+fn in_window(now: u32, start: u32, end: u32) -> bool {
+    if start <= end { now >= start && now < end } else { now >= start || now < end }
+}
+
+/// Silent mode on a schedule (`silent_schedule_*`): turned on when the window starts and off
+/// when it ends, only at those moments, so switching it by hand in between sticks.
+fn start_silent_schedule(state: Arc<Mutex<DaemonState>>) {
+    thread::spawn(move || {
+        let mut was_in: Option<bool> = None;
+        loop {
+            let (on, start, end) = {
+                let st = lock_state(&state);
+                let c = &st.config;
+                (c.silent_schedule_enabled, parse_hhmm(&c.silent_schedule_start), parse_hhmm(&c.silent_schedule_end))
+            };
+            if let (true, Some(start), Some(end)) = (on, start, end) {
+                let now = bluelight::LocalTime::now();
+                let inside = in_window(now.minutes as u32, start, end);
+                if was_in != Some(inside) {
+                    // The first check after start-up only switches on (never forces off).
+                    if inside || was_in.is_some() {
+                        lock_state(&state).silent = inside;
+                        eprintln!("[prismd] silent schedule: silent {}", if inside { "on" } else { "off" });
+                    }
+                    was_in = Some(inside);
+                }
+            } else {
+                was_in = None;
+            }
+            thread::sleep(Duration::from_secs(30));
+        }
+    });
 }
 
 fn set_caffeinate(on: bool) -> Result<(), String> {
@@ -583,6 +706,7 @@ fn apply_config(st: &DaemonState) {
     apply_phone(&st.config);
     mpd::apply(&st.config);
     obex::apply(&st.config);
+    battery::apply(&st.config);
     drives::apply(&st.config);
     displays::apply(&st.config);
     st.bluelight.update_config(&st.config);
@@ -646,6 +770,25 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                         Ok(_) => IpcResponse::Ok(None),
                         Err(e) => IpcResponse::Error(e),
                     },
+                }
+            }
+            Ok(IpcCommand::Switcher(action)) => match send_ui(&prism_common::UiCommand::Switcher(action)) {
+                Ok(_) => IpcResponse::Ok(None),
+                Err(e) => IpcResponse::Error(e),
+            },
+            Ok(IpcCommand::Timer(action)) => {
+                let t = timer_action(action);
+                IpcResponse::Ok(serde_json::to_string(&t).ok())
+            }
+            Ok(IpcCommand::Notes(action)) => {
+                let cmd = match action.as_str() {
+                    "open" => prism_common::UiCommand::Open("notes".into()),
+                    "close" => prism_common::UiCommand::Close,
+                    _ => prism_common::UiCommand::Toggle("notes".into()),
+                };
+                match send_ui(&cmd) {
+                    Ok(_) => IpcResponse::Ok(None),
+                    Err(e) => IpcResponse::Error(e),
                 }
             }
             Ok(IpcCommand::PhoneCard(action)) => {
@@ -1033,7 +1176,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
             Ok(IpcCommand::Notif(NotifAction::State)) => {
                 let st = lock_state(&state);
-                let flags = prism_common::ipc::DaemonFlags { silent: st.silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst), game_mode: GAME_MODE.load(Ordering::SeqCst) };
+                let flags = prism_common::ipc::DaemonFlags { silent: st.silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst), game_mode: GAME_MODE.load(Ordering::SeqCst), timer: *TIMER.lock().unwrap() };
                 IpcResponse::Ok(serde_json::to_string(&flags).ok())
             }
             Ok(IpcCommand::GameMode(want)) => {
@@ -1488,6 +1631,7 @@ fn main() {
     apply_phone(&cfg);
     mpd::apply(&cfg);
     obex::apply(&cfg);
+    battery::apply(&cfg);
     drives::apply(&cfg);
     displays::apply(&cfg);
     let state = Arc::new(Mutex::new(DaemonState {
@@ -1503,6 +1647,7 @@ fn main() {
         emojis,
         silent: false,
     }));
+    start_silent_schedule(Arc::clone(&state));
 
     let idle = idle::start_idle_monitor(
         idle_start,
@@ -1574,5 +1719,21 @@ mod tests {
         assert_eq!(clip_preview(&text), format!("{}😀...", "a".repeat(46)));
         assert_eq!(clip_preview("short"), "short");
         assert_eq!(clip_preview(&"é".repeat(50)), "é".repeat(50));
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    #[test]
+    fn windows_cross_midnight() {
+        let (s, e) = (parse_hhmm("23:00").unwrap(), parse_hhmm("07:00").unwrap());
+        assert!(in_window(23 * 60 + 30, s, e));
+        assert!(in_window(3 * 60, s, e));
+        assert!(!in_window(12 * 60, s, e));
+        assert!(!in_window(7 * 60, s, e));
+        assert!(in_window(13 * 60, parse_hhmm("12:00").unwrap(), parse_hhmm("14:00").unwrap()));
+        assert_eq!(parse_hhmm("25:00"), None);
     }
 }

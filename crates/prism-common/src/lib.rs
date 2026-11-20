@@ -1,3 +1,4 @@
+pub mod alt_tab;
 pub mod anim;
 pub mod apps;
 pub mod blur;

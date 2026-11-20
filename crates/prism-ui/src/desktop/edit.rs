@@ -356,6 +356,15 @@ impl Edit {
                     super::widgets::draw_background(cr, r.w, r.h, &look, p.transparent_bg);
                     super::cat::draw_still(cr, r.w, r.h, &look);
                 }
+                WidgetId::Weather => {
+                    super::widgets::draw_weather(cr, r.w, r.h, &p, &look, &crate::weather::snapshot());
+                }
+                WidgetId::Notes => {
+                    super::widgets::draw_notes(cr, r.w, r.h, &p, &look, &crate::notes::text());
+                }
+                WidgetId::Timer => {
+                    super::widgets::draw_timer(cr, r.w, r.h, &p, &look, &crate::timer_client::snapshot(), None);
+                }
             }
             if let Some(path) = depth_mask {
                 super::cut_depth_mask(cr, path, (sw, sh), r, 1.0);

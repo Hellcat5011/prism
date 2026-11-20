@@ -23,7 +23,12 @@ mod osd;
 mod phone;
 mod phone_client;
 mod keyring_prompter;
+mod notes;
 mod picker;
+mod privacy;
+mod weather;
+mod pw_watch;
+mod quick;
 mod xdp;
 mod rec_indicator;
 mod nm_agent;
@@ -38,7 +43,10 @@ mod toasts;
 mod status;
 mod status_tray;
 mod window_watch;
+mod wintrack;
 mod svg;
+mod switcher;
+mod timer_client;
 mod tray;
 mod ui;
 mod uikit;
@@ -108,6 +116,7 @@ enum UiMode {
     NotificationCenter,
     Power,
     Keybinds,
+    Notes,
     Phone,
     /// Password / secret prompt for the polkit and NetworkManager agents (prompt.rs).
     Prompt,
@@ -615,7 +624,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                             let is_modal = matches!(
                                 state.mode,
                                 UiMode::Launcher | UiMode::Spotlight | UiMode::Clipboard | UiMode::Emoji |
-                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt
+                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt
                             );
 
                             if is_modal && cw > 0 && ch > 0
@@ -1181,6 +1190,7 @@ impl UiState {
                 (((sw - w) / 2.0).round() as i32, ((sh - h) / 2.0).round() as i32, w as i32, h as i32)
             }
             UiMode::Emoji => centered(emoji::CARD_W, emoji::CARD_H),
+            UiMode::Notes => centered(notes::CARD_W, notes::CARD_H),
             // Hidden for a polkit dialog: a 1x1 transparent surface (a full-size transparent
             // card would still show the compositor blur).
             UiMode::Settings if self.settings_hidden() => (0, 0, 1, 1),
@@ -1509,7 +1519,7 @@ impl UiState {
                         is_animating |= v.animating();
                     }
                 }
-                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt => {
+                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt => {
                     let card = self.design_card();
                     self.card_bounds = self.desired_card_rect();
                     let (style, theme) = (self.style.clone(), self.theme.clone());
@@ -1825,6 +1835,7 @@ fn apply_agents(cfg: &prism_common::Config) {
     polkit_agent::apply(cfg);
     nm_agent::apply(cfg);
     xdp::apply(cfg);
+    privacy::apply(cfg);
     keyring_prompter::apply(cfg);
     status_tray::apply(cfg);
     tray::apply(cfg);
@@ -1840,6 +1851,7 @@ fn mode_from_name(name: &str) -> Option<UiMode> {
         "settings" => UiMode::Settings,
         "power" => UiMode::Power,
         "keybinds" => UiMode::Keybinds,
+        "notes" => UiMode::Notes,
         "phone" => UiMode::Phone,
         "launcher" => UiMode::Launcher,
         "desktop" => UiMode::Desktop,
@@ -1858,6 +1870,7 @@ fn mode_name(mode: &UiMode) -> &'static str {
         UiMode::Settings => "settings",
         UiMode::Power => "power",
         UiMode::Keybinds => "keybinds",
+        UiMode::Notes => "notes",
         UiMode::Phone => "phone",
         UiMode::Prompt => "prompt",
         UiMode::NotificationCenter => "notif-center",
@@ -1917,7 +1930,7 @@ impl Overlay {
                 &style,
             )),
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt => Some(Transition::enter(Motion::Scale, &style)),
+            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
         // Rows of the new card start hidden; the entrance restarts with its first shown frame.
@@ -2019,6 +2032,7 @@ impl Overlay {
             UiMode::Clipboard => state.view = Some(Box::new(clipboard::ClipboardView::new(ClipboardStore::load().items))),
             UiMode::Emoji => state.view = Some(Box::new(emoji::EmojiView::new(res.emojis()))),
             UiMode::Keybinds => state.view = Some(Box::new(keybinds::KeybindsView::new(waker.clone()))),
+            UiMode::Notes => state.view = Some(Box::new(notes::NotesView::new())),
             UiMode::Phone => state.view = Some(Box::new(phone::PhoneView::new(waker.clone()))),
             UiMode::Prompt => match prompt::next_view() {
                 Some(v) => state.view = Some(Box::new(v)),
@@ -2034,7 +2048,7 @@ impl Overlay {
         let uses_card_surface = matches!(
             state.mode,
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Phone | UiMode::Prompt
+                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt
         );
         if uses_card_surface {
             // The power menu blurs the whole screen behind its dim. Mapped first so it stays below
@@ -2227,6 +2241,10 @@ impl Overlay {
                 let ms = (at.saturating_duration_since(std::time::Instant::now()).as_millis() as i32).max(1);
                 timeout_ms = if timeout_ms < 0 { ms } else { timeout_ms.min(ms) };
             }
+        }
+        if let Some(d) = state.nc.as_ref().and_then(|v| v.wake_in()) {
+            let ms = (d.as_millis() as i32).max(1);
+            timeout_ms = if timeout_ms < 0 { ms } else { timeout_ms.min(ms) };
         }
         if let Some(d) = state.view.as_ref().and_then(|v| v.wake_in()) {
             let ms = (d.as_millis() as i32).max(1);
@@ -2448,6 +2466,13 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut portal_shot: Option<std::sync::mpsc::Sender<Option<prism_capture::Image>>> = None;
     let mut portal_color: Option<std::sync::mpsc::Sender<Option<(u8, u8, u8)>>> = None;
     let mut indicator: Option<rec_indicator::Indicator> = None;
+    // Microphone / camera / screen-share pill (privacy.rs), checked when PipeWire or the
+    // portal change.
+    let mut privacy_pill: Option<privacy::Indicator> = None;
+    // Window switcher (Alt+Tab) and the window list it shows, most recent first.
+    let mut switcher: Option<switcher::Switcher> = None;
+    let mut tracker = if daemon { wintrack::Tracker::new(&conn) } else { None };
+    let mut privacy_seen = (u64::MAX, u64::MAX);
     // Built-in wallpaper daemon (Settings > Wallpaper > Wallpaper Daemon = Built-in).
     let mut background = if daemon { background::Background::new(&conn, &globals, waker.clone()) } else { None };
     let mut config_seq = desktop.as_ref().map(|d| d.config_seq()).unwrap_or(0);
@@ -2526,6 +2551,25 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 caffeinate.set(on, &globals);
                 continue;
             }
+            if let prism_common::UiCommand::Switcher(act) = &cmd {
+                match (switcher.as_mut(), act.as_str()) {
+                    (Some(s), "next") => s.step(true),
+                    (Some(s), "prev") => s.step(false),
+                    (Some(_), "show") => {}
+                    (Some(s), _) => s.cancel(),
+                    (None, "next" | "prev" | "show") if Config::load().window_switcher => {
+                        if let Some(t) = tracker.as_mut() {
+                            t.dispatch();
+                            for o in overlays.iter_mut().filter(|o| o.is_modal()) {
+                                o.close();
+                            }
+                            switcher = switcher::Switcher::open(&conn, &globals, t.mru(), act == "prev", act != "show", waker.clone());
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if let prism_common::UiCommand::GameMode(on) = cmd {
                 // Cards opened from now on are built without animations and blur.
                 ui::set_game_mode(on);
@@ -2577,6 +2621,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                         None
                     }
                     A::Toggle => Some((capture::Kind::parse(&cfg.capture_last_mode), false)),
+                    A::Open(k) if k == "text" => Some((capture::Kind::Region, false)),
                     A::Open(k) => Some((capture::Kind::parse(k), false)),
                     A::Record => Some((capture::Kind::parse(&cfg.capture_last_mode), true)),
                     A::Screen { save, clipboard } => {
@@ -2594,8 +2639,14 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                     for o in overlays.iter_mut().filter(|o| o.is_modal()) {
                         o.close();
                     }
+                    let text_mode = matches!(action, A::Open(k) if k == "text");
                     match capture::Overlay::open(&conn, &globals, k, record, &cfg) {
-                        Ok(o) => shooter = Some(o),
+                        Ok(mut o) => {
+                            if text_mode {
+                                o.set_text_mode();
+                            }
+                            shooter = Some(o);
+                        }
                         Err(e) => eprintln!("[prism-ui] screenshot: {e}"),
                     }
                 }
@@ -2640,6 +2691,33 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 timeout = t;
             }
         }
+        if daemon {
+            let seen = (pw_watch::generation(), xdp::generation());
+            if seen != privacy_seen {
+                privacy_seen = seen;
+                let usage = if privacy::enabled() { privacy::current() } else { privacy::Usage::default() };
+                match (usage.is_empty(), privacy_pill.as_mut()) {
+                    (true, Some(_)) => privacy_pill.take().unwrap().teardown(),
+                    (false, Some(p)) => p.set_usage(usage),
+                    (false, None) => privacy_pill = privacy::Indicator::open(&conn, &globals, usage),
+                    (true, None) => {}
+                }
+            }
+        }
+        if let Some(p) = privacy_pill.as_mut() {
+            p.tick();
+        }
+        if let Some(s) = switcher.as_mut() {
+            s.tick();
+        }
+        if switcher.as_ref().is_some_and(|s| s.finished()) {
+            if let switcher::Outcome::Switch(w) = switcher.take().unwrap().teardown() {
+                if let (Some(t), Some(seat)) = (tracker.as_ref(), globals.seat.as_ref()) {
+                    t.activate(&w, seat);
+                }
+            }
+            let _ = conn.flush();
+        }
         if shooter.as_ref().is_some_and(|s| s.finished()) {
             let s = shooter.take().unwrap();
             let kind = s.kind();
@@ -2668,6 +2746,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                         eprintln!("[prism-ui] recording: {e}");
                     }
                 });
+            }
+            if let capture::Outcome::Text(img) = &outcome {
+                capture::copy_text(img.clone(), cfg.ocr_language.clone());
             }
             if let capture::Outcome::Image(img) = outcome {
                 if let Err(e) = capture::finish(img, &cfg, true) {
@@ -2739,6 +2820,15 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         if let Some(i) = indicator.as_mut() {
             ok &= i.dispatch();
         }
+        if let Some(p) = privacy_pill.as_mut() {
+            ok &= p.dispatch();
+        }
+        if let Some(s) = switcher.as_mut() {
+            ok &= s.dispatch();
+        }
+        if let Some(t) = tracker.as_mut() {
+            ok &= t.dispatch();
+        }
         if !ok {
             eprintln!("[prism-ui] Wayland connection error (protocol error: {:?})", conn.protocol_error());
             break;
@@ -2801,6 +2891,15 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         }
         if let Some(i) = indicator.as_mut() {
             i.dispatch();
+        }
+        if let Some(p) = privacy_pill.as_mut() {
+            p.dispatch();
+        }
+        if let Some(s) = switcher.as_mut() {
+            s.dispatch();
+        }
+        if let Some(t) = tracker.as_mut() {
+            t.dispatch();
         }
     }
     for o in overlays.drain(..) {
@@ -2875,7 +2974,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

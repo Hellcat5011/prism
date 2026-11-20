@@ -36,6 +36,14 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 - **Updates**: a notification and a bar module when package updates are available (`checkupdates`, `yay`/`paru`).
 - **Game mode**: one toggle (notification center, `prism-ctl gamemode`) for silent notifications, the performance
   power profile and no animations or blur.
+- **Quick answers**: calculator, unit conversion, `> command` and web search in the launcher and search.
+- **Per-app volume** in the Control Centre's output panel, and a **privacy indicator** while the microphone or
+  camera is in use or the screen is shared.
+- **Window switcher** (Alt+Tab) with live thumbnails; Settings checks the compositor's own Alt+Tab binding and
+  says what to change.
+- **Copy text** from the screen (OCR with tesseract) in the screenshot overlay.
+- **Timer and stopwatch** in the Control Centre (`prism-ctl timer`), **weather** and **notes** desktop widgets,
+  **low battery warnings** and **silent mode on a schedule**.
 - **Motion**: cards open and close on springs (and shrink back to the button they were opened from), rows fade in
   one after another, selection highlights glide between rows, lists scroll smoothly (touchpad scrolling follows
   the fingers and keeps its momentum), and switches and hover states animate. Cards cast a soft drop shadow
@@ -180,6 +188,9 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 | `NetworkManager`, `BlueZ` | Network and Bluetooth pages |
 | `python3` | Keybind parsers; wallpaper depth (installs its own venv) |
 | `greetd`, `cage` | Greeter (optional) |
+| `tesseract` + English data | Copy text in the screenshot overlay (the installer offers to install it) |
+| `pw-dump` (PipeWire) | Per-app volume and the privacy indicator |
+| `checkupdates` (pacman-contrib) | Update notifications |
 | KDE Connect app on the phone | Phone sync (open UDP 1716 and TCP 1714-1764 in the firewall) |
 
 Clipboard (ext-data-control), media control (MPRIS, `prism-ctl media play-pause|next|previous|stop` for media

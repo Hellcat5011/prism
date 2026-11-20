@@ -46,6 +46,11 @@ pub enum UiReq {
 static QUEUE: Mutex<Vec<UiReq>> = Mutex::new(Vec::new());
 static WAKER: Mutex<Option<Waker>> = Mutex::new(None);
 
+/// The run loop's waker (set by `init`).
+pub fn waker() -> Option<Waker> {
+    WAKER.lock().unwrap().clone()
+}
+
 pub fn init(waker: Waker) {
     *WAKER.lock().unwrap() = Some(waker);
 }
@@ -131,6 +136,8 @@ fn save(mut img: Image) -> Result<String, String> {
 
 #[derive(Default)]
 struct Session {
+    /// The app sharing (for the privacy indicator).
+    app: String,
     types: u32,
     cursor_mode: u32,
     child: Option<Child>,
@@ -148,12 +155,13 @@ impl ScreenCast {
         &self,
         _handle: OwnedObjectPath,
         session_handle: OwnedObjectPath,
-        _app_id: String,
+        app_id: String,
         _options: HashMap<String, OwnedValue>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
     ) -> (u32, Results) {
         let path = session_handle.to_string();
-        self.sessions.lock().unwrap().insert(path.clone(), Session { types: MONITOR, cursor_mode: CURSOR_EMBEDDED, child: None });
+        let app = app_name(&app_id);
+        self.sessions.lock().unwrap().insert(path.clone(), Session { app, types: MONITOR, cursor_mode: CURSOR_EMBEDDED, child: None });
         let obj = SessionObj { path: path.clone(), sessions: self.sessions.clone() };
         if let Err(e) = server.at(session_handle.as_ref(), obj).await {
             eprintln!("[prism-ui/portal] session {path}: {e}");
@@ -190,6 +198,7 @@ impl ScreenCast {
                 };
                 s.child = Some(child);
                 drop(map);
+                changed();
                 watch(sessions.clone(), path.clone());
                 let mut props: HashMap<String, OwnedValue> = HashMap::new();
                 let mut put = |k: &str, v: Value<'_>| {
@@ -267,6 +276,47 @@ fn end(sessions: &Sessions, path: &str) {
     if let Some(child) = sessions.lock().unwrap().remove(path).and_then(|s| s.child) {
         stop(child);
     }
+    changed();
+}
+
+/// The sessions of the running service (for the privacy indicator).
+static SESSIONS: OnceLock<Sessions> = OnceLock::new();
+
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Counts share starts and ends (the privacy indicator follows it).
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
+}
+
+/// A share started or ended: the run loop updates the privacy indicator.
+fn changed() {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+    if let Some(w) = WAKER.lock().unwrap().clone() {
+        w.wake();
+    }
+}
+
+/// Apps sharing the screen right now.
+pub fn casts() -> Vec<String> {
+    let Some(s) = SESSIONS.get() else { return Vec::new() };
+    let mut apps: Vec<String> = s.lock().unwrap().values().filter(|s| s.child.is_some()).map(|s| s.app.clone()).collect();
+    apps.dedup();
+    apps
+}
+
+/// Stop every screen share (the privacy indicator's Stop button). The apps are told through
+/// the sessions' Closed signal.
+pub fn stop_casts() {
+    let Some(s) = SESSIONS.get() else { return };
+    let paths: Vec<String> = s.lock().unwrap().iter().filter(|(_, v)| v.child.is_some()).map(|(k, _)| k.clone()).collect();
+    for p in paths {
+        if let Some(child) = s.lock().unwrap().get_mut(&p).and_then(|v| v.child.take()) {
+            stop(child);
+        }
+        // `watch` sees the stream gone and closes the session.
+    }
+    changed();
 }
 
 /// When the stream ends by itself (the shared window closed), tell the app.
@@ -276,6 +326,9 @@ fn watch(sessions: Sessions, path: String) {
         let mut map = sessions.lock().unwrap();
         let Some(s) = map.get_mut(&path) else { return };
         let exited = s.child.as_mut().is_none_or(|c| c.try_wait().ok().flatten().is_some());
+        if exited {
+            changed();
+        }
         if !exited {
             continue;
         }
@@ -390,10 +443,11 @@ pub fn apply(cfg: &prism_common::Config) {
 
 fn serve() {
     let sessions: Sessions = Arc::default();
+    let _ = SESSIONS.set(sessions.clone());
     let conn = zbus::blocking::connection::Builder::session()
         .and_then(|b| b.name(NAME))
         .and_then(|b| b.serve_at(PATH, Screenshot))
-        .and_then(|b| b.serve_at(PATH, ScreenCast { sessions }))
+        .and_then(|b| b.serve_at(PATH, ScreenCast { sessions: sessions.clone() }))
         .and_then(|b| b.build());
     match conn {
         Ok(c) => {

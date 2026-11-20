@@ -4,7 +4,7 @@
 #   ./deploy/install.sh               build, install to ~/.local/bin, restart prismd if it runs
 #   ./deploy/install.sh --greeter     also set up the greetd greeter without asking
 #   ./deploy/install.sh --no-greeter  never touch the greeter, and do not ask
-#   ./deploy/install.sh --yes         answer yes to every question (PATH, PAM, greeter)
+#   ./deploy/install.sh --yes         answer yes to every question (PATH, OCR, PAM, greeter)
 #
 # Run from a terminal, it asks before changing anything outside ~/.local: adding ~/.local/bin
 # to your shell's PATH, installing the lock screen's PAM service (sudo), and setting up the
@@ -45,7 +45,7 @@ echo "========================================================"
 echo "    Installing Prism (Rust Wayland desktop shell)       "
 echo "========================================================"
 
-echo "[1/8] Checking build dependencies..."
+echo "[1/9] Checking build dependencies..."
 missing=()
 command -v cargo >/dev/null 2>&1 || missing+=("cargo (Rust 1.77 or newer)")
 if command -v pkg-config >/dev/null 2>&1; then
@@ -84,10 +84,10 @@ if [ ${#missing[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "[2/8] Compiling (release)..."
+echo "[2/9] Compiling (release)..."
 cargo build --release --manifest-path "$REPO_DIR/Cargo.toml"
 
-echo "[3/8] Installing binaries to $BIN_DIR..."
+echo "[3/9] Installing binaries to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 for b in "${BINARIES[@]}"; do
     # install(1) writes a new file, so binaries that are running are replaced safely.
@@ -141,7 +141,7 @@ for b in prismd prism-ui prism-ctl; do
     fi
 done
 
-echo "[4/8] Installing helper scripts to $SHARE_DIR/scripts..."
+echo "[4/9] Installing helper scripts to $SHARE_DIR/scripts..."
 # Keybind parsers and the wallpaper depth generator; prismd and prism-ui look here.
 mkdir -p "$SHARE_DIR/scripts"
 install -m644 "$REPO_DIR"/scripts/*.py "$SHARE_DIR/scripts/"
@@ -149,7 +149,7 @@ install -m755 "$REPO_DIR"/scripts/*.sh "$SHARE_DIR/scripts/"
 # Replaced by the notification server in prismd.
 rm -f "$SHARE_DIR/scripts/prism-dbus-notif.py"
 
-echo "[5/8] Installing the systemd user service..."
+echo "[5/9] Installing the systemd user service..."
 mkdir -p "$SYSTEMD_USER_DIR"
 install -m644 "$SCRIPT_DIR/prismd.service" "$SYSTEMD_USER_DIR/prismd.service"
 if command -v systemctl >/dev/null 2>&1; then
@@ -163,7 +163,7 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
-echo "[6/8] Desktop portal (screenshots and screen sharing for apps)..."
+echo "[6/9] Desktop portal (screenshots and screen sharing for apps)..."
 # prism-ui serves org.freedesktop.impl.portal.desktop.prism. xdg-desktop-portal reads portal
 # descriptions from XDG_DATA_DIRS, so a drop-in adds ~/.local/share for it (no root needed).
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -186,7 +186,29 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl --user try-restart xdg-desktop-portal.service || true
 fi
 
-echo "[7/8] Lock screen PAM service..."
+echo "[7/9] Copy text (OCR) for the screenshot overlay..."
+# The overlay's "Copy text" mode reads text with tesseract (system package, needs root).
+if command -v tesseract >/dev/null 2>&1; then
+    echo "tesseract is installed."
+else
+    ocr_pkgs=""
+    if command -v pacman >/dev/null 2>&1; then
+        ocr_pkgs="tesseract tesseract-data-eng"; ocr_cmd="sudo pacman -S --needed $ocr_pkgs"
+    elif command -v apt-get >/dev/null 2>&1; then
+        ocr_pkgs="tesseract-ocr tesseract-ocr-eng"; ocr_cmd="sudo apt-get install -y $ocr_pkgs"
+    elif command -v dnf >/dev/null 2>&1; then
+        ocr_pkgs="tesseract tesseract-langpack-eng"; ocr_cmd="sudo dnf install -y $ocr_pkgs"
+    fi
+    if [ -z "$ocr_pkgs" ]; then
+        echo "Copy text needs tesseract with English data; install it with your package manager."
+    elif ask "Copy text needs tesseract. Install $ocr_pkgs (sudo)?" y; then
+        $ocr_cmd || echo "Installing tesseract failed; Copy text stays unavailable until it is installed."
+    else
+        echo "Skipped: Copy text needs tesseract (install later with: $ocr_cmd)."
+    fi
+fi
+
+echo "[8/9] Lock screen PAM service..."
 # prism-lock unlocks through /etc/pam.d/prism, else the "login" service. Prism's file includes
 # system-local-login (Arch and derivatives); without that file it would refuse every password.
 PAM_OK=0
@@ -202,7 +224,7 @@ else
     echo "Skipped: the lock screen uses the 'login' PAM service."
 fi
 
-echo "[8/8] Greeter..."
+echo "[9/9] Greeter..."
 GREETER_BIN=/usr/local/bin/prism-lock
 GREETD_CONF=/etc/greetd/config.toml
 if [ "$GREETER" = ask ]; then

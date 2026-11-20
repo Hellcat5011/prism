@@ -43,6 +43,8 @@ extern "C" {
     pub fn cairo_set_source_rgba(cr: *mut Cairo, r: f64, g: f64, b: f64, a: f64);
     pub fn cairo_set_operator(cr: *mut Cairo, op: i32);
     pub fn cairo_translate(cr: *mut Cairo, tx: f64, ty: f64);
+    pub fn cairo_user_to_device(cr: *mut Cairo, x: *mut f64, y: *mut f64);
+    pub fn cairo_device_to_user(cr: *mut Cairo, x: *mut f64, y: *mut f64);
     pub fn cairo_scale(cr: *mut Cairo, sx: f64, sy: f64);
     pub fn cairo_paint(cr: *mut Cairo);
     pub fn cairo_new_path(cr: *mut Cairo);
@@ -75,6 +77,8 @@ extern "C" {
     pub fn pango_layout_set_font_description(layout: *mut PangoLayout, desc: *mut PangoFontDescription);
     pub fn pango_font_description_free(desc: *mut PangoFontDescription);
     pub fn pango_cairo_show_layout(cr: *mut Cairo, layout: *mut PangoLayout);
+    pub fn pango_layout_get_cursor_pos(layout: *mut PangoLayout, index: i32, strong: *mut PangoRectangle, weak: *mut PangoRectangle);
+    pub fn pango_layout_xy_to_index(layout: *mut PangoLayout, x: i32, y: i32, index: *mut i32, trailing: *mut i32) -> i32;
 
     pub fn g_object_unref(object: *mut c_void);
     pub fn gdk_pixbuf_new_from_file_at_scale(
@@ -607,6 +611,54 @@ pub fn draw_pango_text(
         cairo_restore(cr);
 
         g_object_unref(layout as *mut c_void);
+    }
+}
+
+/// pango's rectangle, in pango units (1024 per pixel).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct PangoRectangle {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Wrapped text for editing: draws `text` at (x, y) in `width` (when `draw`), and returns its
+/// height, the caret rectangle (x, y, h) at byte `caret`, and the byte index under `point`.
+#[allow(clippy::too_many_arguments)]
+pub fn edit_text(cr: *mut Cairo, x: f64, y: f64, text: &str, font_spec: &str, color: (f64, f64, f64, f64), width: f64, caret: usize, point: Option<(f64, f64)>, draw: bool) -> (f64, (f64, f64, f64), Option<usize>) {
+    unsafe {
+        let layout = new_layout(cr, &apply_global_font(font_spec));
+        let c_text = CString::new(text.replace('\0', "")).unwrap_or_default();
+        pango_layout_set_text(layout, c_text.as_ptr(), -1);
+        pango_layout_set_width(layout, (width * 1024.0) as i32);
+        pango_layout_set_wrap(layout, 2); // PANGO_WRAP_WORD_CHAR
+        let (mut pw, mut ph) = (0, 0);
+        pango_layout_get_pixel_size(layout, &mut pw, &mut ph);
+        let mut strong = PangoRectangle::default();
+        let mut weak = PangoRectangle::default();
+        pango_layout_get_cursor_pos(layout, caret.min(text.len()) as i32, &mut strong, &mut weak);
+        let caret_rect = (x + strong.x as f64 / 1024.0, y + strong.y as f64 / 1024.0, strong.height as f64 / 1024.0);
+        let hit = point.map(|(px, py)| {
+            let (mut idx, mut trailing) = (0, 0);
+            pango_layout_xy_to_index(layout, ((px - x) * 1024.0) as i32, ((py - y) * 1024.0) as i32, &mut idx, &mut trailing);
+            let mut i = idx.max(0) as usize;
+            // Past the middle of a character: the caret goes after it.
+            for _ in 0..trailing.max(0) {
+                i += text[i..].chars().next().map(char::len_utf8).unwrap_or(0);
+            }
+            i.min(text.len())
+        });
+        if draw {
+            cairo_save(cr);
+            cairo_move_to(cr, x, y);
+            cairo_set_source_rgba(cr, color.0, color.1, color.2, color.3);
+            pango_cairo_show_layout(cr, layout);
+            cairo_restore(cr);
+        }
+        g_object_unref(layout as *mut c_void);
+        (ph as f64, caret_rect, hit)
     }
 }
 

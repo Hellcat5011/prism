@@ -44,6 +44,12 @@ pub struct Config {
     #[serde(default = "default_night_temp")]
     pub blue_light_night_temp: u32,
 
+    /// Launcher and search: calculator, unit conversion and `> command`.
+    #[serde(default = "default_true")]
+    pub quick_answers: bool,
+    /// Search: offer a web search; `{}` is replaced by the query.
+    #[serde(default = "default_web_search")]
+    pub web_search_url: String,
     #[serde(default = "default_true")]
     pub search_enable_apps: bool,
 
@@ -307,12 +313,41 @@ pub struct Config {
     /// prism-ui shows gnome-keyring's password prompts (replaces gcr-prompter).
     #[serde(default = "default_true")]
     pub keyring_prompter_enabled: bool,
+    /// Prism's window switcher (Alt+Tab through `prism-ctl switcher next`).
+    #[serde(default)]
+    pub window_switcher: bool,
+    /// Weather widget: a place name (empty: the blue light filter's location, else by IP).
+    #[serde(default)]
+    pub weather_location: String,
+    /// Weather in Fahrenheit instead of Celsius.
+    #[serde(default)]
+    pub weather_fahrenheit: bool,
+    /// Copy text (OCR) language(s) for tesseract, e.g. "eng" or "eng+deu".
+    #[serde(default = "default_ocr_language")]
+    pub ocr_language: String,
+    /// Laptop battery: notify at 20, 10 and 5 %.
+    #[serde(default = "default_true")]
+    pub battery_warnings: bool,
+    /// ... and switch to the power-saver profile at the first warning (back when charging).
+    #[serde(default)]
+    pub battery_auto_saver: bool,
+    /// Silent mode between two times ("HH:MM", may cross midnight).
+    #[serde(default)]
+    pub silent_schedule_enabled: bool,
+    #[serde(default = "default_silent_start")]
+    pub silent_schedule_start: String,
+    #[serde(default = "default_silent_end")]
+    pub silent_schedule_end: String,
     /// prismd announces removable drives (replaces udiskie).
     #[serde(default = "default_true")]
     pub drives_enabled: bool,
     /// ... and mounts them as they are plugged in.
     #[serde(default = "default_true")]
     pub drives_automount: bool,
+    /// A pill in the top-right corner while the microphone or a camera is in use or the screen
+    /// is shared.
+    #[serde(default = "default_true")]
+    pub privacy_indicator: bool,
     /// prism-ui is the xdg-desktop-portal backend for screenshots and screen sharing.
     #[serde(default = "default_true")]
     pub portal_enabled: bool,
@@ -340,6 +375,22 @@ pub struct Config {
     pub network_tray: bool,
     #[serde(default)]
     pub bluetooth_tray: bool,
+}
+
+pub fn default_ocr_language() -> String {
+    "eng".into()
+}
+
+pub fn default_silent_start() -> String {
+    "23:00".into()
+}
+
+pub fn default_silent_end() -> String {
+    "07:00".into()
+}
+
+pub fn default_web_search() -> String {
+    "https://duckduckgo.com/?q={}".into()
 }
 
 pub fn default_nc_tiles() -> Vec<String> {
@@ -491,6 +542,12 @@ pub struct DesktopLayoutConfig {
     pub batteries: WidgetPosition,
     #[serde(default = "default_cat_widget")]
     pub cat: WidgetPosition,
+    #[serde(default = "default_weather_widget")]
+    pub weather: WidgetPosition,
+    #[serde(default = "default_notes_widget")]
+    pub notes: WidgetPosition,
+    #[serde(default = "default_timer_widget")]
+    pub timer: WidgetPosition,
 }
 
 /// The Cat widget at 100%: the size its drawing is designed for, in pixels.
@@ -509,6 +566,21 @@ impl DesktopLayoutConfig {
 /// Cat widget (a black cat asleep on the wallpaper until hovered): hidden until enabled.
 pub fn default_cat_widget() -> WidgetPosition {
     WidgetPosition { x: 30.0, y: -640.0, w: CAT_SIZE.0, h: CAT_SIZE.1, visible: false, transparent_bg: true, send_to_background: false, vertical: false, hide_date: false, font_family: String::new(), shortcuts: ShortcutsConfig::default() }
+}
+
+/// Weather widget (Open-Meteo): hidden until enabled.
+pub fn default_weather_widget() -> WidgetPosition {
+    WidgetPosition { x: 30.0, y: 250.0, w: 340.0, h: 190.0, visible: false, transparent_bg: false, send_to_background: false, vertical: false, hide_date: false, font_family: String::new(), shortcuts: ShortcutsConfig::default() }
+}
+
+/// Timer widget (prismd's timer and stopwatch): hidden until enabled.
+pub fn default_timer_widget() -> WidgetPosition {
+    WidgetPosition { x: 30.0, y: 700.0, w: 320.0, h: 170.0, visible: false, transparent_bg: false, send_to_background: false, vertical: false, hide_date: false, font_family: String::new(), shortcuts: ShortcutsConfig::default() }
+}
+
+/// Notes widget (~/.config/prism/notes.txt): hidden until enabled.
+pub fn default_notes_widget() -> WidgetPosition {
+    WidgetPosition { x: 30.0, y: 460.0, w: 300.0, h: 220.0, visible: false, transparent_bg: false, send_to_background: false, vertical: false, hide_date: false, font_family: String::new(), shortcuts: ShortcutsConfig::default() }
 }
 
 /// Batteries widget (connected headphones, speakers, controllers, ...): hidden until enabled.
@@ -631,6 +703,9 @@ impl DesktopLayoutConfig {
             phone: default_phone_widget(),
             batteries: default_batteries_widget(),
             cat: default_cat_widget(),
+            weather: default_weather_widget(),
+            notes: default_notes_widget(),
+            timer: default_timer_widget(),
         }
     }
 }
@@ -647,6 +722,9 @@ impl Default for DesktopLayoutConfig {
             phone: default_phone_widget(),
             batteries: default_batteries_widget(),
             cat: default_cat_widget(),
+            weather: default_weather_widget(),
+            notes: default_notes_widget(),
+            timer: default_timer_widget(),
         }
     }
 }
@@ -841,6 +919,8 @@ impl Default for Config {
             blue_light_night_end: default_night_end(),
             blue_light_day_temp: default_day_temp(),
             blue_light_night_temp: default_night_temp(),
+            quick_answers: true,
+            web_search_url: default_web_search(),
             search_enable_apps: default_true(),
             search_enable_files: default_true(),
             search_enable_folders: default_true(),
@@ -931,10 +1011,20 @@ impl Default for Config {
             bluetooth_download_dir: default_download_dir(),
             polkit_agent_enabled: false,
             portal_enabled: true,
+            privacy_indicator: true,
             keyring_prompter_enabled: true,
             update_notifications: true,
             updates_tray: true,
             drives_tray: true,
+            window_switcher: false,
+            weather_location: String::new(),
+            weather_fahrenheit: false,
+            ocr_language: default_ocr_language(),
+            battery_warnings: true,
+            battery_auto_saver: false,
+            silent_schedule_enabled: false,
+            silent_schedule_start: default_silent_start(),
+            silent_schedule_end: default_silent_end(),
             drives_enabled: true,
             drives_automount: true,
             network_agent_enabled: false,

@@ -35,6 +35,7 @@ const HANDLE: f64 = 10.0;
 const ICON_VIDEO: &str = "M16 10l6-4v12l-6-4zM2 6h14v12H2z";
 const ICON_SPEAKER: &str = "M11 5 6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14";
 const ICON_MIC: &str = "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3";
+const ICON_TEXT: &str = "M4 7V4h16v3M9 20h6M12 4v16";
 const ICON_CAMERA: &str = "M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -64,6 +65,8 @@ impl Kind {
 /// What the overlay produced.
 pub enum Outcome {
     Image(Image),
+    /// Read the text in this image (OCR) and copy it.
+    Text(Image),
     /// Start recording this (prismd runs prism-rec); also the options to remember.
     Record(prism_common::capture::RecordJob),
     Cancelled,
@@ -93,6 +96,8 @@ enum Ui {
     Window(usize),
     /// Screenshot (false) or Record (true).
     Mode(bool),
+    /// Copy text (OCR).
+    TextMode,
     Fps,
     AudioDesktop,
     AudioMic,
@@ -142,6 +147,8 @@ struct State {
     last_click: Option<std::time::Instant>,
     cursor: bool,
     record: bool,
+    /// Copy text mode: the capture is read with OCR instead of saved.
+    text: bool,
     fps: u32,
     audio_desktop: bool,
     audio_mic: bool,
@@ -212,6 +219,7 @@ impl Overlay {
                 last_click: None,
                 cursor: cfg.capture_cursor,
                 record,
+                text: false,
                 fps: if cfg.capture_fps >= 45 { 60 } else { 30 },
                 audio_desktop: cfg.capture_audio_desktop,
                 audio_mic: cfg.capture_audio_mic,
@@ -247,6 +255,13 @@ impl Overlay {
     /// The selection kind last used (remembered in config).
     pub fn kind(&self) -> Kind {
         self.st.kind
+    }
+
+    /// Start in Copy text mode.
+    pub fn set_text_mode(&mut self) {
+        self.st.record = false;
+        self.st.text = true;
+        self.st.dirty = true;
     }
 
     pub fn teardown(mut self) -> Outcome {
@@ -308,6 +323,15 @@ impl State {
         if self.record {
             return self.confirm_record();
         }
+        self.confirm_image();
+        if self.text {
+            if let Some(Outcome::Image(img)) = self.outcome.take() {
+                self.outcome = Some(Outcome::Text(img));
+            }
+        }
+    }
+
+    fn confirm_image(&mut self) {
         match self.kind {
             Kind::Screen => self.outcome = Some(Outcome::Image(self.shot().img.clone())),
             Kind::Region => {
@@ -531,7 +555,11 @@ impl State {
         let bh = 44.0;
         let gap = 10.0;
         // Top: Screenshot / Record.
-        let modes = vec![("Screenshot".to_string(), Some(ICON_CAMERA), Ui::Mode(false), !self.record), ("Record".to_string(), Some(ICON_VIDEO), Ui::Mode(true), self.record)];
+        let modes = vec![
+            ("Screenshot".to_string(), Some(ICON_CAMERA), Ui::Mode(false), !self.record && !self.text),
+            ("Record".to_string(), Some(ICON_VIDEO), Ui::Mode(true), self.record),
+            ("Copy text".to_string(), Some(ICON_TEXT), Ui::TextMode, self.text),
+        ];
         let mw = Self::group_width(cr, &modes);
         self.draw_group(cr, ((w - mw) / 2.0).round(), 24.0, bh, &modes);
 
@@ -571,6 +599,9 @@ impl State {
         let fg = if can { WHITE } else { (1.0, 1.0, 1.0, 0.4) };
         if self.record {
             cb::fill_circle(cr, cx, cy, 7.0, fg);
+        } else if self.text {
+            let i = 20.0;
+            crate::svg::draw_path(cr, ICON_TEXT, cx - i / 2.0, cy - i / 2.0, i, fg, Some(2.0));
         } else {
             let i = 20.0;
             crate::svg::draw_path(cr, ICON_CAMERA, cx - i / 2.0, cy - i / 2.0, i, fg, Some(2.0));
@@ -591,6 +622,12 @@ impl State {
                 Ui::Kind(k) => self.set_kind(k),
                 Ui::Mode(rec) => {
                     self.record = rec;
+                    self.text = false;
+                    self.dirty = true;
+                }
+                Ui::TextMode => {
+                    self.record = false;
+                    self.text = true;
                     self.dirty = true;
                 }
                 Ui::Fps => {
@@ -804,6 +841,42 @@ pub fn finish(img: Image, cfg: &Config, save: bool, ) -> Result<std::path::PathB
 
 pub use prism_common::capture::timestamp;
 
+/// Read the text in `img` with tesseract and copy it, on a worker thread; a notification says
+/// what happened (or that tesseract is missing).
+pub fn copy_text(mut img: Image, lang: String) {
+    let dir = std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
+    let path = dir.join(format!("prism-ocr-{}.png", std::process::id()));
+    if let Err(e) = write_png(&mut img, &path) {
+        eprintln!("[prism-ui] copy text: {e}");
+        return;
+    }
+    std::thread::spawn(move || {
+        let lang = if lang.trim().is_empty() { "eng".to_string() } else { lang.trim().to_string() };
+        let out = std::process::Command::new("tesseract").arg(&path).arg("stdout").args(["-l", &lang]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output();
+        let _ = std::fs::remove_file(&path);
+        let (summary, body) = match out {
+            Err(_) => ("Copy text needs tesseract".to_string(), "Install tesseract and its language data (Arch: tesseract tesseract-data-eng).".to_string()),
+            Ok(o) if !o.status.success() => ("Could not read text".to_string(), String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("tesseract failed").to_string()),
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if text.is_empty() {
+                    ("No text found".to_string(), "Nothing readable in the selection.".to_string())
+                } else {
+                    // A copy the user asked for: kept in the clipboard history too.
+                    prism_common::wlclip::copy_text(&text, true);
+                    let preview: String = text.chars().take(120).collect();
+                    (format!("Copied {} characters", text.chars().count()), preview)
+                }
+            }
+        };
+        if let Ok(conn) = zbus::blocking::Connection::session() {
+            const D: &str = "org.freedesktop.Notifications";
+            let hints: std::collections::HashMap<&str, zbus::zvariant::Value> = std::collections::HashMap::new();
+            let _ = conn.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Copy Text", 0u32, "edit-copy", summary.as_str(), body.as_str(), Vec::<&str>::new(), hints, 4000i32));
+        }
+    });
+}
+
 /// Write `img` as PNG.
 pub fn write_png(img: &mut Image, path: &std::path::Path) -> Result<(), String> {
     unsafe {
@@ -1002,6 +1075,30 @@ ignore_events!(wl_shm_pool::WlShmPool, WpCursorShapeDeviceV1);
 
 #[cfg(test)]
 mod tests {
+    /// Live: OCR a rendered line and check it lands on the clipboard (restores the old text).
+    #[test]
+    #[ignore]
+    fn copy_text_reaches_the_clipboard() {
+        let before = prism_common::wlclip::paste_text();
+        let (w, h) = (900u32, 160u32);
+        let mut data = vec![255u8; (w * h * 4) as usize];
+        unsafe {
+            let surf = cb::cairo_image_surface_create_for_data(data.as_mut_ptr(), cb::CAIRO_FORMAT_ARGB32, w as i32, h as i32, (w * 4) as i32);
+            let cr = cb::cairo_create(surf);
+            cb::draw_pango_text(cr, 30.0, 40.0, "Hello Prism 123", "Sans Bold 48px", (0.0, 0.0, 0.0, 1.0), None);
+            cb::cairo_destroy(cr);
+            cb::cairo_surface_destroy(surf);
+        }
+        copy_text(Image { width: w, height: h, stride: w * 4, data }, "eng".into());
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        let got = prism_common::wlclip::paste_text().unwrap_or_default();
+        if let Some(b) = before {
+            prism_common::wlclip::copy_text(&b, false);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        assert!(got.contains("Hello Prism"), "clipboard: {got:?}");
+    }
+
     use super::*;
 
     #[test]

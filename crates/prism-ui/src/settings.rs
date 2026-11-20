@@ -204,6 +204,31 @@ fn flow_height(places: &[Place]) -> f64 {
     places.iter().map(|p| p.y + 34.0).fold(34.0, f64::max)
 }
 
+/// The window switcher row's compositor advice (filled when the switcher is turned on).
+const SWITCHER_ROW: &str = "Compositor Setup";
+static SWITCHER_STATUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Turning the switcher on: look for Alt+Tab in the compositor's config and say what to change
+/// (here and in a notification); turning it off clears the advice.
+fn switcher_check(on: bool) {
+    let advice = if on { prism_common::alt_tab::advice() } else { None };
+    *SWITCHER_STATUS.lock().unwrap() = advice.clone().unwrap_or_default();
+    if let Some(text) = advice {
+        std::thread::spawn(move || {
+            if let Ok(c) = zbus::blocking::Connection::session() {
+                const D: &str = "org.freedesktop.Notifications";
+                let hints: std::collections::HashMap<&str, zbus::zvariant::Value> = std::collections::HashMap::new();
+                let _ = c.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Prism", 0u32, "preferences-desktop-keyboard", "Set up Alt+Tab", text.as_str(), Vec::<&str>::new(), hints, 0i32));
+            }
+        });
+    }
+}
+
+/// "HH:MM" in 24-hour time.
+fn valid_hhmm(v: &str) -> bool {
+    v.trim().split_once(':').is_some_and(|(h, m)| h.trim().parse::<u32>().is_ok_and(|h| h < 24) && m.trim().len() == 2 && m.trim().parse::<u32>().is_ok_and(|m| m < 60))
+}
+
 fn row_subtitle(r: &Row) -> std::borrow::Cow<'static, str> {
     if r.title == DEPTH_STATUS_ROW {
         let s = DEPTH_STATUS.lock().unwrap();
@@ -215,6 +240,12 @@ fn row_subtitle(r: &Row) -> std::borrow::Cow<'static, str> {
         let name = VIDEO_NAME.lock().unwrap();
         if !name.is_empty() {
             return format!("{} Wallpaper filters do not apply to it.", name.as_str()).into();
+        }
+    }
+    if r.title == SWITCHER_ROW {
+        let s = SWITCHER_STATUS.lock().unwrap();
+        if !s.is_empty() {
+            return s.clone().into();
         }
     }
     if r.title == INDEX_ROW {
@@ -396,6 +427,16 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.desktop_layout.phone.visible, |c, v| c.desktop_layout.phone.visible = v) },
         Row { tab: 2, title: "Batteries", subtitle: "Battery levels of connected headphones, speakers, controllers and other devices.", visible: always,
             control: Switch(|c| c.desktop_layout.batteries.visible, |c, v| c.desktop_layout.batteries.visible = v) },
+        Row { tab: 2, title: "Weather", subtitle: "Current weather and three days ahead (Open-Meteo, no account needed). Click it to refresh.", visible: always,
+            control: Switch(|c| c.desktop_layout.weather.visible, |c, v| c.desktop_layout.weather.visible = v) },
+        Row { tab: 2, title: "Weather Place", subtitle: "A town or city. Empty: the blue light filter's location if set, else found from your IP address.", visible: |c| c.desktop_layout.weather.visible,
+            control: Text { get: |c| c.weather_location.clone(), set: |c, v| { c.weather_location = v.trim().to_string(); true }, placeholder: "e.g. Berlin", browse: false } },
+        Row { tab: 2, title: "Fahrenheit", subtitle: "Show temperatures in \u{b0}F.", visible: |c| c.desktop_layout.weather.visible,
+            control: Switch(|c| c.weather_fahrenheit, |c, v| c.weather_fahrenheit = v) },
+        Row { tab: 2, title: "Timer", subtitle: "The Control Centre's timer and stopwatch on the desktop, with their buttons.", visible: always,
+            control: Switch(|c| c.desktop_layout.timer.visible, |c, v| c.desktop_layout.timer.visible = v) },
+        Row { tab: 2, title: "Notes", subtitle: "A sticky note on the desktop; click it to write (saved in ~/.config/prism/notes.txt).", visible: always,
+            control: Switch(|c| c.desktop_layout.notes.visible, |c, v| c.desktop_layout.notes.visible = v) },
         Row { tab: 2, title: "Cat", subtitle: "A black cat that sleeps on your desktop. Hover over it to wake it up and watch it play.", visible: always,
             control: Switch(|c| c.desktop_layout.cat.visible, |c, v| c.desktop_layout.set_cat_visible(v)) },
         // ── Bar ──
@@ -464,6 +505,10 @@ fn rows() -> Vec<Row> {
                     perms.iter().map(|p| (p.split(',').map(|s| { let mut c = s.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join(", "), p.to_string())).collect()
                 },
                 get: |c| c.search_section_order.clone(), set: |c, v| c.search_section_order = v.to_string(), fonts: false } },
+        Row { tab: 6, title: "Quick Answers", subtitle: "Calculator (2*(3+4), 20% of 340), unit conversion (5 km in mi, 70 f to c) and \u{201c}> command\u{201d} in the launcher and search. Enter copies the result.", visible: always,
+            control: Switch(|c| c.quick_answers, |c, v| c.quick_answers = v) },
+        Row { tab: 6, title: "Web Search", subtitle: "Offered for anything typed in search (in the launcher only when no app matches); {} is the query. Empty turns it off.", visible: |c| c.quick_answers,
+            control: Text { get: |c| c.web_search_url.clone(), set: |c, v| { c.web_search_url = v.trim().to_string(); true }, placeholder: "https://duckduckgo.com/?q={}", browse: false } },
         Row { tab: 6, title: "Search Applications", subtitle: "Include installed applications.", visible: always,
             control: Switch(|c| c.search_enable_apps, |c, v| c.search_enable_apps = v) },
         Row { tab: 6, title: "Search Folders", subtitle: "Include folders from the file index.", visible: always,
@@ -508,7 +553,13 @@ fn rows() -> Vec<Row> {
                 fonts: false,
             } },
         Row { tab: 7, title: "Control Centre Tiles", subtitle: "Tiles shown in the Control Centre; the others close up the gap.", visible: always,
-            control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine"), ("Game Mode", "game")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
+            control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine"), ("Game Mode", "game"), ("Timer", "timer")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
+        Row { tab: 7, title: "Silent on a Schedule", subtitle: "Turn silent mode on and off at set times every day (critical notifications still pop up). Switching it by hand in between sticks until the next change.", visible: always,
+            control: Switch(|c| c.silent_schedule_enabled, |c, v| c.silent_schedule_enabled = v) },
+        Row { tab: 7, title: "Silent From", subtitle: "24-hour time, HH:MM.", visible: |c| c.silent_schedule_enabled,
+            control: Text { get: |c| c.silent_schedule_start.clone(), set: |c, v| { if !valid_hhmm(v) { return false; } c.silent_schedule_start = v.trim().to_string(); true }, placeholder: "23:00", browse: false } },
+        Row { tab: 7, title: "Silent Until", subtitle: "24-hour time, HH:MM; may be the next morning.", visible: |c| c.silent_schedule_enabled,
+            control: Text { get: |c| c.silent_schedule_end.clone(), set: |c, v| { if !valid_hhmm(v) { return false; } c.silent_schedule_end = v.trim().to_string(); true }, placeholder: "07:00", browse: false } },
         // ── Lock Screen ──
         heading(8, "Design"),
         Row { tab: 8, title: "Lock Screen Theme", subtitle: "The design of the lock screen.", visible: always,
@@ -664,6 +715,8 @@ fn rows() -> Vec<Row> {
             control: Combo { options: || opts(&[("Auto (H.264)", "auto"), ("HEVC", "hevc"), ("AV1", "av1")]), get: |c| c.capture_codec.clone(), set: |c, v| c.capture_codec = v.to_string(), fonts: false } },
         Row { tab: 14, title: "Quality", subtitle: "Higher quality means larger files.", visible: always,
             control: Combo { options: || opts(&[("Low", "low"), ("Medium", "medium"), ("High", "high"), ("Near lossless", "lossless")]), get: |c| c.capture_quality.clone(), set: |c, v| c.capture_quality = v.to_string(), fonts: false } },
+        Row { tab: 14, title: "Copy Text Language", subtitle: "Languages for Copy text in the screenshot overlay (tesseract codes, e.g. eng or eng+deu; each needs its tesseract-data package).", visible: always,
+            control: Text { get: |c| c.ocr_language.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.ocr_language = v.to_string(); true }, placeholder: "eng", browse: false } },
         Row { tab: 14, title: "Frame Rate", subtitle: "Most frames per second; still screens use none.", visible: always,
             control: Combo { options: || opts(&[("30 fps", "30"), ("60 fps", "60")]), get: |c| c.capture_fps.to_string(), set: |c, v| c.capture_fps = v.parse().unwrap_or(60), fonts: false } },
         Row { tab: 14, title: "Desktop Audio", subtitle: "Record what the speakers play. Also switchable in the capture overlay.", visible: always,
@@ -677,14 +730,24 @@ fn rows() -> Vec<Row> {
         Row { tab: 15, title: "Keyring Prompts", subtitle: "Ask for the keyring password (gnome-keyring) in a Prism card. Replaces gcr-prompter; restart Prism after turning it off.", visible: always,
             control: Switch(|c| c.keyring_prompter_enabled, |c, v| c.keyring_prompter_enabled = v) },
         heading(15, "Updates"),
-        Row { tab: 15, title: "Update Notifications", subtitle: "Check for package updates every few hours and say when there are new ones (checkupdates, and yay or paru for the AUR). The bar's Updates module shows the count.", visible: always,
+        Row { tab: 15, title: "Update Notifications", subtitle: "Checks for package updates when Prism starts (checkupdates, and yay or paru for the AUR). Without updates it keeps checking now and then; once it has told you, it waits until the updates are installed or Prism restarts. The bar's Updates module shows the count.", visible: always,
             control: Switch(|c| c.update_notifications, |c, v| c.update_notifications = v) },
         Row { tab: 15, title: "Updates Tray Icon", subtitle: "A tray icon while updates are available: Update Now and Check Again.", visible: always,
             control: Switch(|c| c.updates_tray, |c, v| c.updates_tray = v) },
-        Row { tab: 15, title: "Check Every", subtitle: "Hours between checks.", visible: always,
+        Row { tab: 15, title: "Check Every", subtitle: "Hours between checks while no updates are waiting.", visible: always,
             control: Combo { options: || opts(&[("Hour", "1"), ("3 hours", "3"), ("6 hours", "6"), ("12 hours", "12"), ("Day", "24")]), get: |c| c.bar.updates_interval_hours.to_string(), set: |c, v| c.bar.updates_interval_hours = v.parse().unwrap_or(3), fonts: false } },
         Row { tab: 15, title: "Update Command", subtitle: "Run in a terminal by Update (empty: yay, paru or sudo pacman -Syu).", visible: always,
             control: Text { get: |c| c.bar.updates_command.clone(), set: |c, v| { c.bar.updates_command = v.trim().to_string(); true }, placeholder: "yay", browse: false } },
+        heading(15, "Window Switcher"),
+        Row { tab: 15, title: "Window Switcher", subtitle: "Alt+Tab shows your windows with previews, most recent first; let go of Alt to switch. Turning it on checks whether your compositor already uses Alt+Tab.", visible: always,
+            control: Switch(|c| c.window_switcher, |c, v| { c.window_switcher = v; switcher_check(v); }) },
+        Row { tab: 15, title: SWITCHER_ROW, subtitle: "", visible: |c| c.window_switcher && !SWITCHER_STATUS.lock().unwrap().is_empty(),
+            control: Note },
+        heading(15, "Battery"),
+        Row { tab: 15, title: "Low Battery Warnings", subtitle: "On a laptop: a notification at 20 %, 10 % and 5 % while running on battery.", visible: always,
+            control: Switch(|c| c.battery_warnings, |c, v| c.battery_warnings = v) },
+        Row { tab: 15, title: "Power Saver When Low", subtitle: "Switch to the power-saver profile at the first warning; the previous profile comes back when you plug in.", visible: |c| c.battery_warnings,
+            control: Switch(|c| c.battery_auto_saver, |c, v| c.battery_auto_saver = v) },
         heading(15, "Removable Drives"),
         Row { tab: 15, title: "Drive Notifications", subtitle: "Announce USB drives and SD cards as they are plugged in, with Open and Eject. Replaces udiskie.", visible: always,
             control: Switch(|c| c.drives_enabled, |c, v| c.drives_enabled = v) },
@@ -692,6 +755,9 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.drives_tray, |c, v| c.drives_tray = v) },
         Row { tab: 15, title: "Mount Automatically", subtitle: "Mount a plugged-in drive right away (under /run/media).", visible: |c| c.drives_enabled,
             control: Switch(|c| c.drives_automount, |c, v| c.drives_automount = v) },
+        heading(15, "Privacy"),
+        Row { tab: 15, title: "Privacy Indicator", subtitle: "A pill in the top-right corner while an app uses the microphone or camera, or your screen is shared. Hover to see which apps; Stop ends screen sharing.", visible: always,
+            control: Switch(|c| c.privacy_indicator, |c, v| c.privacy_indicator = v) },
         heading(15, "Desktop Portal"),
         Row { tab: 15, title: "Screenshots and Screen Sharing", subtitle: "Apps take screenshots, pick colours and share your screen through Prism (xdg-desktop-portal). Replaces xdg-desktop-portal-wlr; restart Prism after turning it off.", visible: always,
             control: Switch(|c| c.portal_enabled, |c, v| c.portal_enabled = v) },
@@ -1224,7 +1290,7 @@ impl SettingsView {
                 continue;
             }
             if matches!(r.control, Control::Note) {
-                heights.push(wrapped(cr, r.subtitle, &TextStyle { family: &p.family, px: 11.5, bold: false, color: p.fg }, list.w, None) + 28.0);
+                heights.push(wrapped(cr, &row_subtitle(r), &TextStyle { family: &p.family, px: 11.5, bold: false, color: p.fg }, list.w, None) + 28.0);
                 continue;
             }
             let sub = row_subtitle(r);
@@ -1299,7 +1365,7 @@ impl SettingsView {
                 continue;
             }
             if matches!(self.rows[i].control, Control::Note) {
-                wrapped(cr, self.rows[i].subtitle, &TextStyle { family: &p.family, px: 11.5, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.55) }, list.w, Some((list.x, y + 14.0)));
+                wrapped(cr, &row_subtitle(&self.rows[i]), &TextStyle { family: &p.family, px: 11.5, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.55) }, list.w, Some((list.x, y + 14.0)));
                 y += h;
                 continue;
             }

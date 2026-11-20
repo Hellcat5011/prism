@@ -19,7 +19,11 @@ mod widgets;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use prism_common::ipc::{IpcCommand, NotifAction};
+use prism_common::ipc::{IpcCommand, NotifAction, TimerAction};
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
 use prism_common::notifications::Notification;
 use prism_common::Theme;
 
@@ -33,6 +37,8 @@ use model::{BtBusy, DetailRow, Net};
 use widgets::{alpha, font, text_size, text_v, Pal, Tween, RADIUS};
 
 pub const CARD_W: f64 = 400.0;
+/// Height of the "Apps" heading over the per-app volume rows.
+const APPS_HEAD: f64 = 26.0;
 /// Height of the inline reply field.
 const REPLY_H: f64 = 40.0;
 /// Notification groups: the open header's height, entries shown before "Show N more", that
@@ -62,10 +68,11 @@ pub const TAB_BT: usize = 2;
 const TILE_CAFFEINE: usize = 3;
 pub const TAB_VPN: usize = 4;
 const TILE_GAME: usize = 5;
-const TILES: usize = 6;
+pub const TAB_TIMER: usize = 6;
+const TILES: usize = 7;
 /// Tile order on screen (QML order, VPN after Bluetooth) and their config names.
-const TILE_ORDER: [(usize, &str); TILES] = [(TAB_NET, "network"), (TAB_BT, "bluetooth"), (TAB_VPN, "vpn"), (TAB_NOTIFS, "notifications"), (TILE_CAFFEINE, "caffeine"), (TILE_GAME, "game")];
-const PAGES: [usize; 4] = [TAB_NOTIFS, TAB_NET, TAB_BT, TAB_VPN];
+const TILE_ORDER: [(usize, &str); TILES] = [(TAB_NET, "network"), (TAB_BT, "bluetooth"), (TAB_VPN, "vpn"), (TAB_NOTIFS, "notifications"), (TILE_CAFFEINE, "caffeine"), (TILE_GAME, "game"), (TAB_TIMER, "timer")];
+const PAGES: [usize; 5] = [TAB_NOTIFS, TAB_NET, TAB_BT, TAB_VPN, TAB_TIMER];
 
 /// Tab the next Control Centre opens on (tray icons), e.g. TAB_NET.
 static OPEN_TAB: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
@@ -189,6 +196,13 @@ enum Hit {
     ClearAll,
     GroupHead(usize),
     GroupClear(usize),
+    /// Timer page: start a preset (seconds), add seconds, pause / resume, cancel; stopwatch.
+    TimerPreset(u32),
+    TimerAdd(i32),
+    TimerPause,
+    TimerCancel,
+    SwToggle,
+    SwReset,
     /// "Show N more" under a long group.
     GroupMore(usize),
     /// Fade key of an entry's actions (never a hit target).
@@ -204,6 +218,9 @@ enum Hit {
     Brightness,
     SinkToggle,
     Sink(usize),
+    /// Per-app volume slider and mute button (index into `mixer`).
+    AppVolume(usize),
+    AppMute(usize),
     EthHeader,
     Detail(usize),
     WifiSwitch,
@@ -227,6 +244,7 @@ enum Hit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
     Volume,
+    AppVolume(usize),
     Brightness,
     /// Swiping a notification entry: (nid, start x).
     Entry(u32, f64),
@@ -241,7 +259,7 @@ pub struct NcView {
     status: StatusHandle,
     snap: StatusSnapshot,
     tab: usize,
-    page: [Tween; 5],
+    page: [Tween; TILES],
     tile_w: [Tween; TILES],
     /// Shown tiles (ids), from `nc_tiles`.
     tiles: Vec<usize>,
@@ -255,7 +273,7 @@ pub struct NcView {
     pressed: Option<Hit>,
     drag: Option<Drag>,
     swipe_dx: f64,
-    scroll: [crate::ui::Scroller; 5],
+    scroll: [crate::ui::Scroller; TILES],
     /// Animation time scale from the last draw (None: animations off).
     time_scale: Option<f64>,
     expanded: Option<String>,
@@ -284,6 +302,14 @@ pub struct NcView {
     /// After a notification action: tells when the app opened or raised a window.
     action_watch: Option<std::sync::mpsc::Receiver<()>>,
     close: bool,
+    /// Apps playing sound, as last drawn: (name, icon, stream ids, volume, muted).
+    mixer: Vec<(String, String, Vec<u32>, f64, bool)>,
+    /// PipeWire state generation last drawn.
+    pw_seen: u64,
+    /// The second the timer was last drawn at (it redraws once a second while counting).
+    timer_sec: i64,
+    /// A dragged app volume, shown until PipeWire reports it back.
+    app_local: Option<(String, f64, Instant)>,
     /// Inline reply being typed: notification id and text.
     reply: Option<(u32, String)>,
 }
@@ -291,17 +317,22 @@ pub struct NcView {
 impl NcView {
     pub fn new(waker: Waker) -> Self {
         let status = status::spawn(waker.clone());
+        crate::pw_watch::start(waker.clone());
         let names = prism_common::Config::load().nc_tiles;
         let tiles: Vec<usize> = TILE_ORDER.iter().filter(|(_, n)| names.iter().any(|x| x == n)).map(|(id, _)| *id).collect();
         let pages: Vec<usize> = tiles.iter().copied().filter(|t| PAGES.contains(t)).collect();
         let wanted = OPEN_TAB.lock().unwrap().take();
         let tab = wanted.filter(|t| PAGES.contains(t)).or(pages.contains(&TAB_NOTIFS).then_some(TAB_NOTIFS)).or(pages.first().copied()).unwrap_or(TAB_NOTIFS);
-        let page: [Tween; 5] = std::array::from_fn(|i| Tween::new(if i == tab { 1.0 } else { 0.0 }));
+        let page: [Tween; TILES] = std::array::from_fn(|i| Tween::new(if i == tab { 1.0 } else { 0.0 }));
         let tile_w: [Tween; TILES] = std::array::from_fn(|i| Tween::new(if i == tab && tiles.contains(&i) { f64::NAN } else if tiles.contains(&i) { 44.0 } else { 0.0 }));
         NcView {
             waker,
             action_watch: None,
             close: false,
+            mixer: Vec::new(),
+            pw_seen: 0,
+            timer_sec: 0,
+            app_local: None,
             reply: OPEN_REPLY.lock().unwrap().take().map(|id| (id, String::new())),
             status,
             snap: StatusSnapshot::default(),
@@ -356,6 +387,19 @@ impl NcView {
 
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
+        if self.snap.flags.timer.ticking() {
+            let sec = unix_ms() / 1000;
+            if sec != self.timer_sec {
+                self.timer_sec = sec;
+                changed = true;
+            }
+        }
+        // Apps started or stopped playing: the open output panel shows them.
+        let pw = crate::pw_watch::generation();
+        if pw != self.pw_seen {
+            self.pw_seen = pw;
+            changed |= self.sink_open;
+        }
         if let Some(rx) = &self.action_watch {
             match rx.try_recv() {
                 Ok(()) => {
@@ -535,6 +579,7 @@ impl NcView {
                 TAB_NOTIFS => self.draw_notifications(cr, page, &p),
                 TAB_NET => self.draw_network(cr, page, &p),
                 TAB_VPN => self.draw_vpn(cr, page, &p),
+                TAB_TIMER => self.draw_timer(cr, page, &p),
                 _ => self.draw_bluetooth(cr, page, &p),
             }
             if !interactive {
@@ -579,6 +624,13 @@ impl NcView {
         let bt = &self.snap.bt;
         let bt_dev = bt.devices.iter().find(|d| d.connected);
         let flags = self.snap.flags;
+        let now = unix_ms();
+        let timer_sub = match (flags.timer.remaining(now), flags.timer.sw_start_ms) {
+            (Some(left), _) if flags.timer.end_ms.is_some() => prism_common::ipc::clock_text(left),
+            (Some(left), _) => format!("Paused {}", prism_common::ipc::clock_text(left)),
+            (None, Some(_)) => format!("Stopwatch {}", prism_common::ipc::clock_text(flags.timer.stopwatch(now))),
+            _ => "Off".into(),
+        };
         let count = self.snap.notifications.len();
         let net_title = net.status_text();
         let net_sub = net.status_detail();
@@ -668,6 +720,18 @@ impl NcView {
                 selected: false,
                 on: flags.game_mode,
                 dimmed: !flags.game_mode,
+                slashed: false,
+                badge: 0,
+                expanded_w: wide,
+            },
+            widgets::TileSpec {
+                icon: "timer",
+                title: "Timer",
+                subtitle: &timer_sub,
+                count: "",
+                selected: self.tab == TAB_TIMER,
+                on: flags.timer.ticking(),
+                dimmed: !flags.timer.ticking() && flags.timer.paused_ms.is_none(),
                 slashed: false,
                 badge: 0,
                 expanded_w: wide,
@@ -777,6 +841,90 @@ impl NcView {
             }
             y - start - 8.0
         });
+    }
+
+    /// Send a timer action; the state comes back with the next status refresh, so apply it
+    /// here too for an immediate redraw.
+    fn timer(&mut self, a: TimerAction) {
+        if let Ok(Some(json)) = prism_common::ipc::request(&IpcCommand::Timer(a)) {
+            if let Ok(t) = serde_json::from_str(&json) {
+                self.snap.flags.timer = t;
+            }
+        }
+    }
+
+    /// Wake the loop each second while the timer or stopwatch counts (the page and tile show it).
+    pub fn wake_in(&self) -> Option<std::time::Duration> {
+        self.snap.flags.timer.ticking().then(|| std::time::Duration::from_millis(1000 - (unix_ms() % 1000) as u64 + 5))
+    }
+
+    fn draw_timer(&mut self, cr: *mut Cairo, r: Rect, p: &Pal) {
+        let t = self.snap.flags.timer;
+        let now = unix_ms();
+        let left = t.remaining(now);
+        // Countdown: a ring that empties, the time in the middle.
+        let ring_r = 62.0;
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + 16.0 + ring_r);
+        let frac = match left {
+            Some(l) if t.total_ms > 0 => (l as f64 / t.total_ms as f64).clamp(0.0, 1.0),
+            _ => 0.0,
+        };
+        cb::stroke_circle(cr, cx, cy, ring_r, alpha(p.fg, 0.15), 6.0);
+        if frac > 0.0 {
+            unsafe {
+                cb::cairo_save(cr);
+                cb::cairo_set_line_width(cr, 6.0);
+                let c = p.primary;
+                cb::cairo_set_source_rgba(cr, c.0, c.1, c.2, c.3);
+                let a0 = -std::f64::consts::FRAC_PI_2;
+                cb::cairo_new_path(cr);
+                cb::cairo_arc(cr, cx, cy, ring_r, a0, a0 + frac * std::f64::consts::TAU);
+                cb::cairo_stroke(cr);
+                cb::cairo_restore(cr);
+            }
+        }
+        let big = font(30.0, "Bold");
+        let text = left.map(prism_common::ipc::clock_text).unwrap_or_else(|| "00:00".into());
+        let (tw, th) = text_size(cr, &text, &big);
+        cb::draw_pango_text(cr, cx - tw / 2.0, cy - th / 2.0 - 6.0, &text, &big, if left.is_some() { p.fg } else { alpha(p.fg, 0.45) }, None);
+        let state = if t.end_ms.is_some() { "Running" } else if t.paused_ms.is_some() { "Paused" } else { "Pick a time" };
+        let small = font(11.0, "");
+        let (sw, _) = text_size(cr, state, &small);
+        cb::draw_pango_text(cr, cx - sw / 2.0, cy + th / 2.0 - 4.0, state, &small, alpha(p.fg, 0.6), None);
+        let mut y = cy + ring_r + 16.0;
+        // Controls for a set timer, presets otherwise.
+        let row = |labels: &[(String, Hit)], y: f64, v: &mut Self| {
+            let gap = 8.0;
+            let bw = (r.w - gap * (labels.len() as f64 - 1.0)) / labels.len() as f64;
+            for (i, (l, h)) in labels.iter().enumerate() {
+                let b = Rect { x: r.x + i as f64 * (bw + gap), y, w: bw, h: 32.0 };
+                widgets::button(cr, b, l, "", true, false, true, hv!(v, *h), p);
+                v.hits.push((*h, b));
+            }
+        };
+        if left.is_some() {
+            let pause = if t.end_ms.is_some() { "Pause" } else { "Resume" };
+            row(&[(pause.into(), Hit::TimerPause), ("+1 min".into(), Hit::TimerAdd(60)), ("Cancel".into(), Hit::TimerCancel)], y, self);
+            y += 40.0;
+        } else {
+            let presets: Vec<(String, Hit)> = [1u32, 5, 10].iter().map(|m| (format!("{m} min"), Hit::TimerPreset(m * 60))).collect();
+            row(&presets, y, self);
+            y += 40.0;
+            let presets: Vec<(String, Hit)> = [15u32, 25, 60].iter().map(|m| (format!("{m} min"), Hit::TimerPreset(m * 60))).collect();
+            row(&presets, y, self);
+            y += 40.0;
+        }
+        // Stopwatch.
+        y += 10.0;
+        cb::fill_rounded_rect(cr, r.x, y, r.w, 1.0, 0.0, alpha(p.fg, 0.12));
+        y += 12.0;
+        text_v(cr, r.x + 2.0, y, 20.0, "Stopwatch", &font(12.0, "Bold"), alpha(p.fg, 0.65), None);
+        let sw_text = prism_common::ipc::clock_text(t.stopwatch(now));
+        let (stw, _) = text_size(cr, &sw_text, &font(20.0, "Bold"));
+        text_v(cr, r.x + r.w - stw, y - 4.0, 28.0, &sw_text, &font(20.0, "Bold"), if t.stopwatch(now) > 0 { p.fg } else { alpha(p.fg, 0.45) }, None);
+        y += 30.0;
+        let go = if t.sw_start_ms.is_some() { "Pause" } else if t.sw_acc_ms > 0 { "Resume" } else { "Start" };
+        row(&[(go.into(), Hit::SwToggle), ("Reset".into(), Hit::SwReset)], y, self);
     }
 
     /// Expansion of group `key` (0 collapsed, 1 open), on a spring.
@@ -1649,7 +1797,9 @@ impl NcView {
 
     fn sink_list_height(&self) -> f64 {
         let n = self.snap.sinks.len() as f64;
-        (n * 36.0 + (n - 1.0).max(0.0) * 4.0).min(170.0)
+        let apps = crate::pw_watch::mixer().len() as f64;
+        let mix = if apps > 0.0 { APPS_HEAD + apps * 40.0 } else { 0.0 };
+        (n * 36.0 + (n - 1.0).max(0.0) * 4.0 + mix).min(300.0)
     }
 
     fn draw_footer(&mut self, cr: *mut Cairo, r: Rect, sink_h: f64, p: &Pal) {
@@ -1682,6 +1832,34 @@ impl NcView {
                     self.hits.push((Hit::Sink(i), row));
                 }
                 sy += 40.0;
+            }
+            // Apps playing sound: a slider and a mute button each.
+            self.mixer = crate::pw_watch::mixer();
+            if !self.mixer.is_empty() {
+                text_v(cr, x + 4.0, sy + 2.0, 18.0, "Apps", &font(11.0, "Bold"), alpha(p.fg, 0.6), None);
+                sy += APPS_HEAD;
+                let mixer = self.mixer.clone();
+                for (i, (name, icon, _, vol, muted)) in mixer.iter().enumerate() {
+                    let row = Rect { x, y: sy, w, h: 36.0 };
+                    crate::toasts::draw_notif_icon(cr, row.x + 2.0, row.y + 6.0, 24.0, name, (!icon.is_empty()).then_some(icon.as_str()), None, icon, p.fg, 1.0);
+                    text_v(cr, row.x + 34.0, row.y, 36.0, name, &font(12.0, ""), p.fg, Some(86.0));
+                    let v = match &self.app_local {
+                        Some((a, v, t)) if a == name && t.elapsed() < SLIDER_HOLD => *v,
+                        _ => *vol,
+                    };
+                    let slider = Rect { x: row.x + 126.0, y: row.y + 2.0, w: row.w - 126.0 - 40.0, h: 32.0 };
+                    widgets::slider(cr, slider, (v / 1.0).min(1.0), p);
+                    let mute = Rect { x: row.x + row.w - 32.0, y: row.y + 2.0, w: 32.0, h: 32.0 };
+                    if self.hover == Some(Hit::AppMute(i)) {
+                        cb::fill_circle(cr, mute.x + 16.0, mute.y + 16.0, 16.0, alpha(p.fg, 0.2));
+                    }
+                    svg::icon(cr, "speaker", mute.x + 7.0, mute.y + 7.0, 18.0, alpha(p.fg, if *muted { 0.5 } else { 1.0 }), *muted);
+                    if sy + 36.0 <= y + sink_h + 0.5 {
+                        self.hits.push((Hit::AppVolume(i), slider));
+                        self.hits.push((Hit::AppMute(i), mute));
+                    }
+                    sy += 40.0;
+                }
             }
             unsafe { cb::cairo_restore(cr) };
             y += sink_h;
@@ -1733,6 +1911,14 @@ impl NcView {
                 }
                 return true;
             }
+            Some(Drag::AppVolume(i)) => {
+                if let (Some(r), Some((name, _, ids, _, _))) = (self.hit_rect(Hit::AppVolume(i)), self.mixer.get(i).cloned()) {
+                    let v = widgets::slider_value(r, x);
+                    self.app_local = Some((name, v, Instant::now()));
+                    crate::pw_watch::set_volume(&ids, v);
+                }
+                return true;
+            }
             Some(Drag::Brightness) => {
                 if let Some(r) = self.hit_rect(Hit::Brightness) {
                     let v = ((widgets::slider_value(r, x) * 100.0).round() as u32).max(1);
@@ -1774,6 +1960,11 @@ impl NcView {
                 self.motion(x, y);
                 Effect::Redraw
             }
+            Some(Hit::AppVolume(i)) => {
+                self.drag = Some(Drag::AppVolume(i));
+                self.motion(x, y);
+                Effect::Redraw
+            }
             Some(Hit::Entry(nid)) => {
                 self.drag = Some(Drag::Entry(nid, x));
                 self.swipe_dx = 0.0;
@@ -1786,7 +1977,7 @@ impl NcView {
     pub fn release(&mut self) -> Effect {
         let pressed = self.pressed.take();
         match self.drag.take() {
-            Some(Drag::Volume) | Some(Drag::Brightness) => return Effect::Redraw,
+            Some(Drag::Volume) | Some(Drag::Brightness) | Some(Drag::AppVolume(_)) => return Effect::Redraw,
             Some(Drag::Entry(nid, _)) => {
                 let width = self.hit_rect(Hit::Entry(nid)).map(|r| r.w).unwrap_or(340.0);
                 if self.swipe_dx > width * 0.35 {
@@ -1848,6 +2039,15 @@ impl NcView {
                     self.expanded = key;
                 }
             }
+            Hit::TimerPreset(secs) => self.timer(TimerAction::Start(secs as u64)),
+            Hit::TimerAdd(secs) => self.timer(TimerAction::Add(secs as i64)),
+            Hit::TimerPause => {
+                let a = if self.snap.flags.timer.end_ms.is_some() { TimerAction::Pause } else { TimerAction::Resume };
+                self.timer(a);
+            }
+            Hit::TimerCancel => self.timer(TimerAction::Cancel),
+            Hit::SwToggle => self.timer(TimerAction::StopwatchToggle),
+            Hit::SwReset => self.timer(TimerAction::StopwatchReset),
             Hit::GroupMore(gi) => {
                 if let Some(g) = self.groups().get(gi) {
                     self.show_all.insert(g.key.clone());
@@ -1897,6 +2097,12 @@ impl NcView {
                 self.sink_t.set(if self.sink_open { 1.0 } else { 0.0 }, ANIM_MED_MS);
                 if self.sink_open {
                     self.send(StatusRequest::RefreshAll);
+                }
+            }
+            Hit::AppVolume(_) => {}
+            Hit::AppMute(i) => {
+                if let Some((_, _, ids, _, muted)) = self.mixer.get(i) {
+                    crate::pw_watch::set_mute(ids, !muted);
                 }
             }
             Hit::Sink(i) => {
