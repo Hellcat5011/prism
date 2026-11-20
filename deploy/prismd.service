@@ -3,6 +3,12 @@ Description=Prism Desktop Shell Daemon
 Documentation=https://github.com/Hellcat5011/prism
 PartOf=graphical-session.target
 After=graphical-session.target
+# XDG autostart entries (~/.config/autostart): systemd's generator makes app-*@autostart.service
+# units under this target (it refuses a manual start), which Mango's session target never pulls
+# in. Ordered after prismd so autostarted apps find its notification server; restarting prismd
+# does not start them again.
+Wants=xdg-desktop-autostart.target
+Before=xdg-desktop-autostart.target
 
 [Service]
 Type=simple
