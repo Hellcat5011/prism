@@ -53,6 +53,7 @@ fn run() -> Result<(), String> {
     discovery::start_announcer(shared.clone());
     notify::start(shared.clone());
     plugins::clipboard::start_watcher(shared.clone());
+    plugins::mpris::start(shared.clone());
     {
         let sh = shared.clone();
         std::thread::spawn(move || loop {

@@ -25,8 +25,8 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   Open, Show in folder and Delete in the notification. Recordings use FFmpeg (NVENC, else x264) into MKV or MP4,
   with optional desktop audio and microphone (PipeWire); a small indicator shows the time and a Stop button.
 - **Phone sync**: pairs with the official [KDE Connect](https://kdeconnect.kde.org/) Android app (no
-  `kdeconnectd` needed). Phone battery and status, its media with controls and album art, clipboard sync both
-  ways, phone notifications with reply and dismiss, find my phone, files both ways, and the phone as a remote
+  `kdeconnectd` needed). Phone battery and status, its media with controls and album art, the PC's players on the
+  phone (multimedia control), clipboard sync both ways, phone notifications with reply and dismiss, find my phone, files both ways, and the phone as a remote
   mouse and keyboard. Shown in a Phone card, a desktop widget and a Settings tab.
 - **Motion**: cards open and close on springs (and shrink back to the button they were opened from), rows fade in
   one after another, selection highlights glide between rows, lists scroll smoothly (touchpad scrolling follows

@@ -596,6 +596,8 @@ fn rows() -> Vec<Row> {
         heading(13, "Sync"),
         Row { tab: 13, title: "Clipboard", subtitle: "Copies go to the phone. From the phone, use Send clipboard in KDE Connect (Android blocks automatic reading).", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_clipboard_sync, |c, v| c.phone_clipboard_sync = v) },
+        Row { tab: 13, title: "Media Control", subtitle: "The phone shows what plays here and controls it (KDE Connect \u{201c}Multimedia control\u{201d}).", visible: |c| c.phone_enabled,
+            control: Switch(|c| c.phone_media_control, |c, v| c.phone_media_control = v) },
         Row { tab: 13, title: "Phone Notifications", subtitle: "Show the phone's notifications here, with reply and actions. Allow notification access for KDE Connect on the phone.", visible: |c| c.phone_enabled,
             control: Switch(|c| c.phone_notifications, |c, v| c.phone_notifications = v) },
         Row { tab: 13, title: "Notification Popups", subtitle: "Pop up phone notifications (they are always listed in the Phone card).", visible: |c| c.phone_enabled && c.phone_notifications,

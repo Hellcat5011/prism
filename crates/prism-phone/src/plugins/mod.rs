@@ -3,6 +3,7 @@
 pub mod clipboard;
 pub mod media;
 pub mod mousepad;
+pub mod mpris;
 pub mod notifications;
 pub mod share;
 
@@ -22,6 +23,7 @@ pub const INCOMING: &[&str] = &[
     "kdeconnect.clipboard",
     "kdeconnect.clipboard.connect",
     "kdeconnect.mpris",
+    "kdeconnect.mpris.request",
     "kdeconnect.notification",
     "kdeconnect.share.request",
     "kdeconnect.share.request.update",
@@ -35,6 +37,7 @@ pub const OUTGOING: &[&str] = &[
     "kdeconnect.mousepad.echo",
     "kdeconnect.clipboard",
     "kdeconnect.clipboard.connect",
+    "kdeconnect.mpris",
     "kdeconnect.mpris.request",
     "kdeconnect.notification.request",
     "kdeconnect.notification.action",
@@ -48,6 +51,8 @@ pub struct PluginState {
     pub input: mousepad::InputState,
     pub clip: clipboard::ClipState,
     pub share: share::ShareState,
+    /// Queue of the worker that serves the PC's media players.
+    pub mpris: Option<std::sync::mpsc::Sender<mpris::Msg>>,
 }
 
 /// A paired device just connected (or just got paired).
@@ -55,6 +60,7 @@ pub fn on_connected(core: &mut Core, id: &str) {
     mousepad::on_connected(core, id);
     clipboard::on_connected(core, id);
     media::on_connected(core, id);
+    mpris::on_connected(core, id);
     notifications::on_connected(core, id);
 }
 
@@ -73,6 +79,7 @@ pub fn handle(core: &mut Core, id: &str, p: &Packet) {
         "kdeconnect.mousepad.request" | "kdeconnect.presenter" => return mousepad::handle(core, id, p),
         "kdeconnect.clipboard" | "kdeconnect.clipboard.connect" => return clipboard::handle(core, id, p),
         "kdeconnect.mpris" => return media::handle(core, id, p),
+        "kdeconnect.mpris.request" => return mpris::handle(core, id, p),
         "kdeconnect.notification" => return notifications::handle(core, id, p),
         "kdeconnect.share.request" | "kdeconnect.share.request.update" => return share::handle(core, id, p),
         _ => {}

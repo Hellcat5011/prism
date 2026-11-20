@@ -229,6 +229,9 @@ pub struct Config {
     pub phone_input_when_locked: bool,
     #[serde(default = "default_true")]
     pub phone_clipboard_sync: bool,
+    /// The phone shows and controls the PC's media players.
+    #[serde(default = "default_true")]
+    pub phone_media_control: bool,
     #[serde(default = "default_true")]
     pub phone_notifications: bool,
     #[serde(default = "default_true")]
@@ -874,6 +877,7 @@ impl Default for Config {
             phone_allow_input: true,
             phone_input_when_locked: false,
             phone_clipboard_sync: true,
+            phone_media_control: true,
             phone_notifications: true,
             phone_notification_popups: true,
             phone_download_dir: default_phone_download_dir(),
