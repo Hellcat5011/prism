@@ -24,3 +24,10 @@ libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[profile.release]
+# Cross-crate inlining (prism-common into every binary) and one codegen unit: smaller, faster
+# binaries for a longer build. Debug info is stripped; symbol names stay for panic backtraces.
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

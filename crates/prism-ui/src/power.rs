@@ -366,7 +366,7 @@ impl PowerView {
 
     fn run(&mut self, i: usize) -> Effect {
         #[cfg(test)]
-        panic!("tests must never run a power action");
+        panic!("tests must never run a power action (action {i})");
         #[cfg(not(test))]
         {
             let Some(&act) = self.actions.get(i) else { return Effect::None };

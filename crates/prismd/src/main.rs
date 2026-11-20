@@ -533,17 +533,6 @@ fn stop_python_bridge() {
     }
 }
 
-/// Collect popups / lockscreen that exited on their own (Esc, click-outside, unlock) so they do
-/// not linger as zombies until the next IPC request. try_wait() reaps only our own children.
-fn start_popup_watcher(state: Arc<Mutex<DaemonState>>) {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(1));
-        if let Ok(mut st) = state.lock() {
-            let _ = &mut st;
-        }
-    });
-}
-
 fn start_clipboard_pruner(state: Arc<Mutex<DaemonState>>) {
     thread::spawn(move || {
         loop {
@@ -562,6 +551,26 @@ const IDLE_DIM: f64 = 0.3;
 static INDEX_STATE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
 
 static LOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The screens are dimmed for idle (before the auto-lock).
+static IDLE_DIMMED: AtomicBool = AtomicBool::new(false);
+/// Idle for the idle timeout while auto-lock is off (nothing dims).
+static IDLE_AWAY: AtomicBool = AtomicBool::new(false);
+
+/// Tell prism-ui whether anyone is watching (not dimmed for idle, not locked), on changes only.
+fn update_away() {
+    static SENT: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+    let away = IDLE_DIMMED.load(Ordering::SeqCst) || IDLE_AWAY.load(Ordering::SeqCst) || LOCK_ACTIVE.load(Ordering::SeqCst);
+    let mut sent = SENT.lock().unwrap_or_else(|e| e.into_inner());
+    if *sent == Some(away) {
+        return;
+    }
+    *sent = Some(away);
+    drop(sent);
+    // send_ui can wait for a starting prism-ui; never on the idle or lock thread.
+    thread::spawn(move || {
+        let _ = send_ui(&prism_common::UiCommand::Away(away));
+    });
+}
 
 /// Exists from locking until a clean unlock (in the runtime dir, so it ends with the login).
 fn lock_marker() -> std::path::PathBuf {
@@ -579,6 +588,7 @@ fn lock_screen() -> Result<&'static str, String> {
     if LOCK_ACTIVE.swap(true, Ordering::SeqCst) {
         return Ok("already_locked");
     }
+    update_away();
     if let Err(e) = fs::write(lock_marker(), b"") {
         eprintln!("[prismd] cannot write the lock marker: {e}");
     }
@@ -588,6 +598,7 @@ fn lock_screen() -> Result<&'static str, String> {
         Err(e) => {
             let _ = fs::remove_file(lock_marker());
             LOCK_ACTIVE.store(false, Ordering::SeqCst);
+            update_away();
             return Err(e);
         }
     };
@@ -626,6 +637,7 @@ fn lock_screen() -> Result<&'static str, String> {
             }
         }
         LOCK_ACTIVE.store(false, Ordering::SeqCst);
+        update_away();
     });
     Ok("lock_invoked")
 }
@@ -1663,6 +1675,12 @@ fn main() {
             if let Some(g) = &gamma {
                 g.dim(if dim { IDLE_DIM } else { 1.0 });
             }
+            IDLE_DIMMED.store(dim, Ordering::SeqCst);
+            update_away();
+        }),
+        Box::new(|away| {
+            IDLE_AWAY.store(away, Ordering::SeqCst);
+            update_away();
         }),
     );
     {
@@ -1683,7 +1701,6 @@ fn main() {
         ensure_ui_daemon();
         start_clipboard_daemon(Arc::clone(&state));
         start_clipboard_pruner(Arc::clone(&state));
-        start_popup_watcher(Arc::clone(&state));
         stop_python_bridge();
         notifd::start(Arc::new(NotifHandler { state: Arc::downgrade(&state) }));
         if lock_marker().exists() {

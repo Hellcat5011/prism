@@ -219,15 +219,18 @@ fn run_prompt(prompts: &Prompts, key: (String, String), kind: &str, props: &Hash
         return;
     }
     loop {
-        let Ok(Some(vals)) = session.answers.recv() else {
+        let Ok(Some(mut vals)) = session.answers.recv() else {
             return answer(prompts, &key, None);
         };
         if new && vals.first() != vals.get(1) {
+            prism_common::secret::wipe_all(&mut vals);
             session.verdict(Verdict::Retry("The passwords do not match.".into()));
             continue;
         }
         session.verdict(Verdict::Done);
-        return answer(prompts, &key, Some(vals.into_iter().next().unwrap_or_default()));
+        let secret = vals.first().cloned().unwrap_or_default();
+        prism_common::secret::wipe_all(&mut vals);
+        return answer(prompts, &key, Some(secret));
     }
 }
 
@@ -242,9 +245,13 @@ fn answer(prompts: &Prompts, key: &(String, String), secret: Option<String>) {
             _ => p.exchange.begin(),
         }
     };
+    let chosen = if secret.is_some() { "yes" } else { "no" };
+    if let Some(mut s) = secret {
+        prism_common::secret::wipe(&mut s);
+    }
     let mut props: HashMap<&str, Value> = HashMap::new();
     props.insert("choice-chosen", Value::from(false));
-    ready(key, if secret.is_some() { "yes" } else { "no" }, props, &exchange);
+    ready(key, chosen, props, &exchange);
 }
 
 // ── Service ─────────────────────────────────────────────────────────────

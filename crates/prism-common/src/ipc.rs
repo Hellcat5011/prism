@@ -1,57 +1,28 @@
 pub use crate::power::PowerAction;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::path::PathBuf;
 
 /// Standard socket path resolution for Prism IPC.
 ///
-/// Evaluates $XDG_RUNTIME_DIR/prism.sock or falls back to /tmp/prism-<UID>.sock
+/// `<runtime dir>/prism.sock` (see `runtime::dir`).
 pub fn get_socket_path() -> PathBuf {
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        let p = PathBuf::from(&runtime_dir);
-        if p.exists() && p.is_dir() {
-            return p.join("prism.sock");
-        }
-    }
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/prism-{}.sock", uid))
+    crate::runtime::dir().join("prism.sock")
 }
 
 /// Socket path resolution for active notification popup overlay.
 pub fn get_notif_socket_path() -> PathBuf {
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        let p = PathBuf::from(&runtime_dir);
-        if p.exists() && p.is_dir() {
-            return p.join("prism-notif-overlay.sock");
-        }
-    }
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/prism-notif-overlay-{}.sock", uid))
+    crate::runtime::dir().join("prism-notif-overlay.sock")
 }
 
 /// Socket path for the running OSD overlay. prismd writes `"<kind> <value>"` lines to it so a
 /// visible OSD updates in place instead of a new process being spawned per key press.
 pub fn get_osd_socket_path() -> PathBuf {
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        let p = PathBuf::from(&runtime_dir);
-        if p.exists() && p.is_dir() {
-            return p.join("prism-osd-overlay.sock");
-        }
-    }
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/prism-osd-overlay-{}.sock", uid))
+    crate::runtime::dir().join("prism-osd-overlay.sock")
 }
 
 /// Socket of the resident `prism-ui daemon` (all overlays, toasts, OSD, desktop widgets).
 pub fn get_ui_socket_path() -> PathBuf {
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        let p = PathBuf::from(&runtime_dir);
-        if p.exists() && p.is_dir() {
-            return p.join("prism-ui.sock");
-        }
-    }
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/prism-ui-{}.sock", uid))
+    crate::runtime::dir().join("prism-ui.sock")
 }
 
 /// Commands from prismd to the resident UI process (one JSON object per line).
@@ -74,6 +45,9 @@ pub enum UiCommand {
     Caffeinate(bool),
     /// Game mode: no animations and no blur while on.
     GameMode(bool),
+    /// Nobody is watching: the screen dimmed for idle or the session is locked. Idle desktop
+    /// animations (the sleeping cat) stop until it is false again.
+    Away(bool),
     /// Screen colour picker: "toggle", "open" or "close".
     ColorPicker(String),
     /// Window switcher: "next", "prev" or "close".

@@ -476,17 +476,15 @@ impl App {
     }
 
     fn clear_text(&mut self) {
-        // Overwrite before dropping (best effort; the allocator may have copied it before).
-        unsafe {
-            for b in self.text.as_bytes_mut() {
-                *b = 0;
-            }
-        }
-        self.text.clear();
+        prism_common::secret::wipe(&mut self.text);
         self.masks.clear();
     }
 
     fn push_char(&mut self, c: char) {
+        // The buffer never grows: a reallocation would leave a copy of the password behind.
+        if self.text.len() + c.len_utf8() > TEXT_CAP {
+            return;
+        }
         self.text.push(c);
         let prev = self.masks.last().map(|m| m.0);
         let seed = (Instant::now().elapsed().subsec_nanos() as usize ^ (self.text.len() * 2654435761)) % MASK_GLYPHS.len();
@@ -523,7 +521,7 @@ impl App {
         self.checking = true;
         self.status = String::from("Checking…");
         self.status_error = false;
-        let password = std::mem::take(&mut self.text);
+        let password = std::mem::replace(&mut self.text, String::with_capacity(TEXT_CAP));
         self.masks.clear();
         let user = self.user.clone();
         let tx = self.auth_tx.clone();
@@ -554,11 +552,7 @@ impl App {
                     }
                 }
             };
-            unsafe {
-                for b in password.as_bytes_mut() {
-                    *b = 0;
-                }
-            }
+            prism_common::secret::wipe(&mut password);
             let _ = tx.send(result);
             unsafe { libc::write(wake, b"x".as_ptr() as *const libc::c_void, 1) };
         });
@@ -624,7 +618,7 @@ impl App {
             0xff08 => {
                 if ctrl {
                     self.clear_text();
-                } else if self.text.pop().is_some() {
+                } else if prism_common::secret::pop(&mut self.text).is_some() {
                     self.masks.pop();
                 }
                 return;
@@ -1513,7 +1507,11 @@ fn check_auth() -> ! {
     exit(1);
 }
 
+/// Capacity of the password field, allocated once (see `push_char`).
+const TEXT_CAP: usize = 512;
+
 fn main() {
+    prism_common::secret::harden_process();
     let args: Vec<String> = std::env::args().collect();
     // Never lock on a mistyped or unknown flag: only the bare command locks.
     const USAGE: &str = "usage: prism-lock [--greeter | --check-auth | --help]\n\n  (no flag)     lock the session\n  --greeter     greetd greeter (preview window outside greetd)\n  --check-auth  check your password against PAM from a terminal";
@@ -1627,7 +1625,7 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
         session_grow: (0.0, 0.0, now),
         sessions,
         session_idx,
-        text: String::new(),
+        text: String::with_capacity(TEXT_CAP),
         masks: Vec::new(),
         // The greeter starts in the field; the lock starts with the badge (QML).
         // The other designs have no badge to open: they take the password right away.

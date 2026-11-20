@@ -104,6 +104,17 @@ pub fn game_mode() -> bool {
     GAME_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Nobody is watching (prismd's `Away`: dimmed for idle or locked): idle animations stop.
+static AWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_away(on: bool) {
+    AWAY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn away() -> bool {
+    AWAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Style {
     pub fn new(cfg: &Config, theme: &Theme) -> Self {
         let opacity = (cfg.background_opacity as f64).clamp(0.2, 1.0);

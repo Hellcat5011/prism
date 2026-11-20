@@ -261,15 +261,88 @@ fn cache_insert(key: ImageKey, surface: *mut CairoSurface) {
     });
 }
 
+// ── Off-thread decoding ──────────────────────────────────────────────────
+// Files larger than this are decoded on a worker thread instead of inside a draw; smaller ones
+// (icons, notification pictures) decode in well under a frame and stay synchronous.
+const SYNC_DECODE_MAX: u64 = 256 * 1024;
+
+type DoneQueue = std::sync::Mutex<Vec<(ImageKey, Option<Decoded>)>>;
+static DECODE_DONE: DoneQueue = std::sync::Mutex::new(Vec::new());
+static DECODE_JOBS: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<ImageKey>>> = std::sync::OnceLock::new();
+static IMAGES_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    static DECODE_PENDING: std::cell::RefCell<std::collections::HashSet<ImageKey>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Start the image decode worker; it wakes the run loop through `waker` when an image is ready.
+/// Until this is called (standalone tools, tests) every image decodes synchronously.
+pub fn start_image_decoder(waker: crate::waker::Waker) {
+    DECODE_JOBS.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ImageKey>();
+        let _ = std::thread::Builder::new().name("prism-img-decode".into()).spawn(move || {
+            for key in rx {
+                let d = decode_key(key.clone());
+                DECODE_DONE.lock().unwrap_or_else(|e| e.into_inner()).push((key, d));
+                waker.wake();
+            }
+        });
+        std::sync::Mutex::new(tx)
+    });
+}
+
+/// Move finished decodes into the cache (UI thread, once per loop turn). True when any arrived:
+/// `images_generation` then changes, and views that drew without them redraw.
+pub fn drain_decoded() -> bool {
+    let done = std::mem::take(&mut *DECODE_DONE.lock().unwrap_or_else(|e| e.into_inner()));
+    if done.is_empty() {
+        return false;
+    }
+    for (key, d) in done {
+        DECODE_PENDING.with(|p| p.borrow_mut().remove(&key));
+        match d {
+            Some(d) => insert_decoded(d),
+            None => cache_insert(key, std::ptr::null_mut()), // remember the miss
+        }
+    }
+    IMAGES_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
+/// Changes whenever off-thread decodes reach the cache.
+pub fn images_generation() -> u64 {
+    IMAGES_GEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Queue `key` for the worker. False when there is no worker (decode synchronously instead).
+fn decode_async(key: &ImageKey) -> bool {
+    let Some(jobs) = DECODE_JOBS.get() else { return false };
+    if DECODE_PENDING.with(|p| p.borrow_mut().insert(key.clone())) {
+        let _ = jobs.lock().unwrap_or_else(|e| e.into_inner()).send(key.clone());
+    }
+    true
+}
+
 /// Decode `path` scaled to fit (w, h) once, then reuse. Returns a borrowed surface pointer that
-/// stays valid until the cache is next cleared (callers paint it immediately), or None.
+/// stays valid until the cache is next cleared (callers paint it immediately), or None. A large
+/// file is decoded off the UI thread: None until it is ready, and the caller is asked to keep
+/// drawing (`ui::keep_animating`; desktop widgets and toasts follow `images_generation`).
 pub fn cached_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option<*mut CairoSurface> {
-    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-    mtime?;
+    lookup_image(path, w, h, preserve_aspect, true)
+}
+
+fn lookup_image(path: &str, w: i32, h: i32, preserve_aspect: bool, allow_async: bool) -> Option<*mut CairoSurface> {
+    // Only regular files: a FIFO or device would block or never end inside a draw.
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let mtime = Some(meta.modified().ok()?);
     let key = ImageKey { path: path.to_string(), mtime, w, h, preserve_aspect };
 
     if let Some(hit) = IMAGE_CACHE.with(|c| c.borrow().get(&key).map(|s| s.0)) {
         return if hit.is_null() { None } else { Some(hit) };
+    }
+    if allow_async && meta.len() > SYNC_DECODE_MAX && decode_async(&key) {
+        crate::ui::keep_animating();
+        return None;
     }
     match decode_key(key.clone()) {
         Some(d) => {
@@ -285,8 +358,9 @@ pub fn cached_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option
 
 /// `cached_image` for callers that keep the surface across draws: the result stays valid when
 /// the cache is cleared, and the caller releases it with `cairo_surface_destroy`.
+/// Always synchronous: callers keep the result instead of drawing again.
 pub fn owned_image(path: &str, w: i32, h: i32, preserve_aspect: bool) -> Option<*mut CairoSurface> {
-    cached_image(path, w, h, preserve_aspect).map(|s| unsafe { cairo_surface_reference(s) })
+    lookup_image(path, w, h, preserve_aspect, false).map(|s| unsafe { cairo_surface_reference(s) })
 }
 
 /// Decode `path` scaled to *cover* (w, h) keeping its aspect ratio (QML PreserveAspectCrop);

@@ -1,7 +1,6 @@
 use std::env;
 use std::fs::File;
 use std::os::fd::{AsFd, FromRawFd};
-use std::path::Path;
 use std::process::{exit, Command};
 
 mod apps_watch;
@@ -2334,6 +2333,8 @@ impl Overlay {
 }
 
 fn main() {
+    // Polkit, keyring and Wi-Fi/VPN passwords pass through this process.
+    prism_common::secret::harden_process();
     let args: Vec<String> = env::args().skip(1).collect();
     if env::var("WAYLAND_DISPLAY").is_err() && env::var("WAYLAND_SOCKET").is_err() {
         eprintln!("Error: WAYLAND_DISPLAY is not set. prism-ui requires an active Wayland compositor.");
@@ -2385,6 +2386,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         }
     };
     let waker = Waker::new().expect("failed to create wake pipe");
+    cairo_backend::start_image_decoder(waker.clone());
     // Icon theme index (gsettings), built in the background and kept in sync.
     let icon_waker = waker.clone();
     icons::start(move || icon_waker.wake());
@@ -2570,6 +2572,11 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 }
                 continue;
             }
+            if let prism_common::UiCommand::Away(on) = cmd {
+                // The desktop's next tick stops (or restarts) the cat's frames.
+                ui::set_away(on);
+                continue;
+            }
             if let prism_common::UiCommand::GameMode(on) = cmd {
                 // Cards opened from now on are built without animations and blur.
                 ui::set_game_mode(on);
@@ -2654,6 +2661,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             }
             handle_command(cmd, &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
         }
+
+        // Images decoded off-thread since the last turn (views that missed them redraw).
+        cairo_backend::drain_decoded();
 
         // 2. Overlays: timers / transitions; tear down finished ones.
         let mut timeout: i32 = -1;
@@ -2974,7 +2984,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {
@@ -2998,8 +3008,7 @@ fn handle_command(
 /// Hold an exclusive flock on `$XDG_RUNTIME_DIR/<name>` for the life of the process.
 /// Returns false if another process already holds it.
 fn acquire_instance_lock(name: &str) -> bool {
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    let path = Path::new(&dir).join(name);
+    let path = prism_common::runtime::dir().join(name);
     let Ok(file) = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path) else {
         return true; // cannot lock; do not block startup
     };

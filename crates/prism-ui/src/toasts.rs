@@ -242,6 +242,8 @@ fn measure(summary: &str, body: &str, actions: usize, preview: Option<&str>) -> 
 pub struct Toasts {
     queue: EventQueue<Stack>,
     st: Stack,
+    /// cairo_backend::images_generation the popups were last drawn for.
+    images_seen: u64,
 }
 
 struct Stack {
@@ -285,6 +287,7 @@ impl Toasts {
         let theme = Theme::load();
         Some(Toasts {
             queue,
+            images_seen: crate::cairo_backend::images_generation(),
             st: Stack {
                 globals,
                 pointer,
@@ -338,6 +341,12 @@ impl Toasts {
     /// Timers and animation frames. Returns the next deadline in ms (-1 = none).
     pub fn tick(&mut self) -> i32 {
         let qh = self.queue.handle();
+        // Pictures decoded off-thread: redraw the popups that drew without them.
+        let images_gen = crate::cairo_backend::images_generation();
+        if images_gen != self.images_seen {
+            self.images_seen = images_gen;
+            self.st.popups.iter_mut().for_each(|p| p.dirty = true);
+        }
         self.st.step(&qh)
     }
 

@@ -18,6 +18,7 @@ unsafe extern "C" {
     fn gdk_pixbuf_get_n_channels(pixbuf: *const c_void) -> i32;
     fn gdk_pixbuf_get_rowstride(pixbuf: *const c_void) -> i32;
     fn gdk_pixbuf_get_pixels(pixbuf: *const c_void) -> *mut u8;
+    fn gdk_pixbuf_scale_simple(src: *const c_void, dest_width: i32, dest_height: i32, interp_type: i32) -> *mut c_void;
     fn gdk_pixbuf_savev(
         pixbuf: *mut c_void,
         filename: *const c_char,
@@ -110,6 +111,53 @@ pub fn save_jpeg_filtered(src: &Path, dst: &Path, max_w: i32, quality: u8, filte
     std::fs::rename(&part, dst).map_err(|e| format!("cannot write {}: {e}", dst.display()))
 }
 
+/// Write tightly packed RGBA8 pixels (`w` x `h`) as a zlib-compressed PNG at `dst`, scaled down
+/// to fit `max_side` x `max_side` when larger. Written to `<dst>.part` first, then renamed.
+pub fn save_png_rgba(rgba: &[u8], w: i32, h: i32, max_side: i32, dst: &Path) -> Result<(), String> {
+    if w <= 0 || h <= 0 || rgba.len() < w as usize * h as usize * 4 {
+        return Err("bad image size".into());
+    }
+    let part = dst.with_extension("part");
+    let c_part = CString::new(part.to_str().ok_or("non-UTF-8 path")?).map_err(|e| e.to_string())?;
+    unsafe {
+        let pb = gdk_pixbuf_new(0, 1, 8, w, h);
+        if pb.is_null() {
+            return Err("out of memory".into());
+        }
+        let (px, stride) = (gdk_pixbuf_get_pixels(pb), gdk_pixbuf_get_rowstride(pb) as usize);
+        let row = w as usize * 4;
+        for y in 0..h as usize {
+            std::ptr::copy_nonoverlapping(rgba.as_ptr().add(y * row), px.add(y * stride), row);
+        }
+        let s = (max_side as f64 / w.max(h) as f64).min(1.0);
+        let out = if s < 1.0 {
+            const GDK_INTERP_BILINEAR: i32 = 2;
+            let (tw, th) = (((w as f64 * s).round() as i32).max(1), ((h as f64 * s).round() as i32).max(1));
+            let scaled = gdk_pixbuf_scale_simple(pb, tw, th, GDK_INTERP_BILINEAR);
+            g_object_unref(pb);
+            if scaled.is_null() {
+                return Err("out of memory".into());
+            }
+            scaled
+        } else {
+            pb
+        };
+        let keys = [c"compression".as_ptr(), std::ptr::null()];
+        let vals = [c"6".as_ptr(), std::ptr::null()];
+        let mut err = std::ptr::null_mut();
+        let ok = gdk_pixbuf_savev(out, c_part.as_ptr(), c"png".as_ptr(), keys.as_ptr(), vals.as_ptr(), &mut err);
+        g_object_unref(out);
+        if ok == 0 {
+            if !err.is_null() {
+                g_error_free(err);
+            }
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("cannot write {}", dst.display()));
+        }
+    }
+    std::fs::rename(&part, dst).map_err(|e| format!("cannot write {}: {e}", dst.display()))
+}
+
 /// A new three-channel copy of `pb` with `filter` applied; null when it cannot be allocated.
 unsafe fn flattened(pb: *mut c_void, filter: Filter) -> *mut c_void {
     unsafe {
@@ -176,5 +224,18 @@ mod tests {
         save_jpeg_fit_width(&src, &dst, 8, 95).unwrap();
         assert_eq!(jpeg_components(&dst), Some(3));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn png_rgba_is_scaled_and_compressed() {
+        let dir = std::env::temp_dir().join(format!("prism-pixbuf-png-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("big.png");
+        let (w, h) = (2000, 1000);
+        let rgba: Vec<u8> = (0..w * h).flat_map(|i| [(i % 256) as u8, 40, 200, 255]).collect();
+        save_png_rgba(&rgba, w, h, 1024, &dst).unwrap();
+        assert_eq!(image_size(&dst), Some((1024, 512)));
+        assert!(std::fs::metadata(&dst).unwrap().len() < (1024 * 512 * 4) / 4);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

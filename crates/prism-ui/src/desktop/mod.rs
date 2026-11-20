@@ -286,6 +286,8 @@ pub struct Desktop {
     weather_seen: u64,
     notes_seen: u64,
     timer_seen: (u64, i64),
+    /// cairo_backend::images_generation the widgets were last drawn for.
+    images_seen: u64,
 }
 
 impl Desktop {
@@ -389,6 +391,7 @@ impl Desktop {
             batteries_seen: 0,
             weather_seen: 0,
             notes_seen: 0,
+            images_seen: crate::cairo_backend::images_generation(),
             timer_seen: (0, 0),
         })
     }
@@ -454,6 +457,17 @@ impl Desktop {
             self.notes_seen = notes_gen;
             d.mark(WidgetId::Notes, &qh);
         }
+        // Images decoded off-thread: redraw whatever drew without them.
+        let images_gen = crate::cairo_backend::images_generation();
+        if images_gen != self.images_seen {
+            self.images_seen = images_gen;
+            let ids: Vec<WidgetId> = d.widgets.iter().map(|w| w.id).collect();
+            for id in ids {
+                d.mark(id, &qh);
+            }
+            d.mark_panel(panel::PanelId::Bar, &qh);
+            d.mark_panel(panel::PanelId::Dock, &qh);
+        }
         let now = LocalTime::now();
         if now.minute != self.last_minute {
             self.last_minute = now.minute;
@@ -496,6 +510,11 @@ impl Desk {
         const ASLEEP_MS: i32 = 125;
         const COVERED_MS: i32 = 250;
         let i = self.widget_at(WidgetId::Cat)?;
+        // Dimmed for idle or locked: nobody sees the cat, so it gets no frames (and the loop no
+        // wake-ups) until the user is back.
+        if crate::ui::away() {
+            return None;
+        }
         // This runs on every wake of the event loop, far more often than the cat needs a frame.
         let every = if self.cat.resting() { ASLEEP_MS } else { AWAKE_MS };
         let waited = self.cat_drawn.elapsed().as_millis() as i32;

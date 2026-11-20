@@ -117,10 +117,12 @@ fn run(action_id: &str, message: &str, cookie: &str, identities: &[(String, Hash
                 Err(_) => break None,
             }
         };
-        let Some(password) = answer.and_then(|v| v.into_iter().next()) else {
+        let Some(mut password) = answer.and_then(|v| v.into_iter().next()) else {
             return Err(PolkitError::Cancelled("dismissed".into()));
         };
-        match check(&user, cookie, &password) {
+        let checked = check(&user, cookie, &password);
+        prism_common::secret::wipe(&mut password);
+        match checked {
             Ok(true) => {
                 session.verdict(Verdict::Done);
                 return Ok(());

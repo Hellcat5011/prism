@@ -229,9 +229,11 @@ pub fn popup_timeout(expire_timeout: i32, urgency: u8) -> u32 {
 }
 
 /// file:// URIs and absolute paths that exist; None for icon names.
+/// An absolute path (or file:// URL) of a regular file. Paths come from any client on the session
+/// bus: a FIFO or device would block or never end when prism-ui opens it to decode.
 fn file_path(s: &str) -> Option<String> {
     let p = s.strip_prefix("file://").unwrap_or(s);
-    (p.starts_with('/') && std::path::Path::new(p).exists()).then(|| p.to_string())
+    (p.starts_with('/') && std::path::Path::new(p).is_file()).then(|| p.to_string())
 }
 
 fn looks_like_picture(p: &str) -> bool {
@@ -280,7 +282,8 @@ fn save_image_data(v: &OwnedValue) -> Option<String> {
     prune_images(&dir);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
     let path = dir.join(format!("{stamp}.png"));
-    prism_common::clipboard::write_private(&path, &encode_png(w as u32, h as u32, &rgba)).ok()?;
+    // Compressed and at most 1024 px a side: raw, a 4096 x 4096 image is a 64 MB file.
+    prism_common::pixbuf::save_png_rgba(&rgba, w as i32, h as i32, 1024, &path).ok()?;
     Some(path.to_string_lossy().into_owned())
 }
 
@@ -304,66 +307,6 @@ fn prune_images(dir: &std::path::Path) {
     }
 }
 
-// ── Minimal PNG writer (RGBA8, zlib "stored" blocks) ─────────────────────
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for &x in data {
-        a = (a + x as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
-}
-
-fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    let mut c = kind.to_vec();
-    c.extend_from_slice(data);
-    out.extend_from_slice(&c);
-    out.extend_from_slice(&crc32(&c).to_be_bytes());
-}
-
-pub fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
-    let mut raw = Vec::with_capacity((w as usize * 4 + 1) * h as usize);
-    for row in rgba.chunks(w as usize * 4) {
-        raw.push(0); // filter: none
-        raw.extend_from_slice(row);
-    }
-    let mut z = vec![0x78, 0x01];
-    let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
-    for (i, blk) in blocks.iter().enumerate() {
-        z.push(if i + 1 == blocks.len() { 1 } else { 0 });
-        let len = blk.len() as u16;
-        z.extend_from_slice(&len.to_le_bytes());
-        z.extend_from_slice(&(!len).to_le_bytes());
-        z.extend_from_slice(blk);
-    }
-    if blocks.is_empty() {
-        z.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
-    }
-    z.extend_from_slice(&adler32(&raw).to_be_bytes());
-    let mut out = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&w.to_be_bytes());
-    ihdr.extend_from_slice(&h.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
-    chunk(&mut out, b"IHDR", &ihdr);
-    chunk(&mut out, b"IDAT", &z);
-    chunk(&mut out, b"IEND", &[]);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,14 +319,6 @@ mod tests {
         assert_eq!(popup_timeout(500, 1), 3000);
         assert_eq!(popup_timeout(60000, 1), 20000);
         assert_eq!(popup_timeout(8000, 2), 0);
-    }
-
-    #[test]
-    fn png_checksums() {
-        assert_eq!(crc32(b"IEND"), 0xae42_6082);
-        assert_eq!(adler32(b"Wikipedia"), 0x11e6_0398);
-        let png = encode_png(2, 1, &[255, 0, 0, 255, 0, 255, 0, 128]);
-        assert_eq!(&png[1..4], b"PNG");
     }
 
     #[test]

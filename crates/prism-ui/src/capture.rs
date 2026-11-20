@@ -824,7 +824,7 @@ pub fn finish(img: Image, cfg: &Config, save: bool, ) -> Result<std::path::PathB
     let dir = if save {
         prism_common::config::expand_home(&cfg.capture_screenshot_dir)
     } else {
-        std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
+        prism_common::runtime::dir()
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(format!("Screenshot_{}.png", timestamp()));
@@ -844,7 +844,7 @@ pub use prism_common::capture::timestamp;
 /// Read the text in `img` with tesseract and copy it, on a worker thread; a notification says
 /// what happened (or that tesseract is missing).
 pub fn copy_text(mut img: Image, lang: String) {
-    let dir = std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
+    let dir = prism_common::runtime::dir();
     let path = dir.join(format!("prism-ocr-{}.png", std::process::id()));
     if let Err(e) = write_png(&mut img, &path) {
         eprintln!("[prism-ui] copy text: {e}");

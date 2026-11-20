@@ -8,18 +8,12 @@ use std::path::PathBuf;
 
 /// Control socket of prism-phoned.
 pub fn get_phone_socket_path() -> PathBuf {
-    match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(dir) if std::path::Path::new(&dir).is_dir() => PathBuf::from(dir).join("prism-phone.sock"),
-        _ => PathBuf::from(format!("/tmp/prism-phone-{}.sock", unsafe { libc::getuid() })),
-    }
+    crate::runtime::dir().join("prism-phone.sock")
 }
 
 /// Directory for runtime caches of prism-phoned (album art, notification icons).
 pub fn phone_runtime_dir() -> PathBuf {
-    match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(dir) if std::path::Path::new(&dir).is_dir() => PathBuf::from(dir).join("prism-phone"),
-        _ => PathBuf::from(format!("/tmp/prism-phone-{}", unsafe { libc::getuid() })),
-    }
+    crate::runtime::dir().join("prism-phone")
 }
 
 /// Everything the UI shows about phones. Sent whole on every change (it is small).

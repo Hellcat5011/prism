@@ -35,15 +35,19 @@ struct IdleState {
     notification: Option<ExtIdleNotificationV1>,
     /// Fires 30 s before the lock (QML dimIdleMonitor).
     dim_notification: Option<ExtIdleNotificationV1>,
+    /// Without auto-lock: fires after the same timeout, so idle animations still stop.
+    away_notification: Option<ExtIdleNotificationV1>,
     settings: IdleSettings,
     is_idle: Arc<AtomicBool>,
     on_idle: Arc<dyn Fn() + Send + Sync>,
     on_dim: Arc<dyn Fn(bool) + Send + Sync>,
+    on_away: Arc<dyn Fn(bool) + Send + Sync>,
 }
 
 /// User data of the idle notifications.
 const LOCK: u8 = 0;
 const DIM: u8 = 1;
+const AWAY: u8 = 2;
 /// The screens dim this long before the lock.
 const DIM_LEAD_SECS: u32 = 30;
 
@@ -57,9 +61,17 @@ impl IdleState {
             n.destroy();
             (self.on_dim)(false);
         }
+        if let Some(n) = self.away_notification.take() {
+            n.destroy();
+            (self.on_away)(false);
+        }
         self.is_idle.store(false, Ordering::SeqCst);
         if !self.settings.auto_lock {
             eprintln!("[prismd/idle] auto-lock off");
+            if let (Some(notifier), Some(seat)) = (&self.notifier, &self.seat) {
+                let ms = self.settings.timeout_mins.max(1).saturating_mul(60_000);
+                self.away_notification = Some(notifier.get_idle_notification(ms, seat, qh, AWAY));
+            }
             return;
         }
         if let (Some(notifier), Some(seat)) = (&self.notifier, &self.seat) {
@@ -128,6 +140,20 @@ impl Dispatch<ExtIdleNotificationV1, u8> for IdleState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if *kind == AWAY {
+            match event {
+                ext_idle_notification_v1::Event::Idled => {
+                    eprintln!("[prismd/idle] idle for {} min; idle animations paused", state.settings.timeout_mins.max(1));
+                    (state.on_away)(true);
+                }
+                ext_idle_notification_v1::Event::Resumed => {
+                    eprintln!("[prismd/idle] activity resumed; idle animations back");
+                    (state.on_away)(false);
+                }
+                _ => {}
+            }
+            return;
+        }
         if *kind == DIM {
             match event {
                 ext_idle_notification_v1::Event::Idled => {
@@ -161,6 +187,7 @@ pub fn start_idle_monitor(
     is_idle_flag: Arc<AtomicBool>,
     on_idle: Box<dyn Fn() + Send + Sync>,
     on_dim: Box<dyn Fn(bool) + Send + Sync>,
+    on_away: Box<dyn Fn(bool) + Send + Sync>,
 ) -> Option<IdleHandle> {
     if env::var("WAYLAND_DISPLAY").is_err() && env::var("WAYLAND_SOCKET").is_err() {
         eprintln!("[prismd/idle] No active WAYLAND_DISPLAY found; idle monitoring disabled.");
@@ -169,13 +196,14 @@ pub fn start_idle_monitor(
     let (tx, rx) = wake::channel::<IdleSettings>();
     let on_idle: Arc<dyn Fn() + Send + Sync> = Arc::from(on_idle);
     let on_dim: Arc<dyn Fn(bool) + Send + Sync> = Arc::from(on_dim);
+    let on_away: Arc<dyn Fn(bool) + Send + Sync> = Arc::from(on_away);
 
     // Reconnects when the compositor goes away (session restart), keeping the settings.
     thread::spawn(move || {
         let mut settings = settings;
         let mut last_error = String::new();
         loop {
-            if let Err(e) = session(&rx, &mut settings, &is_idle_flag, &on_idle, &on_dim) {
+            if let Err(e) = session(&rx, &mut settings, &is_idle_flag, &on_idle, &on_dim, &on_away) {
                 if e != last_error {
                     eprintln!("[prismd/idle] {e}; retrying until the compositor is back");
                     last_error = e;
@@ -183,6 +211,7 @@ pub fn start_idle_monitor(
             }
             is_idle_flag.store(false, Ordering::SeqCst);
             on_dim(false);
+            on_away(false);
             thread::sleep(std::time::Duration::from_secs(2));
         }
     });
@@ -196,6 +225,7 @@ fn session(
     is_idle: &Arc<AtomicBool>,
     on_idle: &Arc<dyn Fn() + Send + Sync>,
     on_dim: &Arc<dyn Fn(bool) + Send + Sync>,
+    on_away: &Arc<dyn Fn(bool) + Send + Sync>,
 ) -> Result<(), String> {
     let conn = Connection::connect_to_env().map_err(|e| format!("cannot connect to Wayland: {e}"))?;
     let mut event_queue: EventQueue<IdleState> = conn.new_event_queue();
@@ -205,10 +235,12 @@ fn session(
         seat: None,
         notification: None,
         dim_notification: None,
+        away_notification: None,
         settings: *settings,
         is_idle: Arc::clone(is_idle),
         on_idle: Arc::clone(on_idle),
         on_dim: Arc::clone(on_dim),
+        on_away: Arc::clone(on_away),
     };
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state).map_err(|e| format!("registry roundtrip failed: {e}"))?;

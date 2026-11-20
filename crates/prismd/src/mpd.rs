@@ -250,7 +250,7 @@ fn read_state(m: &mut Mpd) -> Result<State, String> {
 }
 
 fn art_dir() -> PathBuf {
-    PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("prism-mpd-art")
+    prism_common::runtime::dir().join("prism-mpd-art")
 }
 
 /// Cached cover for `file`, fetched from MPD when missing.

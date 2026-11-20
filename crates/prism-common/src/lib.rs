@@ -22,6 +22,8 @@ pub mod phone;
 pub mod pixbuf;
 pub mod power;
 pub mod render;
+pub mod runtime;
+pub mod secret;
 pub mod sound;
 pub mod theme;
 pub mod video;

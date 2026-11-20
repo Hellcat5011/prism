@@ -42,7 +42,7 @@ pub fn label(path: &str) -> String {
 }
 
 fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
+    crate::runtime::dir()
 }
 
 /// The built-in chime as a file the players can open.

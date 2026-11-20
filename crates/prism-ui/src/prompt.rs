@@ -134,7 +134,19 @@ pub fn pending() -> bool {
 /// The view for the next queued prompt.
 pub fn next_view() -> Option<PromptView> {
     let p = QUEUE.lock().unwrap().pop_front()?;
-    let values = p.req.fields.iter().map(|f| Query::with_text(&f.value)).collect();
+    let values = p
+        .req
+        .fields
+        .iter()
+        .map(|f| {
+            let mut q = Query::with_text(&f.value);
+            if f.secret {
+                // Room for any password up front, so typing does not reallocate (and leave copies).
+                q.text.reserve(512);
+            }
+            q
+        })
+        .collect();
     let focus = p.req.fields.iter().position(|f| f.value.is_empty()).unwrap_or(0);
     Some(PromptView { req: p.req, values, focus, answers: Some(p.answers), verdict: p.verdict, busy: false, error: None, hover: None, fields: Vec::new(), buttons: [Rect::default(); 2], close: false, selected: 0, first: 0, rows: Vec::new() })
 }
@@ -204,11 +216,23 @@ impl PromptView {
     }
 }
 
+impl PromptView {
+    fn wipe_secrets(&mut self) {
+        for (q, f) in self.values.iter_mut().zip(&self.req.fields) {
+            if f.secret {
+                prism_common::secret::wipe(&mut q.text);
+                *q = Query::default();
+            }
+        }
+    }
+}
+
 impl Drop for PromptView {
     fn drop(&mut self) {
         if let Some(tx) = self.answers.take() {
             let _ = tx.send(None);
         }
+        self.wipe_secrets();
     }
 }
 
@@ -379,11 +403,7 @@ impl CardView for PromptView {
                 Verdict::Retry(msg) => {
                     self.busy = false;
                     self.error = Some(msg);
-                    for (q, f) in self.values.iter_mut().zip(&self.req.fields) {
-                        if f.secret {
-                            *q = Query::default();
-                        }
-                    }
+                    self.wipe_secrets();
                     self.focus = self.req.fields.iter().position(|f| f.secret).unwrap_or(0);
                 }
             }
