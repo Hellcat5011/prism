@@ -467,7 +467,7 @@ impl CardView for GuideView {
                     let cur = get(&cfg);
                     let mut cx = x;
                     let mut cy = ry + 24.0;
-                    for (k, (label, value)) in options().iter().enumerate() {
+                    for (k, (label, value)) in options(&cfg).iter().enumerate() {
                         let (lw, _) = cb::measure_pango_text(cr, label, &f(13.0, ""), 400, Some(1));
                         let c = Rect { x: cx, y: cy, w: lw as f64 + 26.0, h: 30.0 };
                         if c.x + c.w > x + w {
@@ -536,7 +536,7 @@ impl CardView for GuideView {
             Hit::Choice(i, k) => {
                 if let Some(GuideControl::Choice(options, _, set)) = self.rows.get(i).map(|r| &r.control) {
                     let set = *set;
-                    if let Some((_, value)) = options().get(k).cloned() {
+                    if let Some((_, value)) = options(&self.cfg).get(k).cloned() {
                         self.change(|c| set(c, &value));
                     }
                 }
