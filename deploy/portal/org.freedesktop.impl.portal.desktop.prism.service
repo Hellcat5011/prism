@@ -1,5 +1,6 @@
-# prism-ui owns this name while it runs; activation starts Prism if it is not running yet.
+# prism-ui owns this name while it runs. Activation never starts Prism: prismd runs only when its user
+# unit is enabled (or started by hand), so disabling prismd keeps it off. Without Prism the portal
+# falls back to the other backends listed in mango-portals.conf.
 [D-BUS Service]
 Name=org.freedesktop.impl.portal.desktop.prism
 Exec=/bin/false
-SystemdService=prismd.service
