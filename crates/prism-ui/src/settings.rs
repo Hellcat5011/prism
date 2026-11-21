@@ -159,9 +159,9 @@ enum Control {
 }
 
 /// Lock screen designs that rework the wallpaper picture; with a video wallpaper Classic is shown instead.
-const PICTURE_THEMES: &[&str] = &["tide", "ink", "frost", "fireflies", "halftone"];
+const PICTURE_THEMES: &[&str] = &["tide", "ink", "fireflies", "halftone", "rings"];
 
-const LOCK_THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Stencil", "stencil"), ("Sentence", "sentence"), ("Aperture", "aperture"), ("Tide", "tide"), ("Ink", "ink"), ("Frost", "frost"), ("Fireflies", "fireflies"), ("Halftone", "halftone")];
+const LOCK_THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Stencil", "stencil"), ("Sentence", "sentence"), ("Aperture", "aperture"), ("Tide", "tide"), ("Ink", "ink"), ("Fireflies", "fireflies"), ("Halftone", "halftone"), ("Rings", "rings")];
 const THEME_FILTER_NOTE: &str = "Every theme shows your current wallpaper, including any wallpaper filter applied to it.";
 struct Row {
     tab: usize,

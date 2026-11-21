@@ -93,6 +93,9 @@ extern "C" {
     pub fn cairo_set_source(cr: *mut Cairo, pattern: *mut c_void);
     pub fn cairo_mask(cr: *mut Cairo, pattern: *mut c_void);
     pub fn cairo_mask_surface(cr: *mut Cairo, surface: *mut CairoSurface, x: f64, y: f64);
+    pub fn cairo_pattern_set_extend(pattern: *mut c_void, extend: i32);
+    pub fn cairo_get_current_point(cr: *mut Cairo, x: *mut f64, y: *mut f64);
+    pub fn cairo_pop_group(cr: *mut Cairo) -> *mut c_void;
     pub fn cairo_stroke_preserve(cr: *mut Cairo);
     pub fn cairo_pattern_destroy(pattern: *mut c_void);
     pub fn cairo_set_line_cap(cr: *mut Cairo, cap: i32);

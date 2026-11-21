@@ -68,9 +68,10 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 - **Lock screen and greeter**: `ext-session-lock-v1` lock with PAM, and a greetd greeter under `cage`. Nine designs:
   **Classic**, **Stencil** (the wallpaper seen through a giant clock), **Sentence** (the time and your
   notifications as a sentence), **Aperture** (a circular window that opens as you type), **Tide** (colour splashes
-  that fill the greyscale wallpaper on unlock), **Ink** (ink blots bleeding into a paper-white wallpaper), **Frost**
-  (iced glass that thaws from the middle as you type and melts away on unlock), **Fireflies** (a night-time wallpaper
-  lit by a firefly per key) and **Halftone** (a dot screen whose dots merge into the picture as you type and on unlock). The greeter mirrors the lock
+  that fill the greyscale wallpaper on unlock), **Ink** (ink blots bleeding into a paper-white wallpaper),
+  **Fireflies** (a night-time wallpaper lit by a firefly per key), **Halftone** (a dot screen whose dots merge into
+  the picture as you type and on unlock) and **Rings** (the wallpaper cut into concentric rings that turn as you
+  type and line up on unlock). The greeter mirrors the lock
   screen or uses its own design, and clicking the user or session cycles through them.
 - **Power menu**: five large designs (**Glide Bar**, **Split Panel**, **Shutters**, **Orbit** and **Floating
   Cards**). Choose which actions appear: Lock, Logout, Suspend, Sleep, Hibernate, Reboot and Shutdown (Sleep and
@@ -142,11 +143,11 @@ Choose a design in Settings > Lock Screen. The greeter can mirror it or use its 
     <td width="50%" align="center"><img src="assets/screenshots/lockscreen-ink.png" alt="Ink lock screen"><br><b>Ink</b></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-frost.png" alt="Frost lock screen"><br><b>Frost</b></td>
     <td width="50%" align="center"><img src="assets/screenshots/lockscreen-fireflies.png" alt="Fireflies lock screen"><br><b>Fireflies</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-halftone.png" alt="Halftone lock screen"><br><b>Halftone</b></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-halftone.png" alt="Halftone lock screen"><br><b>Halftone</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-rings.png" alt="Rings lock screen"><br><b>Rings</b></td>
   </tr>
 </table>
 

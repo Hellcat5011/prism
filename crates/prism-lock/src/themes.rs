@@ -5,7 +5,8 @@
 //! * Aperture: a round window onto the wallpaper that opens as you type.
 //! * Tide: a grey wallpaper that keys splash colour onto; unlocking spreads it over everything.
 //! * Ink: a paper-white wallpaper that keys drop bleeding ink blots onto; unlocking floods it.
-//! * Frost: the wallpaper behind iced glass that each key thaws further from the middle; unlocking melts it.
+//! * Rings: the wallpaper cut into concentric rings turned out of line; each key turns them, and
+//!   unlocking turns every ring on until the picture lines up.
 //! * Fireflies: the wallpaper at night, lit by a firefly per key; unlocking swarms into daylight.
 //! * Halftone: the wallpaper as a dot screen whose dots swell and merge as you type; unlocking merges them into it.
 //!
@@ -27,7 +28,7 @@ pub enum LockTheme {
     Aperture,
     Tide,
     Ink,
-    Frost,
+    Rings,
     Fireflies,
     Halftone,
 }
@@ -40,7 +41,7 @@ impl LockTheme {
             "aperture" => LockTheme::Aperture,
             "tide" => LockTheme::Tide,
             "ink" => LockTheme::Ink,
-            "frost" => LockTheme::Frost,
+            "rings" => LockTheme::Rings,
             "fireflies" => LockTheme::Fireflies,
             "halftone" => LockTheme::Halftone,
             _ => LockTheme::Classic,
@@ -56,7 +57,7 @@ impl LockTheme {
             LockTheme::Aperture => 800.0,
             LockTheme::Tide => 1200.0,
             LockTheme::Ink => 1300.0,
-            LockTheme::Frost => 1100.0,
+            LockTheme::Rings => 1500.0,
             LockTheme::Fireflies => 1300.0,
             LockTheme::Halftone => 1000.0,
         }
@@ -64,7 +65,7 @@ impl LockTheme {
 
     /// The design reworks the wallpaper picture itself, which a video wallpaper does not allow.
     pub fn needs_picture(self) -> bool {
-        matches!(self, LockTheme::Tide | LockTheme::Ink | LockTheme::Frost | LockTheme::Fireflies | LockTheme::Halftone)
+        matches!(self, LockTheme::Tide | LockTheme::Ink | LockTheme::Fireflies | LockTheme::Halftone | LockTheme::Rings)
     }
 
     /// Each key adds a mark (a splash, blot or firefly) to `Fx::splashes`.
@@ -82,6 +83,11 @@ const SPRING_SPLASH: Params = (0.42, 0.68);
 const SPRING_SHUT: Params = (0.12, 1.0);
 const SPRING_REOPEN: Params = (0.55, 0.8);
 const SPRING_FIREFLY: Params = (0.7, 0.75);
+const SPRING_RING: Params = (0.5, 0.78);
+const SPRING_RING_HOME: Params = (0.6, 0.72);
+const SPRING_RING_DONE: Params = (0.75, 0.9);
+/// Rings: how many rings the wallpaper is cut into.
+const RINGS: usize = 8;
 /// Ink: how long a blot keeps bleeding outward (s).
 const BLEED_S: f64 = 4.0;
 /// Halftone: how long a failure shakes the dots (s).
@@ -143,8 +149,8 @@ impl Spring {
 
 // ── Animation state ──────────────────────────────────────────────────────
 
-/// A mark made by a key: a splash of colour (Tide), an ink blot, a wipe through the frost, a
-/// firefly or a ripple (Halftone). Position in 0..1 screen fractions.
+/// A mark made by a key: a splash of colour (Tide), an ink blot or a firefly. Position in 0..1
+/// screen fractions.
 struct Splash {
     x: f64,
     y: f64,
@@ -169,7 +175,7 @@ pub struct Fx {
     shut: Spring,
     splashes: Vec<Splash>,
     rng: u64,
-    /// Fixed for the whole lock: shapes that must not change between frames (Frost's drips).
+    /// Fixed for the whole lock: what must not change between frames (the Rings' turns).
     seed: u64,
     failed_at: Option<Instant>,
     closing: bool,
@@ -177,6 +183,13 @@ pub struct Fx {
     pivot: Cell<Option<(f64, f64)>>,
     /// Sentence: what it says without notifications, chosen once per lock.
     idle_line: &'static str,
+    /// Rings: each ring's turn (radians) as a spring, the scrambled turn it rests at, and how far
+    /// one key turns it.
+    turns: Vec<Spring>,
+    home: Vec<f64>,
+    steps: Vec<f64>,
+    /// Rings: which ring the n-th key turns (every ring once, in a random order, then again).
+    order: Vec<usize>,
 }
 
 /// Sentence: the second line when no notifications are waiting.
@@ -223,10 +236,39 @@ impl Fx {
             rng,
             seed: rng,
             idle_line: idle_line(rng),
+            turns: Vec::new(),
+            home: Vec::new(),
+            steps: Vec::new(),
+            order: Vec::new(),
             failed_at: None,
             closing: false,
             pivot: Cell::new(None),
         }
+        .with_rings(now)
+    }
+
+    /// Rings: every ring turned out of line, by at least a little, alternately one way and the
+    /// other; a key turns one ring on by its own step (a dial's worth).
+    fn with_rings(mut self, now: Instant) -> Fx {
+        if self.theme == LockTheme::Rings {
+            for i in 0..RINGS as u64 {
+                let side = if noise(self.seed, 40 + i) < 0.5 { -1.0 } else { 1.0 };
+                let home = side * (0.45 + 2.2 * noise(self.seed, 50 + i));
+                self.home.push(home);
+                self.turns.push(Spring::new(home, now, SPRING_RING));
+                let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
+                self.steps.push(dir * (0.6 + 0.5 * noise(self.seed, 60 + i)));
+            }
+            let mut order: Vec<usize> = (0..RINGS).collect();
+            order.sort_by(|a, b| noise(self.seed, 70 + *a as u64).total_cmp(&noise(self.seed, 70 + *b as u64)));
+            self.order = order;
+        }
+        self
+    }
+
+    /// Rings: each ring's turn now.
+    fn ring_turns(&self, now: Instant) -> Vec<f64> {
+        self.turns.iter().map(|t| t.value(now)).collect()
     }
 
     fn next(&mut self) -> f64 {
@@ -277,12 +319,34 @@ impl Fx {
             while self.splashes.iter().filter(|s| !s.dying).count() < least {
                 self.add_splash(now);
             }
+            // Rings: each ring keeps turning the way it was going until it lines up, the inner
+            // ones first.
+            let tau = std::f64::consts::TAU;
+            for (i, turn) in self.turns.iter_mut().enumerate() {
+                let (x, v) = turn.sample(now);
+                let dir = if v.abs() > 0.05 { v.signum() } else { self.steps[i].signum() };
+                let mut to = if dir > 0.0 { (x / tau).ceil() * tau } else { (x / tau).floor() * tau };
+                if (to - x).abs() < 0.6 {
+                    to += dir * tau;
+                }
+                let start = now + std::time::Duration::from_secs_f64(0.05 * i as f64);
+                *turn = Spring { x0: x, v0: v, to, start, params: SPRING_RING_DONE };
+            }
         }
         if failed_at != self.failed_at {
             self.failed_at = failed_at;
             if failed_at.is_some() {
                 self.shut.set(0.08, now, SPRING_SHUT);
                 self.drop_splashes(0, now);
+                // Rings: back to their scrambled turns, one after another in a random order.
+                let tau = std::f64::consts::TAU;
+                let salt = self.next();
+                for (i, turn) in self.turns.iter_mut().enumerate() {
+                    let (x, v) = turn.sample(now);
+                    let home = self.home[i] + tau * ((x - self.home[i]) / tau).round();
+                    let start = now + std::time::Duration::from_secs_f64(0.5 * noise((salt * 1e15) as u64, i as u64));
+                    *turn = Spring { x0: x, v0: v, to: home, start, params: SPRING_RING_HOME };
+                }
             }
         }
         // The aperture opens again once it has snapped shut.
@@ -290,6 +354,17 @@ impl Fx {
             self.shut.set(1.0, now, SPRING_REOPEN);
         }
         if typed != self.typed && !checking && !self.closing {
+            // Rings: each key turns one ring a step; backspace turns that ring back. The password
+            // being cleared after a failure is not a turn: the rings are already going home.
+            let cleared = typed == 0 && self.failed_at.is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() < 1.5);
+            if !cleared && !self.order.is_empty() {
+                let (keys, sign) = if typed > self.typed { (self.typed..typed, 1.0) } else { (typed..self.typed, -1.0) };
+                for k in keys {
+                    let i = self.order[k % self.order.len()];
+                    let to = self.turns[i].to + sign * self.steps[i];
+                    self.turns[i].set(to, now, SPRING_RING);
+                }
+            }
             if self.theme.marks() {
                 for _ in self.typed..typed {
                     self.add_splash(now);
@@ -305,6 +380,7 @@ impl Fx {
     pub fn animating(&self, now: Instant) -> bool {
         let moving = match self.theme {
             LockTheme::Ink => self.splashes.iter().any(|s| s.age(now) < BLEED_S),
+            LockTheme::Rings => self.turns.iter().any(|t| !t.settled(now)),
             // Fireflies never stop wandering.
             LockTheme::Fireflies => !self.splashes.is_empty(),
             LockTheme::Halftone => self.shudder(now) > 0.0,
@@ -340,9 +416,12 @@ pub struct Layers {
     dots: Option<Dots>,
     merged: Option<*mut CairoSurface>,
     merged_at: Cell<f64>,
-    /// Fireflies: the soft round light one firefly casts, and its radius. Frost: the feather
-    /// mask along the thaw edge (radius `THAW_REACH` times the patch's).
+    /// Fireflies: the soft round light one firefly casts, and its radius.
     light: Option<(*mut CairoSurface, f64)>,
+    /// Rings: which ring each pixel is in, and the scrambled picture as last drawn (`turned_at`).
+    rings: Option<RingMap>,
+    turned: Option<*mut CairoSurface>,
+    turned_at: std::cell::RefCell<Vec<f64>>,
 }
 
 /// Halftone: one dot per cell, coloured from the wallpaper.
@@ -361,7 +440,7 @@ impl Drop for Layers {
     fn drop(&mut self) {
         unsafe {
             cb::cairo_surface_destroy(self.wall);
-            for s in [self.base, self.vivid, self.light.map(|l| l.0), self.merged].into_iter().flatten() {
+            for s in [self.base, self.vivid, self.light.map(|l| l.0), self.merged, self.turned].into_iter().flatten() {
                 cb::cairo_surface_destroy(s);
             }
         }
@@ -389,7 +468,6 @@ impl Layers {
                 LockTheme::Sentence => Some(veiled(wall, w, h, 0.62)),
                 LockTheme::Tide => Some(greyed(wall, w, h)),
                 LockTheme::Ink => Some(recoloured(wall, w, h, PAPER_DARK, PAPER)),
-                LockTheme::Frost => Some(frosted(wall, w, h)),
                 LockTheme::Fireflies => Some(veiled(wall, w, h, 0.86)),
                 LockTheme::Halftone => dots.as_ref().map(|d| draw_dots(d, w, h)),
                 _ => None,
@@ -405,13 +483,14 @@ impl Layers {
                 LockTheme::Fireflies => Some(warmed(wall, w, h)),
                 _ => None,
             };
+            let rings = (look.theme == LockTheme::Rings).then(|| RingMap::new(w as usize, h as usize));
+            let turned = rings.is_some().then(|| cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h));
             let light = match look.theme {
                 LockTheme::Fireflies => Some(light_sprite(w.min(h) as f64 * FIREFLY_LIGHT)),
-                LockTheme::Frost => Some(feather_sprite()),
                 _ => None,
             };
             let merged = dots.is_some().then(|| cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h));
-            Layers { size: (w, h), wall, base, vivid, dots, merged, merged_at: Cell::new(f64::NAN), light }
+            Layers { size: (w, h), wall, base, vivid, dots, merged, merged_at: Cell::new(f64::NAN), light, rings, turned, turned_at: Default::default() }
         }
     }
 }
@@ -485,102 +564,11 @@ unsafe fn rescaled(src: *mut CairoSurface, w: i32, h: i32, factor: f64) -> *mut 
         cb::cairo_scale(cr, factor, factor);
         cb::cairo_set_source_surface(cr, src, 0.0, 0.0);
         cb::cairo_pattern_set_filter(cb::cairo_get_source(cr), cb::CAIRO_FILTER_BILINEAR);
+        // Repeat the edge pixels rather than blend in the transparent outside.
+        cb::cairo_pattern_set_extend(cb::cairo_get_source(cr), 3);
         cb::cairo_paint(cr);
         cb::cairo_destroy(cr);
         s
-    }
-}
-
-/// Frost: the wallpaper blurred (shrunk and grown back in steps) under a pale haze.
-unsafe fn frosted(wall: *mut CairoSurface, w: i32, h: i32) -> *mut CairoSurface {
-    unsafe {
-        let size = |f: i32| ((w / f).max(1), (h / f).max(1));
-        let ((w4, h4), (w16, h16), (w48, h48)) = (size(4), size(16), size(48));
-        let a = rescaled(wall, w4, h4, w4 as f64 / w as f64);
-        let b = rescaled(a, w16, h16, w16 as f64 / w4 as f64);
-        let c = rescaled(b, w48, h48, w48 as f64 / w16 as f64);
-        let d = rescaled(c, w16, h16, w16 as f64 / w48 as f64);
-        let e = rescaled(d, w4, h4, w4 as f64 / w16 as f64);
-        let s = rescaled(e, w, h, w as f64 / w4 as f64);
-        for t in [a, b, c, d, e] {
-            cb::cairo_surface_destroy(t);
-        }
-        let cr = cb::cairo_create(s);
-        cb::cairo_set_source_rgba(cr, 0.92, 0.95, 1.0, 0.3);
-        cb::cairo_paint(cr);
-        rime(cr, w as f64, h as f64);
-        cb::cairo_destroy(cr);
-        s
-    }
-}
-
-/// Frost: ice thickening towards the edges of the screen, a white glaze and feathery crystals
-/// growing in from the borders.
-unsafe fn rime(cr: *mut Cairo, w: f64, h: f64) {
-    let unit = w.min(h);
-    let sc = (h / super::DESIGN_H).max(0.1);
-    unsafe {
-        // The glaze: clear in the middle, thick ice at the borders.
-        cb::cairo_save(cr);
-        cb::cairo_translate(cr, w / 2.0, h / 2.0);
-        cb::cairo_scale(cr, w / 2.0, h / 2.0);
-        let g = cb::cairo_pattern_create_radial(0.0, 0.0, 0.55, 0.0, 0.0, 1.45);
-        cb::cairo_pattern_add_color_stop_rgba(g, 0.0, 0.9, 0.95, 1.0, 0.0);
-        cb::cairo_pattern_add_color_stop_rgba(g, 0.6, 0.9, 0.95, 1.0, 0.38);
-        cb::cairo_pattern_add_color_stop_rgba(g, 1.0, 0.95, 0.98, 1.0, 0.75);
-        cb::cairo_set_source(cr, g);
-        cb::cairo_paint(cr);
-        cb::cairo_pattern_destroy(g);
-        cb::cairo_restore(cr);
-
-        // Crystals: many near the borders, a few further in, each a fern of branching needles.
-        let seed = 0x1CE_u64 ^ (w as u64) << 20 ^ h as u64;
-        let (cx, cy) = (w / 2.0, h / 2.0);
-        cb::cairo_new_path(cr);
-        let mut n = 0u64;
-        let mut placed = 0;
-        let want = (1400.0 * (w * h) / (2560.0 * 1440.0)).max(200.0) as usize;
-        while placed < want && n < 40 * want as u64 {
-            n += 1;
-            let (x, y) = (noise(seed, 3 * n) * w, noise(seed, 3 * n + 1) * h);
-            let edge = x.min(w - x).min(y).min(h - y) / unit;
-            if noise(seed, 3 * n + 2) > (-edge / 0.07).exp() {
-                continue;
-            }
-            placed += 1;
-            let inward = (cy - y).atan2(cx - x);
-            let angle = inward + (noise(seed, 5 * n) - 0.5) * 2.2;
-            let len = unit * (0.015 + 0.05 * noise(seed, 5 * n + 1)) * (1.0 - edge * 3.0).max(0.35);
-            fern(cr, x, y, angle, len, 2, seed ^ n);
-        }
-        cb::cairo_set_line_cap(cr, 1);
-        cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.16);
-        cb::cairo_set_line_width(cr, (2.2 * sc).max(1.0));
-        cb::cairo_stroke_preserve(cr);
-        cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.32);
-        cb::cairo_set_line_width(cr, (0.9 * sc).max(0.6));
-        cb::cairo_stroke(cr);
-        cb::cairo_set_line_cap(cr, 0);
-    }
-}
-
-/// One ice crystal: a needle with side needles at an angle, `depth` levels deep.
-unsafe fn fern(cr: *mut Cairo, x: f64, y: f64, angle: f64, len: f64, depth: u32, seed: u64) {
-    let (dx, dy) = (angle.cos(), angle.sin());
-    unsafe {
-        cb::cairo_move_to(cr, x, y);
-        cb::cairo_line_to(cr, x + dx * len, y + dy * len);
-    }
-    if depth == 0 {
-        return;
-    }
-    for (k, at) in [0.3, 0.5, 0.7, 0.88].into_iter().enumerate() {
-        let (bx, by) = (x + dx * len * at, y + dy * len * at);
-        let spread = 0.95 + 0.25 * noise(seed, 10 + k as u64);
-        let side = len * (1.0 - at) * (0.45 + 0.25 * noise(seed, 20 + k as u64));
-        for sign in [-1.0, 1.0] {
-            unsafe { fern(cr, bx, by, angle + sign * spread, side, depth - 1, seed.wrapping_mul(31).wrapping_add(k as u64 * 2 + (sign > 0.0) as u64)) };
-        }
     }
 }
 
@@ -636,29 +624,6 @@ unsafe fn warmed(wall: *mut CairoSurface, w: i32, h: i32) -> *mut CairoSurface {
         cb::cairo_paint(cr);
         cb::cairo_destroy(cr);
         s
-    }
-}
-
-/// Frost: how far past the thaw radius the feather mask reaches (the edge wobbles out to ~1.12).
-const THAW_REACH: f64 = 1.2;
-
-/// Frost: the ice coming back towards the edge of the thawed patch, as a mask: clear inside
-/// 0.72 of the patch radius, nearly opaque from 1.1 on.
-unsafe fn feather_sprite() -> (*mut CairoSurface, f64) {
-    let r = 256.0;
-    unsafe {
-        let size = (2.0 * r) as i32;
-        let s = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, size, size);
-        let cr = cb::cairo_create(s);
-        let p = cb::cairo_pattern_create_radial(r, r, 0.0, r, r, r);
-        for (at, a) in [(0.72, 0.0), (0.986, 0.55), (1.1, 0.9), (THAW_REACH, 0.9)] {
-            cb::cairo_pattern_add_color_stop_rgba(p, at / THAW_REACH, 0.0, 0.0, 0.0, a);
-        }
-        cb::cairo_set_source(cr, p);
-        cb::cairo_paint(cr);
-        cb::cairo_pattern_destroy(p);
-        cb::cairo_destroy(cr);
-        (s, r)
     }
 }
 
@@ -911,7 +876,7 @@ pub unsafe fn paint(cr: *mut Cairo, look: &Look, scene: &Scene, fx: &Fx, layers:
             LockTheme::Aperture => aperture(&mut c, layers),
             LockTheme::Tide => tide(&mut c, layers),
             LockTheme::Ink => ink(&mut c, layers),
-            LockTheme::Frost => frost(&mut c, layers),
+            LockTheme::Rings => rings(&mut c, layers),
             LockTheme::Fireflies => fireflies(&mut c, layers),
             LockTheme::Halftone => halftone(&mut c, layers),
             LockTheme::Classic => {}
@@ -1241,7 +1206,7 @@ unsafe fn tide(c: &mut Ctx, layers: &Layers) {
     }
 }
 
-/// Time, date and prompt in the bottom-left corner (Tide, Frost), then the footer.
+/// Time, date and prompt in the bottom-left corner, then the footer.
 fn corner_block(c: &mut Ctx, ink: Rgba, shadow: bool) {
     let (s, l) = (c.s, c.l);
     let (x, mut y) = (c.px(96.0), c.h - c.px(300.0));
@@ -1331,140 +1296,130 @@ unsafe fn ink(c: &mut Ctx, layers: &Layers) {
     }
 }
 
-// ── Frost ────────────────────────────────────────────────────────────────
+// ── Rings ────────────────────────────────────────────────────────────────
 
-/// The edge of the frost melting down the screen: a wavy line `melt` px down with drips.
-unsafe fn melt_path(cr: *mut Cairo, w: f64, h: f64, melt: f64, seed: u64) {
-    const COLS: usize = 14;
-    let col = w / COLS as f64;
-    let mut pts: Vec<(f64, f64)> = vec![(-col, melt)];
-    for i in 0..COLS {
-        let x = col * (i as f64 + 0.5 + 0.5 * (noise(seed, 40 + i as u64) - 0.5));
-        let drip = h * (0.04 + 0.2 * noise(seed, 60 + i as u64).powi(2));
-        let half = col * (0.1 + 0.08 * noise(seed, 80 + i as u64));
-        pts.extend([(x - 2.5 * half, melt), (x - half, melt + drip * 0.7), (x, melt + drip), (x + half, melt + drip * 0.7), (x + 2.5 * half, melt)]);
-    }
-    pts.push((w + col, melt));
-    let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
-    unsafe {
-        cb::cairo_new_sub_path(cr);
-        cb::cairo_move_to(cr, -col, -1.0);
-        cb::cairo_line_to(cr, w + col, -1.0);
-        cb::cairo_line_to(cr, w + col, melt);
-        // Smoothed through the midpoints, right to left.
-        let rev: Vec<(f64, f64)> = pts.into_iter().rev().collect();
-        for k in 1..rev.len() - 1 {
-            let (from, p, to) = (mid(rev[k - 1], rev[k]), rev[k], mid(rev[k], rev[k + 1]));
-            let ctl = |a: f64, b: f64| a + (b - a) * 2.0 / 3.0;
-            cb::cairo_line_to(cr, from.0, from.1);
-            cb::cairo_curve_to(cr, ctl(from.0, p.0), ctl(from.1, p.1), ctl(to.0, p.0), ctl(to.1, p.1), to.0, to.1);
+/// Rings: which ring every pixel lies in (rings of equal width out to the screen's corners).
+struct RingMap {
+    w: usize,
+    h: usize,
+    ring: Vec<u8>,
+}
+
+impl RingMap {
+    fn new(w: usize, h: usize) -> RingMap {
+        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+        let reach = (cx * cx + cy * cy).sqrt();
+        let mut ring = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let r = (x as f64 + 0.5 - cx).hypot(y as f64 + 0.5 - cy);
+                ring.push(((r / reach * RINGS as f64) as usize).min(RINGS - 1) as u8);
+            }
         }
-        cb::cairo_line_to(cr, -col, melt);
-        cb::cairo_close_path(cr);
+        RingMap { w, h, ring }
+    }
+
+    /// The outer radius of ring `i`.
+    fn radius(&self, i: usize) -> f64 {
+        (self.w as f64).hypot(self.h as f64) / 2.0 * (i + 1) as f64 / RINGS as f64
     }
 }
 
-/// Frost: the edge of the thawed patch, an uneven circle of radius `r`, as points.
-fn thaw_points(x: f64, y: f64, r: f64, seed: u64) -> Vec<(f64, f64)> {
-    const POINTS: usize = 64;
-    let tau = std::f64::consts::TAU;
-    (0..POINTS)
-        .map(|i| {
-            let a = tau * i as f64 / POINTS as f64;
-            let wave = 0.06 * (a * 3.0 + tau * noise(seed, 1)).sin() + 0.035 * (a * 7.0 + tau * noise(seed, 2)).sin() + 0.02 * (a * 13.0 + tau * noise(seed, 3)).sin();
-            let k = r * (1.0 + wave);
-            (x + a.cos() * k, y + a.sin() * k)
-        })
-        .collect()
-}
-
-/// The closed smooth curve through `pts` (through their midpoints, like the Tide splashes).
-unsafe fn smooth_closed(cr: *mut Cairo, pts: &[(f64, f64)]) {
-    let n = pts.len();
-    let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
-    let ctl = |a: f64, b: f64| a + (b - a) * 2.0 / 3.0;
+/// Rings: the wallpaper with every ring turned by `turns`, drawn straight into `dst` (bilinear,
+/// in bands on several threads: cairo would resample the whole screen once per ring). Points
+/// that turn in from beyond the screen's edge take the edge's colour.
+unsafe fn raster_rings(dst: *mut CairoSurface, wall: *mut CairoSurface, map: &RingMap, turns: &[f64]) {
+    let (w, h) = (map.w, map.h);
     unsafe {
-        cb::cairo_new_path(cr);
-        let start = mid(pts[n - 1], pts[0]);
-        cb::cairo_move_to(cr, start.0, start.1);
-        for i in 0..n {
-            let (p, end) = (pts[i], mid(pts[i], pts[(i + 1) % n]));
-            let from = mid(pts[(i + n - 1) % n], p);
-            cb::cairo_curve_to(cr, ctl(from.0, p.0), ctl(from.1, p.1), ctl(end.0, p.0), ctl(end.1, p.1), end.0, end.1);
-        }
-        cb::cairo_close_path(cr);
+        cb::cairo_surface_flush(wall);
+        cb::cairo_surface_flush(dst);
     }
+    let src_stride = unsafe { cb::cairo_image_surface_get_stride(wall) as usize } / 4;
+    let dst_stride = unsafe { cb::cairo_image_surface_get_stride(dst) as usize } / 4;
+    let src = unsafe { std::slice::from_raw_parts(cb::cairo_image_surface_get_data(wall) as *const u32, src_stride * h) };
+    let out = unsafe { std::slice::from_raw_parts_mut(cb::cairo_image_surface_get_data(dst) as *mut u32, dst_stride * h) };
+    let rot: Vec<(f32, f32)> = turns.iter().map(|a| (a.cos() as f32, a.sin() as f32)).collect();
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    // Positions in 1/256 px; past the screen's edge the edge pixels carry on.
+    let (max_x, max_y) = (((w - 1) * 256) as i32, ((h - 1) * 256) as i32);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let band = h.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (k, rows) in out.chunks_mut(band * dst_stride).enumerate() {
+            let rot = &rot;
+            scope.spawn(move || {
+                let y0 = k * band;
+                for (dy_row, line) in rows.chunks_mut(dst_stride).enumerate() {
+                    let y = y0 + dy_row;
+                    if y >= h {
+                        break;
+                    }
+                    let dy = y as f32 + 0.5 - cy;
+                    let rings = &map.ring[y * w..(y + 1) * w];
+                    for (x, (p, &ring)) in line[..w].iter_mut().zip(rings).enumerate() {
+                        let (c, s) = rot[ring as usize];
+                        let dx = x as f32 + 0.5 - cx;
+                        // Turning the picture by `a` shows, at each point, what lay `a` back.
+                        let sx = (((cx + c * dx + s * dy - 0.5) * 256.0) as i32).clamp(0, max_x);
+                        let sy = (((cy - s * dx + c * dy - 0.5) * 256.0) as i32).clamp(0, max_y);
+                        let (x0, y0) = ((sx >> 8) as usize, (sy >> 8) as usize);
+                        let (fx, fy) = ((sx & 255) as u32, (sy & 255) as u32);
+                        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+                        let (r0, r1) = (y0 * src_stride, y1 * src_stride);
+                        let top = mix_argb(src[r0 + x0], src[r0 + x1], fx);
+                        let bottom = mix_argb(src[r1 + x0], src[r1 + x1], fx);
+                        *p = 0xFF00_0000 | mix_argb(top, bottom, fy);
+                    }
+                }
+            });
+        }
+    });
+    unsafe { cb::cairo_surface_mark_dirty(dst) };
 }
 
-unsafe fn frost(c: &mut Ctx, layers: &Layers) {
+/// Two RGB pixels mixed `f`/256 of the way from `a` to `b` (two channels per multiply).
+#[inline]
+fn mix_argb(a: u32, b: u32, f: u32) -> u32 {
+    let g = 256 - f;
+    let rb = (((a & 0x00FF_00FF) * g + (b & 0x00FF_00FF) * f) >> 8) & 0x00FF_00FF;
+    let gg = (((a & 0x0000_FF00) * g + (b & 0x0000_FF00) * f) >> 8) & 0x0000_FF00;
+    rb | gg
+}
+
+unsafe fn rings(c: &mut Ctx, layers: &Layers) {
     let (cr, s) = (c.cr, c.s);
     let (w, h) = (c.w, c.h);
-    let unit = w.min(h);
-    let far = (w * w + h * h).sqrt();
     let closing = c.closing_t();
-    let ice = layers.base.unwrap_or(layers.wall);
+    let tau = std::f64::consts::TAU;
+    let (Some(map), Some(turned)) = (layers.rings.as_ref(), layers.turned) else { return };
+    let turns = c.fx.ring_turns(s.now);
+    // How far the rings are from lining up (radians), the furthest one.
+    let off = turns.iter().map(|a| { let r = a.rem_euclid(tau); r.min(tau - r) }).fold(0.0, f64::max);
     unsafe {
-        c.paint_surface(ice, 1.0);
-        // Each key thaws the glass further out from the middle; the edges stay iced.
-        let mut r = unit * 0.62 * (1.0 - (-c.fx.level(s.now) / 5.0).exp());
-        if let Some(t) = closing {
-            r += far * progress((0.85, 1.0), t);
-        }
-        if r > 1.0 {
-            let (cx, cy) = (w / 2.0, h * 0.45);
-            let pts = thaw_points(cx, cy, r, c.fx.seed);
-            smooth_closed(cr, &pts);
-            cb::cairo_set_source_surface(cr, layers.wall, 0.0, 0.0);
-            cb::cairo_fill_preserve(cr);
-            // The ice fades in towards the edge instead of stopping hard (not while unlocking:
-            // the patch is then the size of the screen).
-            if let (Some((sprite, sr)), None) = (layers.light, closing) {
-                let reach = r * THAW_REACH;
-                cb::cairo_save(cr);
-                cb::cairo_clip(cr);
-                cb::cairo_set_source_surface(cr, ice, 0.0, 0.0);
-                cb::cairo_translate(cr, cx - reach, cy - reach);
-                cb::cairo_scale(cr, reach / sr, reach / sr);
-                cb::cairo_mask_surface(cr, sprite, 0.0, 0.0);
-                cb::cairo_restore(cr);
-            } else {
-                cb::cairo_new_path(cr);
+        if off < 0.0005 {
+            c.paint_surface(layers.wall, 1.0);
+        } else {
+            let mut last = layers.turned_at.borrow_mut();
+            if last.len() != turns.len() || last.iter().zip(&turns).any(|(a, b)| (a - b).abs() > 1e-4) {
+                raster_rings(turned, layers.wall, map, &turns);
+                *last = turns.clone();
             }
-            // Needles of ice growing in from the rim, then a faint bright line along it.
-            if closing.is_none() {
-                cb::cairo_new_path(cr);
-                for (i, &(px, py)) in pts.iter().enumerate() {
-                    let k = c.fx.seed ^ (i as u64) << 8;
-                    if noise(k, 1) < 0.35 {
-                        continue;
-                    }
-                    let inward = (cy - py).atan2(cx - px) + (noise(k, 2) - 0.5) * 1.1;
-                    fern(cr, px, py, inward, c.px(26.0 + 40.0 * noise(k, 3)), 1, k);
-                }
-                cb::cairo_set_line_cap(cr, 1);
-                cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.2);
-                cb::cairo_set_line_width(cr, c.px(2.2).max(1.0));
-                cb::cairo_stroke_preserve(cr);
-                cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.45);
-                cb::cairo_set_line_width(cr, c.px(0.9).max(0.6));
-                cb::cairo_stroke(cr);
-                cb::cairo_set_line_cap(cr, 0);
-            }
-            smooth_closed(cr, &pts);
-            cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.3);
-            cb::cairo_set_line_width(cr, c.px(1.5).max(1.0));
-            cb::cairo_stroke(cr);
+            c.paint_surface(turned, 1.0);
         }
-        if let Some(t) = closing {
-            let melt = progress((0.85, 1.0), t) * h * 1.3;
+        // Fine seams between the rings, gone once the picture is whole again.
+        let seam = if closing.is_some() { (off / 0.35).min(1.0) } else { 1.0 };
+        if seam > 0.01 {
             cb::cairo_new_path(cr);
-            melt_path(cr, w, h, melt, c.fx.seed);
-            cb::cairo_set_source_surface(cr, layers.wall, 0.0, 0.0);
-            cb::cairo_fill(cr);
-            let whole = ((t - 0.8) / 0.3).clamp(0.0, 1.0);
-            if whole > 0.0 {
-                c.paint_surface(layers.wall, whole);
+            for i in 0..RINGS - 1 {
+                cb::cairo_new_sub_path(cr);
+                cb::cairo_arc(cr, w / 2.0, h / 2.0, map.radius(i), 0.0, tau);
             }
+            cb::cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.45 * seam);
+            cb::cairo_set_line_width(cr, c.px(3.0).max(1.5));
+            cb::cairo_stroke_preserve(cr);
+            cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.12 * seam);
+            cb::cairo_set_line_width(cr, c.px(1.0).max(0.75));
+            cb::cairo_stroke(cr);
         }
     }
     let ink = alpha(WHITE, text_fade(closing));
@@ -1690,7 +1645,7 @@ mod tests {
         (LockTheme::Aperture, "aperture"),
         (LockTheme::Tide, "tide"),
         (LockTheme::Ink, "ink"),
-        (LockTheme::Frost, "frost"),
+        (LockTheme::Rings, "rings"),
         (LockTheme::Fireflies, "fireflies"),
         (LockTheme::Halftone, "halftone"),
     ];
@@ -1803,6 +1758,48 @@ mod tests {
             let d = layers.dots.as_ref().unwrap();
             for merge in [0.0, 0.3, 0.7, 1.0] {
                 unsafe { raster_dots(layers.merged.unwrap(), d, merge) };
+            }
+        }
+    }
+
+    /// Rings start out of line, keys turn them, a failure sends them back, and the unlock lines
+    /// every ring up.
+    #[test]
+    fn rings_scramble_turn_and_line_up() {
+        let tau = std::f64::consts::TAU;
+        let off = |a: f64| { let r = a.rem_euclid(tau); r.min(tau - r) };
+        let t0 = Instant::now();
+        let mut fx = Fx::new(LockTheme::Rings, t0);
+        let start = fx.ring_turns(t0);
+        assert!(start.iter().all(|a| off(*a) > 0.4));
+        fx.sync(3, false, None, false, t0);
+        let later = t0 + Duration::from_secs(3);
+        let moved = fx.ring_turns(later).iter().zip(&start).filter(|(a, b)| (*a - *b).abs() > 0.5).count();
+        assert_eq!(moved, 3, "one ring per key");
+        fx.sync(2, false, None, false, later);
+        let back = later + Duration::from_secs(3);
+        let moved = fx.ring_turns(back).iter().zip(&start).filter(|(a, b)| (*a - *b).abs() > 0.5).count();
+        assert_eq!(moved, 2, "backspace turns the last ring back");
+        let later = back;
+        fx.sync(0, false, Some(later), false, later);
+        let home = later + Duration::from_secs(4);
+        assert!(fx.ring_turns(home).iter().zip(&start).all(|(a, b)| off(a - b) < 0.01));
+        fx.sync(5, false, None, false, home);
+        fx.sync(5, false, None, true, home);
+        let done = home + Duration::from_millis(LockTheme::Rings.closing_ms() as u64);
+        assert!(fx.ring_turns(done).iter().all(|a| off(*a) < 0.01), "{:?}", fx.ring_turns(done));
+    }
+
+    #[test]
+    fn rings_turn_at_any_screen_size() {
+        let l = look(LockTheme::Rings);
+        for (w, h) in [(2560, 1440), (1920, 1080), (1366, 768), (1001, 613), (64, 37)] {
+            let layers = Layers::render(&l, w, h);
+            let turns: Vec<f64> = (0..RINGS).map(|i| i as f64 * 0.7 - 2.0).collect();
+            let t = Instant::now();
+            unsafe { raster_rings(layers.turned.unwrap(), layers.wall, layers.rings.as_ref().unwrap(), &turns) };
+            if std::env::var("PRISM_LOCK_RENDER_DIR").is_ok() {
+                println!("rings raster {w}x{h} {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
             }
         }
     }

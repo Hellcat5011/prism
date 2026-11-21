@@ -70,7 +70,7 @@ pub struct Config {
 
     #[serde(default = "default_true")]
     pub show_lockscreen_session_controls: bool,
-    /// Lock screen design: classic, stencil, sentence, aperture, tide, ink, frost, fireflies or halftone.
+    /// Lock screen design: classic, stencil, sentence, aperture, tide, ink, fireflies, halftone or rings.
     #[serde(default = "default_lockscreen_theme")]
     pub lockscreen_theme: String,
     /// Greeter design: one of the lock screen designs, or "mirror" to follow the lock screen.
@@ -1238,8 +1238,8 @@ mod tests {
         let mut c = Config { lockscreen_theme: "tide".into(), ..Config::default() };
         assert_eq!(c.greeter_theme, "mirror");
         assert_eq!(c.greeter_snapshot()["theme"], "tide");
-        c.greeter_theme = "frost".into();
-        assert_eq!(c.greeter_snapshot()["theme"], "frost");
+        c.greeter_theme = "rings".into();
+        assert_eq!(c.greeter_snapshot()["theme"], "rings");
     }
 
     use super::*;

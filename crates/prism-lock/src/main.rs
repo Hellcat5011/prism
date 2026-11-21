@@ -159,7 +159,7 @@ impl Look {
             Mode::Greeter => greetd::load_greeter_config().wallpaper_video.then(|| greetd::get_state_dir().join(prism_common::wallpaper::GREETER_VIDEO)),
         });
         let video = video.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned());
-        // Tide, Ink, Frost, Fireflies and Halftone rework the wallpaper picture, which a video does not allow.
+        // Most designs rework the wallpaper picture (`needs_picture`), which a video does not allow.
         let design = match LockTheme::from_id(&theme_id) {
             design if design.needs_picture() && video.is_some() => LockTheme::Classic,
             design => design,
