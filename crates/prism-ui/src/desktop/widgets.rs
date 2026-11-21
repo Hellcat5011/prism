@@ -674,8 +674,14 @@ pub fn draw_shortcuts(
                 cairo_fill(cr);
             }
         }
-        let st = TextStyle { family: ICON_FONT, px: (size * 0.5).round().max(12.0), bold: false, color: look.fg };
-        draw_in_box(cr, SHORTCUTS[idx].2, &st, x, y, cell_w, cell_h, Align::Center);
+        if idx == 0 {
+            // The launcher shortcut is the Prism logo mark.
+            let i = (size * 0.52).round().max(12.0);
+            crate::svg::draw_logo(cr, ccx - i / 2.0, ccy - i / 2.0, i);
+        } else {
+            let st = TextStyle { family: ICON_FONT, px: (size * 0.5).round().max(12.0), bold: false, color: look.fg };
+            draw_in_box(cr, SHORTCUTS[idx].2, &st, x, y, cell_w, cell_h, Align::Center);
+        }
         hits.push((Hit::Shortcut(idx), Rect { x, y, w: cell_w, h: cell_h }));
     }
     hits

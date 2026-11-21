@@ -1,4 +1,11 @@
-# Prism 💎
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo/prism-lockup-light.png">
+    <img src="assets/logo/prism-lockup.png" alt="Prism" width="420">
+  </picture>
+</p>
+
+# Prism
 
 > A native Rust Wayland desktop shell for **MangoWM**, with config snippets for **Niri** and **Hyprland**.
 

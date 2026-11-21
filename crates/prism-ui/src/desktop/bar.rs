@@ -19,7 +19,6 @@ use super::text::{draw_in_box, measure, Align, TextStyle};
 use super::widgets::{LocalTime, Look, Rgba, TrayIcon};
 use super::windows::WorkspaceView;
 
-const ICON_LAUNCHER: &str = "M4 4h6v6H4Z M14 4h6v6h-6Z M4 14h6v6H4Z M14 14h6v6h-6Z";
 const ICON_BELL: &str = "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9 M10.3 21a1.94 1.94 0 0 0 3.4 0";
 const ICON_POWER: &str = "M12 2v10 M18.4 6.6a9 9 0 1 1-12.77.04";
 const ICON_CPU: &str = "M6 6h12v12H6Z M9 9h6v6H9Z M9 2v2 M15 2v2 M9 20v2 M15 20v2 M2 9h2 M2 15h2 M20 9h2 M20 15h2";
@@ -176,6 +175,17 @@ fn icon_button(cr: *mut Cairo, r: Rect, hit: PanelHit, icon: &str, filled: bool,
     draw_hover(cr, b, level, v.look);
     let i = (b.w * 0.56).round();
     crate::svg::draw_path(cr, icon, b.x + (b.w - i) / 2.0, b.y + (b.h - i) / 2.0, i, v.look.fg, if filled { None } else { Some(2.0) });
+    hits.push((hit, b));
+}
+
+/// The launcher button shows the Prism logo mark instead of a monochrome glyph.
+fn logo_button(cr: *mut Cairo, r: Rect, v: &BarView, st: &mut BarState, hits: &mut Vec<(PanelHit, Rect)>) {
+    let hit = PanelHit::Launcher;
+    let b = centered(r, r.w.min(r.h));
+    let level = st.fades.level(hit, v.hover == Some(hit), v.style);
+    draw_hover(cr, b, level, v.look);
+    let i = (b.w * 0.6).round();
+    crate::svg::draw_logo(cr, b.x + (b.w - i) / 2.0, b.y + (b.h - i) / 2.0, i);
     hits.push((hit, b));
 }
 
@@ -340,7 +350,7 @@ fn draw_module(cr: *mut Cairo, id: &str, r: Rect, vertical: bool, t: f64, v: &Ba
         "sysmon" => draw_sysmon(cr, r, vertical, v),
         "tray" => draw_tray(cr, r, vertical, t, v, st, hits),
         "mpris" => draw_media(cr, r, vertical, t, v, st, hits),
-        "launcher" => icon_button(cr, r, PanelHit::Launcher, ICON_LAUNCHER, false, v, st, hits),
+        "launcher" => logo_button(cr, r, v, st, hits),
         "notifications" => icon_button(cr, r, PanelHit::Notifications, ICON_BELL, false, v, st, hits),
         "power" => icon_button(cr, r, PanelHit::Power, ICON_POWER, false, v, st, hits),
         "updates" => draw_updates(cr, r, vertical, t, v, st, hits),

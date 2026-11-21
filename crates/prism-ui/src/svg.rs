@@ -447,3 +447,44 @@ mod tests {
         }
     }
 }
+
+/// The Prism logo mark (three facets: blue, violet, amber) in a `size` square at (x, y).
+/// The facets are inset so the gaps between them stay transparent on any background.
+pub fn draw_logo(cr: *mut Cairo, x: f64, y: f64, size: f64) {
+    // Geometry of assets/logo/prism-icon.svg (box 136 x 130 at 52,92).
+    const A: (f64, f64) = (120.0, 92.0);
+    const B: (f64, f64) = (52.0, 222.0);
+    const C: (f64, f64) = (188.0, 222.0);
+    const O: (f64, f64) = (128.0, 180.0);
+    const FACES: [([(f64, f64); 3], u32); 3] = [([A, O, B], 0x5ab8ff), ([A, C, O], 0xc07cff), ([B, O, C], 0xffb347)];
+    let unit = size / 136.0;
+    let oy = (size - 130.0 * unit) / 2.0;
+    let map = |p: (f64, f64)| (x + (p.0 - 52.0) * unit, y + oy + (p.1 - 92.0) * unit);
+    for (tri, rgb) in FACES {
+        let [p, q, r] = inset(tri, 3.5);
+        unsafe {
+            cb::cairo_new_path(cr);
+            let (px, py) = map(p);
+            cb::cairo_move_to(cr, px, py);
+            for v in [q, r] {
+                let (vx, vy) = map(v);
+                cb::cairo_line_to(cr, vx, vy);
+            }
+            cb::cairo_close_path(cr);
+            let c = |s: u32| ((rgb >> s) & 0xff) as f64 / 255.0;
+            cb::cairo_set_source_rgba(cr, c(16), c(8), c(0), 1.0);
+            cb::cairo_fill(cr);
+        }
+    }
+}
+
+/// Moves every edge of a triangle inward by `d` (scaling about the incenter does exactly that).
+fn inset(t: [(f64, f64); 3], d: f64) -> [(f64, f64); 3] {
+    let len = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).hypot(p.1 - q.1);
+    let (a, b, c) = (len(t[1], t[2]), len(t[2], t[0]), len(t[0], t[1]));
+    let per = a + b + c;
+    let i = ((a * t[0].0 + b * t[1].0 + c * t[2].0) / per, (a * t[0].1 + b * t[1].1 + c * t[2].1) / per);
+    let area = ((t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1)).abs() / 2.0;
+    let k = (2.0 * area / per - d) / (2.0 * area / per);
+    t.map(|p| (i.0 + (p.0 - i.0) * k, i.1 + (p.1 - i.1) * k))
+}
