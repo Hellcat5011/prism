@@ -168,6 +168,14 @@ echo "[6/9] Desktop portal (screenshots, screen sharing and appearance for apps)
 # descriptions from XDG_DATA_DIRS, so a drop-in adds ~/.local/share for it (no root needed).
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+# App icon (hicolor "prism") and the Prism Settings launcher entry.
+install -Dm644 "$REPO_DIR/assets/logo/prism-app.svg" "$DATA_HOME/icons/hicolor/scalable/apps/prism.svg"
+for size in 16 24 32 48 64 128 256 512; do
+    install -d "$DATA_HOME/icons/hicolor/${size}x${size}/apps"
+    rsvg-convert -w "$size" -h "$size" "$REPO_DIR/assets/logo/prism-app.svg" -o "$DATA_HOME/icons/hicolor/${size}x${size}/apps/prism.png" 2>/dev/null || true
+done
+gtk-update-icon-cache -q -t "$DATA_HOME/icons/hicolor" 2>/dev/null || true
+install -Dm644 "$SCRIPT_DIR/prism-settings.desktop" "$DATA_HOME/applications/prism-settings.desktop"
 install -Dm644 "$SCRIPT_DIR/portal/prism.portal" "$DATA_HOME/xdg-desktop-portal/portals/prism.portal"
 install -Dm644 "$SCRIPT_DIR/portal/org.freedesktop.impl.portal.desktop.prism.service" "$DATA_HOME/dbus-1/services/org.freedesktop.impl.portal.desktop.prism.service"
 install -Dm644 "$SCRIPT_DIR/portal/xdg-desktop-portal-prism.conf" "$SYSTEMD_USER_DIR/xdg-desktop-portal.service.d/prism.conf"

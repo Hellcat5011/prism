@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Prism Settings
+Comment=Configure the Prism desktop shell
+Exec=prism-ctl settings
+Icon=prism
+Categories=Settings;DesktopSettings;
+Keywords=prism;shell;settings;preferences;
