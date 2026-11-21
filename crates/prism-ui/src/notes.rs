@@ -189,7 +189,9 @@ impl CardView for NotesView {
             cb::draw_pango_text(cr, area.x, top, "Write something\u{2026}", &font, (fg.0, fg.1, fg.2, 0.4), None);
         }
         cb::edit_text(cr, area.x, top, &self.text, &font, fg, area.w, self.caret, None, true);
-        cb::fill_rounded_rect(cr, area.x + caret.0, top + caret.1, 1.5, caret.2.max(16.0), 0.0, style.accent);
+        if crate::ui::caret_on() {
+            cb::fill_rounded_rect(cr, area.x + caret.0, top + caret.1, 1.5, caret.2.max(16.0), 0.0, style.accent);
+        }
         unsafe { cb::cairo_restore(cr) };
         self.caret_rect = caret;
     }

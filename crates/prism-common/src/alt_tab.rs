@@ -39,7 +39,7 @@ impl Compositor {
     }
 
     /// Hyprland 0.55+ reads `hyprland.lua` when it exists, else the older `hyprland.conf`.
-    fn main_config(self) -> PathBuf {
+    pub(crate) fn main_config(self) -> PathBuf {
         match self {
             Compositor::Mango => expand_home("~/.config/mango/config.conf"),
             Compositor::Hyprland => {
@@ -73,12 +73,12 @@ pub struct Bind {
 }
 
 /// Whether a config file is Hyprland Lua (as opposed to hyprlang, Mango or KDL).
-fn is_lua(f: &Path) -> bool {
+pub(crate) fn is_lua(f: &Path) -> bool {
     f.extension().is_some_and(|e| e == "lua")
 }
 
 /// The config files: the main one and everything it sources, in order, each once.
-fn files(c: Compositor) -> Vec<PathBuf> {
+pub(crate) fn files(c: Compositor) -> Vec<PathBuf> {
     let main = c.main_config();
     // Lua's `require` resolves module names against the config directory, not the requiring file.
     let root = main.parent().map(Path::to_path_buf).unwrap_or_default();

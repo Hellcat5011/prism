@@ -148,7 +148,7 @@ pub fn next_view() -> Option<PromptView> {
         })
         .collect();
     let focus = p.req.fields.iter().position(|f| f.value.is_empty()).unwrap_or(0);
-    Some(PromptView { req: p.req, values, focus, answers: Some(p.answers), verdict: p.verdict, busy: false, error: None, hover: None, fields: Vec::new(), buttons: [Rect::default(); 2], close: false, selected: 0, first: 0, rows: Vec::new() })
+    Some(PromptView { req: p.req, values, focus, answers: Some(p.answers), verdict: p.verdict, busy: false, error: None, hover: None, fields: Vec::new(), buttons: [Rect::default(); 2], close: false, selected: 0, first: 0, rows: Vec::new(), palette: None })
 }
 
 pub struct PromptView {
@@ -169,6 +169,8 @@ pub struct PromptView {
     selected: usize,
     first: usize,
     rows: Vec<(usize, Rect)>,
+    /// Palette of the last draw (clicks in a field measure its text).
+    palette: Option<Palette>,
 }
 
 impl PromptView {
@@ -248,6 +250,7 @@ impl CardView for PromptView {
             error: cb::hex_to_rgba(&theme.error, 1.0),
             family: style.font_family.clone(),
         };
+        self.palette = Some(p.clone());
         let x = card.x + PAD;
         let w = card.w - 2.0 * PAD;
         let mut y = card.y + PAD;
@@ -272,7 +275,7 @@ impl CardView for PromptView {
             let r = Rect { x, y, w, h: FIELD_H };
             let text = if f.secret { "\u{2022}".repeat(self.values[i].text.chars().count()) } else { self.values[i].text.clone() };
             let hover = if self.hover == Some(10 + i) { 1.0 } else { 0.0 };
-            uikit::text_field(cr, r, &text, "", i == self.focus && !self.busy, hover, self.error.is_some() && f.secret, &p);
+            uikit::text_field(cr, r, &text, "", (i == self.focus && !self.busy).then(|| self.values[i].caret()), hover, self.error.is_some() && f.secret, &p);
             self.fields.push(r);
             y += FIELD_H + ROW_GAP;
         }
@@ -331,6 +334,12 @@ impl CardView for PromptView {
         }
         if let Some(i) = self.fields.iter().position(|r| r.contains(x, y)) {
             self.focus = i;
+            // The caret goes where the field was clicked (secret fields show one dot per char).
+            if let (Some(p), Some(q)) = (self.palette.clone(), self.values.get_mut(i)) {
+                let shown = if self.req.fields[i].secret { "\u{2022}".repeat(q.text.chars().count()) } else { q.text.clone() };
+                let ci = uikit::field_index_at(self.fields[i], &shown, q.caret(), &p, x);
+                q.set_caret(ci);
+            }
             return Effect::Redraw;
         }
         if let Some(&(i, _)) = self.rows.iter().find(|(_, r)| r.contains(x, y)) {

@@ -13,7 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use prism_common::{Config, Theme};
 
@@ -480,6 +480,57 @@ pub fn keep_animating() {
 /// True if anything drawn since the last call is still moving (the card must keep rendering).
 pub fn take_anim_pending() -> bool {
     ANIM_PENDING.with(|p| p.replace(false))
+}
+
+// ── Text caret blink ─────────────────────────────────────────────────────
+
+/// Half a blink cycle, and how long after the last key the caret keeps blinking (then it stays
+/// on, so an idle field does not wake the loop), as GTK does.
+const CARET_HALF_MS: u128 = 530;
+const CARET_BLINK_FOR: Duration = Duration::from_secs(10);
+
+thread_local! {
+    static CARET_EPOCH: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    static CARET_DRAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Restart the blink with the caret on (a key was pressed, a field was clicked).
+pub fn caret_reset() {
+    CARET_EPOCH.with(|e| e.set(Some(Instant::now())));
+}
+
+fn caret_elapsed() -> Duration {
+    CARET_EPOCH.with(|e| e.get()).map(|t| t.elapsed()).unwrap_or(CARET_BLINK_FOR)
+}
+
+/// Blink phase: even = on, odd = off; u64::MAX once it stopped blinking (on).
+pub fn caret_phase() -> u64 {
+    let t = caret_elapsed();
+    if t >= CARET_BLINK_FOR { u64::MAX } else { (t.as_millis() / CARET_HALF_MS) as u64 }
+}
+
+/// Whether a text caret is shown now. Call it when drawing a caret: the run loop then wakes
+/// for the next blink (see `take_caret_drawn`).
+pub fn caret_on() -> bool {
+    CARET_DRAWN.with(|d| d.set(true));
+    let phase = caret_phase();
+    phase == u64::MAX || phase.is_multiple_of(2)
+}
+
+/// True if a caret was drawn since the last call.
+pub fn take_caret_drawn() -> bool {
+    CARET_DRAWN.with(|d| d.replace(false))
+}
+
+/// Time until the caret's next blink, None when it no longer blinks.
+pub fn caret_wake_in() -> Option<Duration> {
+    let t = caret_elapsed();
+    if t >= CARET_BLINK_FOR {
+        return None;
+    }
+    let ms = t.as_millis();
+    let next = (ms / CARET_HALF_MS + 1) * CARET_HALF_MS;
+    Some(Duration::from_millis((next - ms) as u64).min(CARET_BLINK_FOR - t))
 }
 
 /// Draw row `index` (inside `bounds`) with its entrance fade and rise. `draw` always runs, so

@@ -142,7 +142,9 @@ struct State {
     ptr: (f64, f64),
     hits: Vec<(Rect, Ui)>,
     hover: Option<Ui>,
-    query: String,
+    query: crate::launcher::Query,
+    /// Blink phase of the search caret as last drawn (None: no caret on screen).
+    caret: Option<u64>,
     win_sel: usize,
     last_click: Option<std::time::Instant>,
     cursor: bool,
@@ -214,7 +216,8 @@ impl Overlay {
                 ptr: (0.0, 0.0),
                 hits: Vec::new(),
                 hover: None,
-                query: String::new(),
+                query: crate::launcher::Query::default(),
+                caret: None,
                 win_sel: 0,
                 last_click: None,
                 cursor: cfg.capture_cursor,
@@ -245,10 +248,20 @@ impl Overlay {
         }
     }
 
-    pub fn tick(&mut self) {
+    /// Draws if needed; returns ms until the search caret's next blink (-1: none).
+    pub fn tick(&mut self) -> i32 {
         let qh = self.queue.handle();
+        if let Some(p) = self.st.caret {
+            if crate::ui::caret_phase() != p {
+                self.st.dirty = true;
+            }
+        }
         if self.st.dirty && self.st.configured && self.st.frame_cb.is_none() && self.st.outcome.is_none() {
             self.st.draw(&qh);
+        }
+        match self.st.caret {
+            Some(_) => crate::ui::caret_wake_in().map_or(-1, |d| (d.as_millis() as i32).max(1)),
+            None => -1,
         }
     }
 
@@ -295,7 +308,7 @@ impl State {
     }
 
     fn filtered_windows(&self) -> Vec<usize> {
-        let q = self.query.to_lowercase();
+        let q = self.query.text.to_lowercase();
         (0..self.windows.len()).filter(|i| q.is_empty() || self.windows[*i].title.to_lowercase().contains(&q) || self.windows[*i].app_id.to_lowercase().contains(&q)).collect()
     }
 
@@ -382,6 +395,7 @@ impl State {
             codec: self.codec.clone(),
             quality: self.quality.clone(),
             path: String::new(),
+            replay_secs: 0,
         }));
     }
 
@@ -406,7 +420,9 @@ impl State {
         unsafe {
             let surf = self.bufs[idx].cairo();
             let cr = cb::cairo_create(surf);
+            crate::ui::take_caret_drawn();
             self.paint(cr, w as f64, h as f64);
+            self.caret = crate::ui::take_caret_drawn().then(crate::ui::caret_phase);
             cb::cairo_destroy(cr);
             cb::cairo_surface_destroy(surf);
         }
@@ -493,10 +509,8 @@ impl State {
         let ch = 70.0 + rows * row + 16.0;
         let c = Rect { x: ((w - cw) / 2.0).round(), y: ((h - ch) / 2.0 - 30.0).round().max(20.0), w: cw, h: ch };
         cb::fill_rounded_rect(cr, c.x, c.y, c.w, c.h, 18.0, BAR_BG);
-        let q = if self.query.is_empty() { "Type to search windows".to_string() } else { self.query.clone() };
-        let qcol = if self.query.is_empty() { (1.0, 1.0, 1.0, 0.45) } else { WHITE };
         cb::fill_rounded_rect(cr, c.x + 14.0, c.y + 14.0, c.w - 28.0, 40.0, 12.0, (1.0, 1.0, 1.0, 0.08));
-        cb::draw_pango_text(cr, c.x + 28.0, c.y + 24.0, &q, "Inter, Sans 14px", qcol, Some((c.w - 56.0) as i32));
+        crate::launcher::draw_query(cr, &self.query, "Type to search windows", c.x + 28.0, c.y + 14.0, c.w - 56.0, 40.0, "Inter, Sans 14px", WHITE, (1.0, 1.0, 1.0, 0.45));
         if list.is_empty() {
             let msg = if self.cap.can_capture_windows() { "No windows match" } else { "This compositor cannot capture single windows" };
             cb::draw_pango_text(cr, c.x + 28.0, c.y + 80.0, msg, "Inter, Sans 14px", (1.0, 1.0, 1.0, 0.6), None);
@@ -738,7 +752,7 @@ impl State {
         match sym {
             0xff1b => {
                 // Escape: leave the search, else drop the selection, else cancel.
-                if self.kind == Kind::Window && !self.query.is_empty() {
+                if self.kind == Kind::Window && !self.query.text.is_empty() {
                     self.query.clear();
                 } else if self.kind == Kind::Region && self.sel.is_some() {
                     self.sel = None;
@@ -762,14 +776,28 @@ impl State {
             }
             0xff52 if self.kind == Kind::Window => self.win_sel = self.win_sel.saturating_sub(1),
             0xff54 if self.kind == Kind::Window => self.win_sel = (self.win_sel + 1).min(self.filtered_windows().len().saturating_sub(1)),
-            0xff08 if self.kind == Kind::Window => {
-                self.query.pop();
-                self.win_sel = 0;
-            }
             _ if self.kind == Kind::Window => {
-                let t: String = utf8.chars().filter(|c| !c.is_control()).collect();
-                if !t.is_empty() {
-                    self.query.push_str(&t);
+                use crate::launcher as l;
+                // Keysyms to the evdev codes `Query` takes: Backspace, Delete, Left, Right, Home, End.
+                let special = match sym {
+                    0xff08 => l::BACKSPACE,
+                    0xffff => l::DELETE,
+                    0xff51 => l::LEFT,
+                    0xff53 => l::RIGHT,
+                    0xff50 => l::HOME,
+                    0xff57 => l::END,
+                    _ => 0,
+                };
+                let mut changed = false;
+                if special != 0 {
+                    changed = self.query.key(special, None, false) == Some(true);
+                } else {
+                    for c in utf8.chars().filter(|c| !c.is_control()) {
+                        changed |= self.query.key(0, Some(c), false) == Some(true);
+                    }
+                }
+                crate::ui::caret_reset();
+                if changed {
                     self.win_sel = 0;
                 }
             }
@@ -783,8 +811,8 @@ impl State {
 }
 
 /// Enter takes the capture, and so does Space unless it is typing a window search.
-fn confirms(sym: u32, kind: Kind, query: &str) -> bool {
-    matches!(sym, 0xff0d | 0xff8d) || (sym == 0x20 && (kind != Kind::Window || query.is_empty()))
+fn confirms(sym: u32, kind: Kind, query: &crate::launcher::Query) -> bool {
+    matches!(sym, 0xff0d | 0xff8d) || (sym == 0x20 && (kind != Kind::Window || query.text.is_empty()))
 }
 
 fn handles(r: Rect) -> [(f64, f64); 8] {
@@ -835,7 +863,7 @@ pub fn finish(img: Image, cfg: &Config, save: bool, ) -> Result<std::path::PathB
             prism_common::wlclip::copy(&["image/png"], bytes, true);
         }
     }
-    notify(&path, save, img.width, img.height);
+    notify(&path, save, cfg.capture_copy_to_clipboard, img.width, img.height);
     Ok(path)
 }
 
@@ -850,10 +878,18 @@ pub fn copy_text(mut img: Image, lang: String) {
         eprintln!("[prism-ui] copy text: {e}");
         return;
     }
+    copy_text_from(path, lang, true);
+}
+
+/// Read the text in the image file at `path` (tesseract), copy it and say so in a
+/// notification; `remove` deletes the file afterwards.
+pub fn copy_text_from(path: std::path::PathBuf, lang: String, remove: bool) {
     std::thread::spawn(move || {
         let lang = if lang.trim().is_empty() { "eng".to_string() } else { lang.trim().to_string() };
         let out = std::process::Command::new("tesseract").arg(&path).arg("stdout").args(["-l", &lang]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output();
-        let _ = std::fs::remove_file(&path);
+        if remove {
+            let _ = std::fs::remove_file(&path);
+        }
         let (summary, body) = match out {
             Err(_) => ("Copy text needs tesseract".to_string(), "Install tesseract and its language data (Arch: tesseract tesseract-data-eng).".to_string()),
             Ok(o) if !o.status.success() => ("Could not read text".to_string(), String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("tesseract failed").to_string()),
@@ -893,7 +929,7 @@ pub fn write_png(img: &mut Image, path: &std::path::Path) -> Result<(), String> 
 
 /// "Screenshot saved" with Open / Show in folder / Delete; actions are handled on a thread that
 /// waits for the user's choice.
-fn notify(path: &std::path::Path, saved: bool, w: u32, h: u32) {
+fn notify(path: &std::path::Path, saved: bool, copied: bool, w: u32, h: u32) {
     let path = path.to_path_buf();
     std::thread::spawn(move || {
         use std::collections::HashMap;
@@ -906,11 +942,12 @@ fn notify(path: &std::path::Path, saved: bool, w: u32, h: u32) {
         // Prism's notification UI shows the picture as a large preview, not as the icon.
         hints.insert("x-prism-preview", Value::from(true));
         let actions: Vec<&str> = if saved { vec!["open", "Open", "folder", "Show in folder", "delete", "Delete"] } else { vec!["open", "Open"] };
-        let body = if saved { format!("{w} × {h} · copied to the clipboard\n{}", path.display()) } else { format!("{w} × {h} · copied to the clipboard") };
+        let clip = if copied { " · copied to the clipboard" } else { "" };
+        let body = if saved { format!("{w} × {h}{clip}\n{}", path.display()) } else { format!("{w} × {h}{clip}") };
         const D: &str = "org.freedesktop.Notifications";
         let Ok(proxy) = zbus::blocking::Proxy::new(&conn, D, "/org/freedesktop/Notifications", D) else { return };
         let Ok(signals) = proxy.receive_all_signals() else { return };
-        let Ok(reply) = conn.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Screenshot", 0u32, "applets-screenshooter", "Screenshot saved", body.as_str(), actions, hints, -1i32)) else { return };
+        let Ok(reply) = conn.call_method(Some(D), "/org/freedesktop/Notifications", Some(D), "Notify", &("Screenshot", 0u32, "applets-screenshooter", if saved { "Screenshot saved" } else { "Screenshot taken" }, body.as_str(), actions, hints, -1i32)) else { return };
         let Ok(id) = reply.body().deserialize::<u32>() else { return };
         for m in signals {
             let member = m.header().member().map(|s| s.to_string()).unwrap_or_default();
@@ -1104,13 +1141,13 @@ mod tests {
     #[test]
     fn space_confirms_except_inside_a_window_search() {
         for kind in [Kind::Region, Kind::Window, Kind::Screen] {
-            assert!(confirms(0xff0d, kind, ""));
-            assert!(confirms(0x20, kind, ""));
+            assert!(confirms(0xff0d, kind, &crate::launcher::Query::with_text("")));
+            assert!(confirms(0x20, kind, &crate::launcher::Query::with_text("")));
         }
-        assert!(confirms(0x20, Kind::Region, "left over"));
-        assert!(!confirms(0x20, Kind::Window, "fire"));
-        assert!(confirms(0xff0d, Kind::Window, "fire"));
-        assert!(!confirms(0x72, Kind::Region, ""));
+        assert!(confirms(0x20, Kind::Region, &crate::launcher::Query::with_text("left over")));
+        assert!(!confirms(0x20, Kind::Window, &crate::launcher::Query::with_text("fire")));
+        assert!(confirms(0xff0d, Kind::Window, &crate::launcher::Query::with_text("fire")));
+        assert!(!confirms(0x72, Kind::Region, &crate::launcher::Query::with_text("")));
     }
 
     #[test]

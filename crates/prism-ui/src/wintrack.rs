@@ -19,6 +19,15 @@ pub struct Window {
     /// Higher = focused more recently.
     pub last_focus: u64,
     pending_focus: bool,
+    pub fullscreen: bool,
+    pending_fullscreen: bool,
+}
+
+static OPEN_APPS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// App ids of the open windows (sorted, each once), for the window rule editor.
+pub fn open_app_ids() -> Vec<String> {
+    OPEN_APPS.lock().unwrap().clone()
 }
 
 pub struct State {
@@ -43,10 +52,23 @@ impl Tracker {
     }
 
     pub fn dispatch(&mut self) -> bool {
-        self.queue.dispatch_pending(&mut self.st).is_ok()
+        let ok = self.queue.dispatch_pending(&mut self.st).is_ok();
+        let mut ids: Vec<String> = self.st.windows.iter().map(|w| w.app_id.clone()).filter(|a| !a.is_empty()).collect();
+        ids.sort();
+        ids.dedup();
+        let mut open = OPEN_APPS.lock().unwrap();
+        if *open != ids {
+            *open = ids;
+        }
+        ok
     }
 
     /// Windows, most recently focused first (the focused one leads).
+    /// The focused window is fullscreen (a game, a video).
+    pub fn focused_fullscreen(&self) -> bool {
+        self.st.windows.iter().any(|w| w.focused && w.fullscreen)
+    }
+
     pub fn mru(&self) -> Vec<Window> {
         let mut w = self.st.windows.clone();
         w.sort_by(|a, b| b.focused.cmp(&a.focused).then(b.last_focus.cmp(&a.last_focus)));
@@ -67,7 +89,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
     fn event(st: &mut Self, _: &ZwlrForeignToplevelManagerV1, ev: manager::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let manager::Event::Toplevel { toplevel } = ev {
-            st.windows.push(Window { handle: toplevel, title: String::new(), app_id: String::new(), focused: false, last_focus: 0, pending_focus: false });
+            st.windows.push(Window { handle: toplevel, title: String::new(), app_id: String::new(), focused: false, last_focus: 0, pending_focus: false, fullscreen: false, pending_fullscreen: false });
         }
     }
 
@@ -85,6 +107,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
             toplevel::Event::State { state } => {
                 let states: Vec<u32> = state.chunks_exact(4).map(|b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]])).collect();
                 st.windows[i].pending_focus = states.contains(&(toplevel::State::Activated as u32));
+                st.windows[i].pending_fullscreen = states.contains(&(toplevel::State::Fullscreen as u32));
             }
             toplevel::Event::Done => {
                 let w = &mut st.windows[i];
@@ -93,6 +116,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
                     w.last_focus = st.clock;
                 }
                 w.focused = w.pending_focus;
+                w.fullscreen = w.pending_fullscreen;
             }
             toplevel::Event::Closed => {
                 st.windows.remove(i).handle.destroy();

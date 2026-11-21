@@ -20,6 +20,7 @@
 
 pub mod bar;
 pub mod cat;
+pub mod corners;
 pub mod dbus;
 pub mod dock;
 pub mod edit;
@@ -177,6 +178,8 @@ enum PointerOn {
     Panel(panel::PanelId),
     /// The strip along the screen edge that brings a hidden dock back.
     Strip,
+    /// A hot corner (0 top left, 1 top right, 2 bottom left, 3 bottom right).
+    Corner(usize),
 }
 
 struct Desk {
@@ -197,6 +200,7 @@ struct Desk {
     waker: Waker,
     windows: windows::Windows,
     panels: panel::Panels,
+    corners: corners::Corners,
     cat: cat::CatState,
     cat_drawn: Instant,
     /// The next context menu opens beside its anchor: true to the right, false to the left.
@@ -286,6 +290,8 @@ pub struct Desktop {
     weather_seen: u64,
     notes_seen: u64,
     timer_seen: (u64, i64),
+    /// Calendar events as last drawn (cal_events generation).
+    cal_seen: u64,
     /// cairo_backend::images_generation the widgets were last drawn for.
     images_seen: u64,
 }
@@ -326,6 +332,7 @@ impl Desktop {
             waker,
             windows: windows::Windows::default(),
             panels: panel::Panels::default(),
+            corners: corners::Corners::default(),
             cat: cat::CatState::new(),
             cat_drawn: Instant::now(),
             menu_beside: None,
@@ -393,7 +400,13 @@ impl Desktop {
             notes_seen: 0,
             images_seen: crate::cairo_backend::images_generation(),
             timer_seen: (0, 0),
+            cal_seen: 0,
         })
+    }
+
+    /// The config as last read (reloaded when config.json changes).
+    pub fn config(&self) -> &Config {
+        &self.state.config
     }
 
     /// Changes whenever the desktop has re-read the config.
@@ -452,6 +465,11 @@ impl Desktop {
             self.timer_seen = timer_key;
             d.mark(WidgetId::Timer, &qh);
         }
+        let cal_gen = crate::cal_events::generation();
+        if cal_gen != self.cal_seen {
+            self.cal_seen = cal_gen;
+            d.mark(WidgetId::Calendar, &qh);
+        }
         let notes_gen = crate::notes::generation();
         if notes_gen != self.notes_seen {
             self.notes_seen = notes_gen;
@@ -481,6 +499,7 @@ impl Desktop {
         d.sync_time(false, &qh);
         let panels = d.panels_tick(&qh);
         let cat = d.cat_tick(&qh);
+        let corner = d.corners_tick();
         // Wake at the next wall-clock second (analog clock) or minute.
         let ms_to_second = 1000 - now.millis as i32 + 15;
         let next = if d.has(WidgetId::AnalogClock) || phone_playing {
@@ -489,6 +508,7 @@ impl Desktop {
             ((59 - now.second as i32) * 1000 + ms_to_second).max(50)
         };
         let next = cat.map_or(next, |c| c.min(next));
+        let next = corner.map_or(next, |c| c.min(next));
         panels.map_or(next, |p| p.min(next))
     }
 }
@@ -540,6 +560,7 @@ impl Desk {
 
     /// Create / destroy / move widget surfaces to match the config.
     fn reconcile(&mut self, qh: &QueueHandle<Self>) {
+        self.sync_corners(qh);
         for id in WidgetId::ALL {
             let visible = id.cfg(&self.config.desktop_layout).visible;
             let pos = self.widgets.iter().position(|w| w.id == id);
@@ -600,6 +621,7 @@ impl Desk {
         self.config_seq += 1;
         PHONE_SYNC.store(self.config.phone_enabled, std::sync::atomic::Ordering::Relaxed);
         self.theme = Theme::load();
+        crate::xdp::theme_changed(&self.theme);
         self.style = Style::new(&self.config, &self.theme);
         set_global_font(&self.style.font_family);
         self.look = Look::new(&self.style, &self.theme);
@@ -1115,7 +1137,7 @@ impl Desk {
                 }
             }
             PointerOn::Panel(id) => self.panel_click(id, button, qh),
-            PointerOn::None | PointerOn::Strip => {}
+            PointerOn::None | PointerOn::Strip | PointerOn::Corner(_) => {}
         }
     }
 
@@ -1715,6 +1737,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                     PointerOn::Panel(panel::PanelId::Dock)
                 } else if d.panels.strip.as_ref().is_some_and(|s| s.owns(&surface)) {
                     PointerOn::Strip
+                } else if let Some(i) = d.corners.which(&surface) {
+                    PointerOn::Corner(i)
                 } else if d.menu.as_ref().map(|m| m.surface == surface).unwrap_or(false) {
                     PointerOn::Menu
                 } else if d.menu.as_ref().map(|m| m.catcher == surface).unwrap_or(false) {
@@ -1725,6 +1749,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 d.hover_hit = None;
                 d.panels.hover = None;
                 d.cat.hover(d.ptr_on == PointerOn::Widget(WidgetId::Cat));
+                d.corner_pointer(if let PointerOn::Corner(i) = d.ptr_on { Some(i) } else { None });
                 d.panel_pointer();
                 d.on_motion(qh);
             }
@@ -1735,6 +1760,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 d.hover_hit = None;
                 d.pressed = false;
                 d.cat.hover(false);
+                d.corner_pointer(None);
                 d.panel_pointer();
                 if let PointerOn::Panel(id) = prev {
                     d.panel_left(id, qh);

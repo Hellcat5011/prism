@@ -36,8 +36,12 @@ pub struct RecordJob {
     pub codec: String,
     /// "low", "medium", "high", "lossless".
     pub quality: String,
-    /// Output file (decided by prismd: folder + Recording_<time>.<container>).
+    /// Output file (decided by prismd: folder + Recording_<time>.<container>). For a replay
+    /// buffer: its folder and extension (saved clips are Replay_<time>.<ext> there).
     pub path: String,
+    /// Replay buffer: keep this many seconds in memory and save them on SIGUSR1 (0 = record).
+    #[serde(default)]
+    pub replay_secs: u32,
 }
 
 /// Recording state as prismd reports it (`prism-ctl screenshot status`).
@@ -78,6 +82,7 @@ mod tests {
             codec: "auto".into(),
             quality: "medium".into(),
             path: "/tmp/a.mkv".into(),
+            replay_secs: 0,
         };
         let s = serde_json::to_string(&j).unwrap();
         assert!(s.contains(r#""kind":"region""#));

@@ -24,6 +24,7 @@ static AUTO_SAVER: AtomicBool = AtomicBool::new(false);
 static START: std::sync::Once = std::sync::Once::new();
 
 pub fn apply(cfg: &prism_common::Config) {
+    apply_charge_limit(cfg.battery_charge_limit);
     ENABLED.store(cfg.battery_warnings, Ordering::SeqCst);
     AUTO_SAVER.store(cfg.battery_auto_saver, Ordering::SeqCst);
     if cfg.battery_warnings {
@@ -31,6 +32,26 @@ pub fn apply(cfg: &prism_common::Config) {
             std::thread::Builder::new().name("prism-battery".into()).spawn(run).ok();
         });
     }
+}
+
+/// Charge limit: written at start (quietly: without the udev rule it stays as the firmware
+/// keeps it) and again when Settings changes it (then asking for a password if needed).
+fn apply_charge_limit(limit: u8) {
+    static LAST: std::sync::Mutex<Option<u8>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if *last == Some(limit) {
+        return;
+    }
+    let first = last.is_none();
+    *last = Some(limit);
+    if prism_common::hardware::charge_limit_files().is_empty() || (first && limit == 0) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Err(e) = prism_common::hardware::set_charge_limit(limit, !first) {
+            eprintln!("[prismd/battery] charge limit: {e}");
+        }
+    });
 }
 
 fn run() {

@@ -1109,6 +1109,7 @@ dependencies = [
  "libc",
  "md5",
  "num-bigint",
+ "pipewire",
  "prism-capture",
  "prism-common",
  "serde",

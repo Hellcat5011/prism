@@ -64,9 +64,80 @@ pub fn slider_value(r: Rect, x: f64) -> f64 {
     ((x - r.x) / r.w).clamp(0.0, 1.0)
 }
 
-/// Single-line text field. `editing` shows the caret and the focus ring.
+/// Byte offset of char `ci` in `text`.
+fn char_byte(text: &str, ci: usize) -> usize {
+    text.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(text.len())
+}
+
+/// How far single-line text of width `tw` scrolls left in `avail` so the caret (at `before`
+/// px) stays in view.
+fn caret_shift(before: f64, tw: f64, avail: f64) -> f64 {
+    if tw <= avail { 0.0 } else { (before - avail + 2.0).clamp(0.0, tw - avail + 2.0) }
+}
+
+/// One line of editable text at (x, y) in a `w` x `h` box: scrolled so the caret (char index,
+/// None: not editing) stays visible, the caret blinking (`ui::caret_on`).
+#[allow(clippy::too_many_arguments)]
+pub fn caret_text(cr: *mut Cairo, text: &str, caret: Option<usize>, st: &TextStyle, x: f64, y: f64, w: f64, h: f64, caret_color: Rgba) {
+    let (tw, th) = measure(cr, text, st);
+    let before = caret.map(|c| measure(cr, &text[..char_byte(text, c)], st).0).unwrap_or(0.0);
+    let shift = if caret.is_some() { caret_shift(before, tw, w) } else { 0.0 };
+    unsafe {
+        cairo_save(cr);
+        cairo_rectangle(cr, x - 2.0, y, w + 4.0, h);
+        cairo_clip(cr);
+    }
+    let width = if caret.is_some() { tw + 4.0 } else { w };
+    if !text.is_empty() {
+        draw_in_box(cr, text, st, x - shift, y, width.max(1.0), h, Align::Start);
+    }
+    if caret.is_some() && crate::ui::caret_on() {
+        let ch = th.max(st.px).min(h - 4.0);
+        fill_rounded_rect(cr, x - shift + before, y + (h - ch) / 2.0, 1.5, ch, 0.0, caret_color);
+    }
+    unsafe { cairo_restore(cr) };
+}
+
+/// The char index nearest to `px` in text drawn by `caret_text` at `x` (width `w`) with the
+/// caret at `caret`: where a click puts the caret.
+pub fn caret_index_at(text: &str, caret: usize, st: &TextStyle, x: f64, w: f64, px: f64) -> usize {
+    unsafe {
+        let surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+        let cr = cairo_create(surf);
+        let (tw, _) = measure(cr, text, st);
+        let shift = caret_shift(measure(cr, &text[..char_byte(text, caret)], st).0, tw, w);
+        let target = px - x + shift;
+        let mut best = (0, f64::MAX);
+        for (ci, (b, _)) in text.char_indices().chain(std::iter::once((text.len(), ' '))).enumerate() {
+            let d = (measure(cr, &text[..b], st).0 - target).abs();
+            if d < best.1 {
+                best = (ci, d);
+            }
+        }
+        cairo_destroy(cr);
+        cairo_surface_destroy(surf);
+        best.0
+    }
+}
+
+/// Text inset of `text_field`.
+pub const FIELD_PAD: f64 = 14.0;
+
+/// Style of `text_field` text.
+pub fn field_style<'a>(p: &'a Palette, color: Rgba) -> TextStyle<'a> {
+    TextStyle { family: &p.family, px: 13.0, bold: false, color }
+}
+
+/// Where a click at `px` puts the caret in a `text_field` at `r`.
+pub fn field_index_at(r: Rect, text: &str, caret: usize, p: &Palette, px: f64) -> usize {
+    caret_index_at(text, caret, &field_style(p, p.fg), r.x + FIELD_PAD, r.w - 2.0 * FIELD_PAD, px)
+}
+
+/// Single-line text field. `caret` (char index) shows the caret and the focus ring.
 /// `hover`: hover level 0..1.
-pub fn text_field(cr: *mut Cairo, r: Rect, text: &str, placeholder: &str, editing: bool, hover: f64, invalid: bool, p: &Palette) {
+#[allow(clippy::too_many_arguments)]
+pub fn text_field(cr: *mut Cairo, r: Rect, text: &str, placeholder: &str, caret: Option<usize>, hover: f64, invalid: bool, p: &Palette) {
+    let editing = caret.is_some();
     fill_rounded_rect(cr, r.x, r.y, r.w, r.h, r.h / 2.0, with_alpha(p.accent, if editing { 0.16 } else { 0.10 + 0.03 * hover }));
     let ring = if invalid {
         Some(p.error)
@@ -80,29 +151,12 @@ pub fn text_field(cr: *mut Cairo, r: Rect, text: &str, placeholder: &str, editin
     if let Some(c) = ring {
         stroke_rounded_rect(cr, r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0, r.h / 2.0, c, 1.0);
     }
-    let pad = 14.0;
-    let (shown, color) = if text.is_empty() && !editing { (placeholder, with_alpha(p.fg, 0.45)) } else { (text, p.fg) };
-    let st = TextStyle { family: &p.family, px: 13.0, bold: false, color };
-    // Keep the end of long text (where the caret is) visible while editing.
-    let (tw, _) = measure(cr, shown, &st);
-    let avail = r.w - 2.0 * pad;
-    unsafe {
-        cairo_save(cr);
-        cairo_rectangle(cr, r.x + pad - 2.0, r.y, avail + 4.0, r.h);
-        cairo_clip(cr);
+    let avail = r.w - 2.0 * FIELD_PAD;
+    if text.is_empty() && !editing {
+        caret_text(cr, placeholder, None, &field_style(p, with_alpha(p.fg, 0.45)), r.x + FIELD_PAD, r.y, avail, r.h, p.accent);
+    } else {
+        caret_text(cr, text, caret, &field_style(p, p.fg), r.x + FIELD_PAD, r.y, avail, r.h, p.accent);
     }
-    let x = if editing && tw > avail { r.x + pad + avail - tw } else { r.x + pad };
-    let width = if editing { tw + 4.0 } else { avail };
-    let (bx, _, bw, _) = draw_in_box(cr, shown, &st, x, r.y, width.max(1.0), r.h, Align::Start);
-    if editing {
-        let cx = if text.is_empty() { r.x + pad } else { bx + bw + 1.0 };
-        unsafe {
-            cairo_set_source_rgba(cr, p.accent.0, p.accent.1, p.accent.2, 1.0);
-            cairo_rectangle(cr, cx, r.y + 8.0, 1.5, r.h - 16.0);
-            cairo_fill(cr);
-        }
-    }
-    unsafe { cairo_restore(cr) };
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -154,7 +208,7 @@ pub fn combo(cr: *mut Cairo, r: Rect, label: &str, open: bool, hover: f64, p: &P
 #[derive(Default, Clone)]
 pub struct Dropdown {
     pub scroll: f64,
-    pub filter: String,
+    pub filter: crate::launcher::Query,
     pub hover: Option<usize>,
     /// Indices into the full option list for rows currently shown (after filtering).
     pub rows: Vec<(usize, Rect)>,
@@ -167,7 +221,7 @@ const DROPDOWN_MAX_ROWS: usize = 9;
 impl Dropdown {
     /// Indices of options matching the filter (case-insensitive substring).
     pub fn visible(&self, options: &[String]) -> Vec<usize> {
-        let f = self.filter.to_lowercase();
+        let f = self.filter.text.to_lowercase();
         options.iter().enumerate().filter(|(_, o)| f.is_empty() || o.to_lowercase().contains(&f)).map(|(i, _)| i).collect()
     }
 
@@ -192,7 +246,7 @@ impl Dropdown {
 
         if searchable {
             let f = Rect { x: x + 8.0, y: y + 6.0, w: w - 16.0, h: 30.0 };
-            text_field(cr, f, &self.filter, "Type to search…", true, 0.0, false, p);
+            text_field(cr, f, &self.filter.text, "Type to search…", Some(self.filter.caret()), 0.0, false, p);
         }
 
         let list = Rect { x, y: y + 6.0 + header, w, h: rows_visible as f64 * DROPDOWN_ROW };
@@ -276,17 +330,18 @@ impl Dropdown {
         }
     }
 
-    /// Typing filters the list (searchable dropdowns); returns true if handled.
-    pub fn key(&mut self, typed: Option<char>, backspace: bool) -> bool {
-        if backspace {
-            self.filter.pop();
-        } else if let Some(c) = typed {
-            self.filter.push(c);
-        } else {
-            return false;
+    /// Typing filters the list (searchable dropdowns), with the usual editing keys; returns
+    /// true if handled.
+    pub fn key(&mut self, special: u32, typed: Option<char>, ctrl: bool) -> bool {
+        match self.filter.key(special, typed, ctrl) {
+            Some(changed) => {
+                if changed {
+                    self.scroll = 0.0;
+                }
+                true
+            }
+            None => false,
         }
-        self.scroll = 0.0;
-        true
     }
 }
 

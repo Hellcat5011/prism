@@ -18,15 +18,20 @@ pub struct ClipboardItem {
     pub line_count: usize,
     #[serde(rename = "charCount", default)]
     pub char_count: usize,
+    /// Pinned entries stay: no limit, age or Clear removes them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+}
+
+/// A unique entry id: seconds, then nanoseconds and a tag.
+fn new_id(tag: &str) -> (u64, String) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    (now.as_secs(), format!("{}-{}-{}", now.as_secs(), now.subsec_nanos(), tag))
 }
 
 impl ClipboardItem {
     pub fn new_text(content: String) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let id = format!("{}-{}", timestamp, content.len());
+        let (timestamp, id) = new_id(&content.len().to_string());
         let line_count = content.lines().count().max(1);
         let char_count = content.chars().count();
         Self {
@@ -38,15 +43,12 @@ impl ClipboardItem {
             image_path: None,
             line_count,
             char_count,
+            pinned: false,
         }
     }
 
     pub fn new_image(image_path: String) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let id = format!("{}-img", timestamp);
+        let (timestamp, id) = new_id("img");
         Self {
             id,
             kind: "image".to_string(),
@@ -56,6 +58,7 @@ impl ClipboardItem {
             image_path: Some(image_path),
             line_count: 1,
             char_count: 7,
+            pinned: false,
         }
     }
 
@@ -279,6 +282,10 @@ impl ClipboardStore {
             }
         }
 
+        // A pinned copy already keeps it.
+        if self.items.iter().any(|i| i.pinned && !i.is_image && i.content == text) {
+            return false;
+        }
         self.items.retain(|item| item.is_image || item.content != text);
         self.items.insert(0, ClipboardItem::new_text(text));
         self.trim_to_max();
@@ -318,21 +325,47 @@ impl ClipboardStore {
         true
     }
 
-    /// Drop the oldest entries over the limit, with the image files they own.
+    /// Drop the oldest unpinned entries over the limit, with the image files they own.
     fn trim_to_max(&mut self) {
-        if self.items.len() <= self.max_items {
-            return;
-        }
-        for it in self.items.split_off(self.max_items) {
-            if let (true, Some(p)) = (it.is_image, it.image_path) {
-                let _ = fs::remove_file(p.replace("file://", ""));
+        let mut unpinned = 0;
+        let mut dropped = Vec::new();
+        self.items.retain(|it| {
+            if it.pinned {
+                return true;
             }
+            unpinned += 1;
+            if unpinned <= self.max_items {
+                return true;
+            }
+            dropped.push(it.clone());
+            false
+        });
+        for it in dropped {
+            remove_image(&it);
         }
     }
 
+    /// Pin or unpin entry `id`. False if there is no such entry.
+    pub fn set_pinned(&mut self, id: &str, pinned: bool) -> bool {
+        let Some(it) = self.items.iter_mut().find(|i| i.id == id) else { return false };
+        it.pinned = pinned;
+        let _ = self.save();
+        true
+    }
+
+    /// Delete entry `id` (pinned or not) and its image.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let Some(i) = self.items.iter().position(|i| i.id == id) else { return false };
+        let it = self.items.remove(i);
+        remove_image(&it);
+        let _ = self.save();
+        true
+    }
+
+    /// Remove every entry except the pinned ones.
     pub fn clear(&mut self) {
         // Remove cached image files
-        for it in &self.items {
+        for it in self.items.iter().filter(|i| !i.pinned) {
             if it.is_image {
                 if let Some(p) = &it.image_path {
                     let local_path = p.replace("file://", "");
@@ -340,7 +373,7 @@ impl ClipboardStore {
                 }
             }
         }
-        self.items.clear();
+        self.items.retain(|i| i.pinned);
         let _ = self.save();
     }
 
@@ -352,7 +385,7 @@ impl ClipboardStore {
 
         let mut kept = Vec::new();
         for item in self.items.drain(..) {
-            if now.saturating_sub(item.timestamp) <= max_age_secs {
+            if item.pinned || now.saturating_sub(item.timestamp) <= max_age_secs {
                 kept.push(item);
             } else if item.is_image {
                 if let Some(p) = item.image_path {
@@ -386,6 +419,13 @@ impl ClipboardStore {
             let _ = self.save();
         }
         removed
+    }
+}
+
+/// Delete the cached image an entry owns.
+fn remove_image(it: &ClipboardItem) {
+    if let (true, Some(p)) = (it.is_image, &it.image_path) {
+        let _ = fs::remove_file(p.replace("file://", ""));
     }
 }
 
@@ -447,6 +487,26 @@ mod tests {
         assert_eq!(store.items.len(), 1);
         assert!(!image.exists());
         assert!(!store.add_text("word ".repeat(MAX_TEXT_BYTES)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pinned_entries_survive_limits_and_clear() {
+        let dir = std::env::temp_dir().join(format!("prism-clip-pin-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut store = ClipboardStore { path: dir.join("history.json"), items: Vec::new(), max_items: 1 };
+        assert!(store.add_text("keep me".into()));
+        let id = store.items[0].id.clone();
+        assert!(store.set_pinned(&id, true));
+        assert!(store.add_text("one".into()));
+        assert!(store.add_text("two".into()));
+        // The limit counts unpinned entries only.
+        assert_eq!(store.items.iter().map(|i| i.content.as_str()).collect::<Vec<_>>(), ["two", "keep me"]);
+        assert!(!store.add_text("keep me".into()));
+        store.clear();
+        assert_eq!(store.items.len(), 1);
+        assert!(store.remove(&id));
+        assert!(store.items.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

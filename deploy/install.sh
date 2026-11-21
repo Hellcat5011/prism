@@ -163,7 +163,7 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
-echo "[6/9] Desktop portal (screenshots and screen sharing for apps)..."
+echo "[6/9] Desktop portal (screenshots, screen sharing and appearance for apps)..."
 # prism-ui serves org.freedesktop.impl.portal.desktop.prism. xdg-desktop-portal reads portal
 # descriptions from XDG_DATA_DIRS, so a drop-in adds ~/.local/share for it (no root needed).
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -180,6 +180,10 @@ if [ ! -e "$portals_conf" ]; then
 elif ! grep -q '=prism' "$portals_conf"; then
     echo "Note: $portals_conf exists; to let Prism share screens and take screenshots for apps, set"
     echo "      org.freedesktop.impl.portal.Screenshot=prism and org.freedesktop.impl.portal.ScreenCast=prism"
+fi
+if [ -e "$portals_conf" ] && ! grep -q 'Settings=prism' "$portals_conf"; then
+    echo "Note: for apps to follow Prism's dark/light mode and accent colour, add to $portals_conf:"
+    echo "      org.freedesktop.impl.portal.Settings=prism;gtk"
 fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
@@ -222,6 +226,14 @@ elif ask "Install the lock screen's PAM service /etc/pam.d/prism (sudo; otherwis
     echo "Installed /etc/pam.d/prism."
 else
     echo "Skipped: the lock screen uses the 'login' PAM service."
+fi
+
+# Battery charge limit: a udev rule makes the attribute writable for wheel (laptops only).
+if ls /sys/class/power_supply/BAT*/charge_control_end_threshold >/dev/null 2>&1 && [ ! -e /etc/udev/rules.d/90-prism-charge-limit.rules ]; then
+    if ask "This laptop can stop charging early. Let Prism set the charge limit without a password (udev rule, sudo)?" y; then
+        sudo install -Dm644 "$SCRIPT_DIR/udev/90-prism-charge-limit.rules" /etc/udev/rules.d/90-prism-charge-limit.rules \
+            && sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=power_supply --action=change
+    fi
 fi
 
 echo "[9/9] Greeter..."

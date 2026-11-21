@@ -3,6 +3,9 @@
 //! swscale conversion to YUV 4:2:0). Timestamps are milliseconds; frames arrive when the screen
 //! changes, so the stream is variable frame rate with exact timing. MKV is written as it goes;
 //! MP4 is fragmented, so a killed recording is still playable.
+//!
+//! Replay buffer (`Recorder::new_replay`): packets stay in memory instead, the last few
+//! seconds from a keyframe, and `save_replay` writes them to a file on request.
 
 use ffmpeg_next as ff;
 use ff::format::Pixel;
@@ -32,8 +35,39 @@ struct AudioTrack {
     pts: i64,
 }
 
+/// Replay buffer: encoded packets of the last `keep_ms`, starting at a video keyframe.
+struct Ring {
+    keep_ms: i64,
+    /// (stream index, packet in its encoder time base, its time in ms).
+    packets: std::collections::VecDeque<(usize, Packet, i64)>,
+    /// Encoder time base of each stream index.
+    tbs: Vec<Rational>,
+    video_idx: usize,
+}
+
+impl Ring {
+    fn push(&mut self, idx: usize, pkt: &Packet) {
+        let tb = self.tbs.get(idx).copied().unwrap_or(TIME_BASE);
+        let ms = pkt.pts().unwrap_or(0) * 1000 * tb.numerator() as i64 / tb.denominator().max(1) as i64;
+        self.packets.push_back((idx, pkt.clone(), ms));
+        let newest = self.packets.iter().map(|p| p.2).max().unwrap_or(ms);
+        while self.packets.front().is_some_and(|p| newest - p.2 > self.keep_ms) {
+            self.packets.pop_front();
+        }
+        // Start at a keyframe; while none is left yet keep everything.
+        if self.packets.iter().any(|(i, p, _)| *i == self.video_idx && p.is_key()) {
+            while self.packets.front().is_some_and(|(i, p, _)| !(*i == self.video_idx && p.is_key())) {
+                self.packets.pop_front();
+            }
+        }
+    }
+}
+
 pub struct Recorder {
     audio: Option<AudioTrack>,
+    ring: Option<Ring>,
+    /// (encoder name, parameters) per stream, for the replay file.
+    stream_info: Vec<(String, codec::Parameters)>,
     octx: format::context::Output,
     video: encoder::Video,
     video_idx: usize,
@@ -132,6 +166,10 @@ impl Recorder {
             hopts.set("movflags", "frag_keyframe+empty_moov+default_base_moof");
         }
         octx.write_header_with(hopts).map_err(|e| e.to_string())?;
+        let mut stream_info = vec![(name.to_string(), codec::Parameters::from(&video))];
+        if let Some(a) = &audio {
+            stream_info.push((a.enc.codec().map(|c| c.name().to_string()).unwrap_or_default(), codec::Parameters::from(&a.enc)));
+        }
         let video_tb = octx.stream(video_idx).map(|s| s.time_base()).unwrap_or(TIME_BASE);
         let audio = audio.map(|mut a| {
             a.tb = octx.stream(a.idx).map(|s| s.time_base()).unwrap_or(a.tb);
@@ -139,6 +177,8 @@ impl Recorder {
         });
         eprintln!("[prism-rec] {w}x{h} with {name} into {path}");
         Ok(Recorder {
+            ring: None,
+            stream_info,
             audio,
             octx,
             video,
@@ -179,10 +219,10 @@ impl Recorder {
                 let sc = Self::scaler_for(&mut self.scaler, Pixel::BGRZ, self.width, self.height, self.in_fmt, self.width, self.height)?;
                 sc.run(&self.staging, conv).map_err(|e| e.to_string())?;
                 conv.set_pts(Some(pts_ms));
-                Self::send(&mut self.video, &mut self.octx, self.video_idx, self.video_tb, Some(conv))
+                Self::send(&mut self.video, &mut self.octx, &mut self.ring, self.video_idx, self.video_tb, Some(conv))
             } else {
                 self.staging.set_pts(Some(pts_ms));
-                Self::send(&mut self.video, &mut self.octx, self.video_idx, self.video_tb, Some(&self.staging))
+                Self::send(&mut self.video, &mut self.octx, &mut self.ring, self.video_idx, self.video_tb, Some(&self.staging))
             }
         } else {
             // Different size or channel order: wrap the crop and let swscale convert.
@@ -197,7 +237,7 @@ impl Recorder {
             let sc = Self::scaler_for(&mut self.scaler, fmt, cw, ch, self.in_fmt, self.width, self.height)?;
             sc.run(&src, &mut out).map_err(|e| e.to_string())?;
             out.set_pts(Some(pts_ms));
-            Self::send(&mut self.video, &mut self.octx, self.video_idx, self.video_tb, Some(&out))
+            Self::send(&mut self.video, &mut self.octx, &mut self.ring, self.video_idx, self.video_tb, Some(&out))
         }
     }
 
@@ -253,15 +293,19 @@ impl Recorder {
             f.set_pts(Some(a.pts));
             a.pts += n as i64;
             a.enc.send_frame(&f).map_err(|e| e.to_string())?;
-            Self::drain_audio(a, &mut self.octx)?;
+            Self::drain_audio(a, &mut self.octx, &mut self.ring)?;
         }
         Ok(())
     }
 
-    fn drain_audio(a: &mut AudioTrack, octx: &mut format::context::Output) -> Result<(), String> {
+    fn drain_audio(a: &mut AudioTrack, octx: &mut format::context::Output, ring: &mut Option<Ring>) -> Result<(), String> {
         let mut pkt = Packet::empty();
         while a.enc.receive_packet(&mut pkt).is_ok() {
             pkt.set_stream(a.idx);
+            if let Some(r) = ring.as_mut() {
+                r.push(a.idx, &pkt);
+                continue;
+            }
             pkt.rescale_ts(Rational(1, crate::audio::RATE as i32), a.tb);
             pkt.write_interleaved(octx).map_err(|e| e.to_string())?;
         }
@@ -276,7 +320,7 @@ impl Recorder {
         Ok(&mut slot.as_mut().unwrap().3)
     }
 
-    fn send(enc: &mut encoder::Video, octx: &mut format::context::Output, idx: usize, tb: Rational, frame: Option<&frame::Video>) -> Result<(), String> {
+    fn send(enc: &mut encoder::Video, octx: &mut format::context::Output, ring: &mut Option<Ring>, idx: usize, tb: Rational, frame: Option<&frame::Video>) -> Result<(), String> {
         match frame {
             Some(f) => enc.send_frame(f).map_err(|e| e.to_string())?,
             None => enc.send_eof().map_err(|e| e.to_string())?,
@@ -284,19 +328,163 @@ impl Recorder {
         let mut pkt = Packet::empty();
         while enc.receive_packet(&mut pkt).is_ok() {
             pkt.set_stream(idx);
+            if let Some(r) = ring.as_mut() {
+                r.push(idx, &pkt);
+                continue;
+            }
             pkt.rescale_ts(TIME_BASE, tb);
             pkt.write_interleaved(octx).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
+    /// Replay buffer: an encoder for `keep_secs` seconds in memory (`ext`: "mkv" or "mp4").
+    pub fn new_replay(v: &VideoOpts, audio: bool, ext: &str, keep_secs: u32) -> Result<Recorder, String> {
+        ff::init().map_err(|e| e.to_string())?;
+        ff::log::set_level(ff::log::Level::Error);
+        let (w, h) = (v.width & !1, v.height & !1);
+        let mut last_err = String::from("no encoder found");
+        for name in candidates(&v.codec) {
+            let Some(c) = encoder::find_by_name(name) else { continue };
+            match Self::open_replay(v, w, h, c, name, audio, ext) {
+                Ok(mut r) => {
+                    if let Some(ring) = r.ring.as_mut() {
+                        ring.keep_ms = keep_secs.clamp(5, 600) as i64 * 1000;
+                    }
+                    return Ok(r);
+                }
+                Err(e) => last_err = format!("{name}: {e}"),
+            }
+        }
+        Err(last_err)
+    }
+
+    fn open_replay(v: &VideoOpts, w: u32, h: u32, c: ff::Codec, name: &str, audio: bool, ext: &str) -> Result<Recorder, String> {
+        // The muxer only decides global headers here; nothing is written to /dev/null.
+        let fmt = if ext == "mp4" { "mp4" } else { "matroska" };
+        let mut octx = format::output_as("/dev/null", fmt).map_err(|e| e.to_string())?;
+        let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
+        let in_fmt = if name.ends_with("_nvenc") { Pixel::BGRZ } else { Pixel::YUV420P };
+        let mut enc = codec::context::Context::new_with_codec(c).encoder().video().map_err(|e| e.to_string())?;
+        enc.set_width(w);
+        enc.set_height(h);
+        enc.set_format(in_fmt);
+        enc.set_time_base(TIME_BASE);
+        enc.set_frame_rate(Some(Rational(v.fps as i32, 1)));
+        enc.set_gop(v.fps * 2);
+        enc.set_max_b_frames(0);
+        if global_header {
+            enc.set_flags(codec::Flags::GLOBAL_HEADER);
+        }
+        let video = enc.open_with(quality_opts(name, &v.quality)).map_err(|e| e.to_string())?;
+        let video_idx = 0;
+        let path = if ext == "mp4" { "x.mp4" } else { "x.mkv" };
+        let audio = if audio { Some(Self::audio_track(&mut octx, path, global_header)?) } else { None };
+        let audio = audio.map(|mut a| {
+            a.idx = 1;
+            a
+        });
+        let mut stream_info = vec![(name.to_string(), codec::Parameters::from(&video))];
+        if let Some(a) = &audio {
+            stream_info.push((a.enc.codec().map(|c| c.name().to_string()).unwrap_or_default(), codec::Parameters::from(&a.enc)));
+        }
+        eprintln!("[prism-rec] replay buffer {w}x{h} with {name}");
+        Ok(Recorder {
+            ring: Some(Ring { keep_ms: 30_000, packets: Default::default(), tbs: vec![TIME_BASE, Rational(1, crate::audio::RATE as i32)], video_idx }),
+            stream_info,
+            audio,
+            octx,
+            video,
+            video_idx,
+            video_tb: TIME_BASE,
+            in_fmt,
+            scaler: None,
+            staging: frame::Video::new(Pixel::BGRZ, w, h),
+            converted: (in_fmt != Pixel::BGRZ).then(|| frame::Video::new(in_fmt, w, h)),
+            width: w,
+            height: h,
+            encoder_name: name.to_string(),
+            last_pts: -1,
+        })
+    }
+
+    /// Replay buffer: write what is in memory to `path` (times start at 0). Returns seconds.
+    pub fn save_replay(&self, path: &str) -> Result<f64, String> {
+        let ring = self.ring.as_ref().ok_or("not a replay buffer")?;
+        let (first_ms, last_ms) = match (ring.packets.front(), ring.packets.back()) {
+            (Some(a), Some(b)) => (a.2, b.2),
+            _ => return Err("the replay buffer is still empty".into()),
+        };
+        let mut octx = format::output(&path).map_err(|e| format!("{path}: {e}"))?;
+        for (name, par) in &self.stream_info {
+            let c = encoder::find_by_name(name).ok_or_else(|| format!("no encoder {name}"))?;
+            let mut ost = octx.add_stream(c).map_err(|e| e.to_string())?;
+            ost.set_parameters(par.clone());
+        }
+        let mut hopts = Dictionary::new();
+        if path.ends_with(".mp4") {
+            hopts.set("movflags", "+faststart");
+        }
+        octx.write_header_with(hopts).map_err(|e| e.to_string())?;
+        let out_tbs: Vec<Rational> = (0..self.stream_info.len()).map(|i| octx.stream(i).map(|s| s.time_base()).unwrap_or(TIME_BASE)).collect();
+        for (idx, pkt, ms) in &ring.packets {
+            if *ms < first_ms || *idx >= out_tbs.len() {
+                continue;
+            }
+            let tb = ring.tbs[*idx];
+            let base = first_ms * tb.denominator() as i64 / (1000 * tb.numerator().max(1) as i64);
+            let mut p = pkt.clone();
+            p.set_pts(p.pts().map(|t| t - base));
+            p.set_dts(p.dts().map(|t| t - base));
+            if p.dts().is_some_and(|t| t < 0) {
+                continue;
+            }
+            p.set_stream(*idx);
+            p.rescale_ts(tb, out_tbs[*idx]);
+            p.write_interleaved(&mut octx).map_err(|e| e.to_string())?;
+        }
+        octx.write_trailer().map_err(|e| e.to_string())?;
+        Ok((last_ms - first_ms) as f64 / 1000.0)
+    }
+
     /// Flush the encoder and close the file.
     pub fn finish(mut self) -> Result<(), String> {
-        Self::send(&mut self.video, &mut self.octx, self.video_idx, self.video_tb, None)?;
+        if self.ring.is_some() {
+            return Ok(());
+        }
+        Self::send(&mut self.video, &mut self.octx, &mut self.ring, self.video_idx, self.video_tb, None)?;
         if let Some(a) = self.audio.as_mut() {
             a.enc.send_eof().map_err(|e| e.to_string())?;
-            Self::drain_audio(a, &mut self.octx)?;
+            Self::drain_audio(a, &mut self.octx, &mut self.ring)?;
         }
         self.octx.write_trailer().map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkt(pts_ms: i64, key: bool) -> Packet {
+        let mut p = Packet::new(4);
+        p.set_pts(Some(pts_ms));
+        if key {
+            p.set_flags(ff::packet::Flags::KEY);
+        }
+        p
+    }
+
+    #[test]
+    fn ring_keeps_the_last_seconds_from_a_keyframe() {
+        let mut r = Ring { keep_ms: 5000, packets: Default::default(), tbs: vec![TIME_BASE, TIME_BASE], video_idx: 0 };
+        // A keyframe every 2 s, a frame every 500 ms, for 12 s.
+        for i in 0..=24 {
+            let t = i * 500;
+            r.push(0, &pkt(t, t % 2000 == 0));
+        }
+        let first = r.packets.front().unwrap();
+        assert!(first.1.is_key());
+        assert_eq!(first.2, 8000); // newest 12000: the window starts at 7000, the next keyframe is at 8000
+        assert_eq!(r.packets.back().unwrap().2, 12000);
     }
 }

@@ -34,6 +34,13 @@ pub struct Notification {
     /// action).
     #[serde(default)]
     pub reply_placeholder: String,
+    /// Snoozed: hidden until this Unix time, then shown again as new (0 = not snoozed).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub snoozed_until: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl Notification {
@@ -57,8 +64,19 @@ impl Notification {
             image: None,
             preview: false,
             reply_placeholder: String::new(),
+            snoozed_until: 0,
         }
     }
+}
+
+/// Where the history is kept. Tests use a folder of their own: they must never touch the
+/// user's history.
+fn store_dir() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("prism-notif-test-{}", std::process::id()));
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".cache/prism/notifications")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -76,8 +94,7 @@ impl NotificationStore {
     }
 
     pub fn load() -> Self {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let path = PathBuf::from(home).join(".cache/prism/notifications/history.json");
+        let path = store_dir().join("history.json");
 
         if path.exists() {
             if let Ok(content) = fs::read_to_string(&path) {
@@ -91,8 +108,7 @@ impl NotificationStore {
     }
 
     pub fn save(&self) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let cache_dir = PathBuf::from(home).join(".cache/prism/notifications");
+        let cache_dir = store_dir();
         let _ = crate::clipboard::private_dir(&cache_dir);
 
         let path = cache_dir.join("history.json");
@@ -169,6 +185,44 @@ impl NotificationStore {
         self.notifications.clear();
         self.save();
     }
+
+    /// Hide `id` until `until` (Unix seconds). False if it is not stored.
+    pub fn snooze(&mut self, id: u32, until: u64) -> bool {
+        let Some(n) = self.notifications.iter_mut().find(|n| n.id == id) else { return false };
+        n.snoozed_until = until;
+        self.save();
+        true
+    }
+
+    /// Snoozes over by `now`: they become new again (top of the list, current time). Returns
+    /// their ids.
+    pub fn wake_snoozed(&mut self, now: u64) -> Vec<u32> {
+        let mut woken: Vec<Notification> = Vec::new();
+        self.notifications.retain(|n| {
+            if n.snoozed_until != 0 && n.snoozed_until <= now {
+                woken.push(n.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if woken.is_empty() {
+            return Vec::new();
+        }
+        let ids = woken.iter().map(|n| n.id).collect();
+        for mut n in woken.into_iter().rev() {
+            n.snoozed_until = 0;
+            n.timestamp = now;
+            self.notifications.insert(0, n);
+        }
+        self.save();
+        ids
+    }
+
+    /// Shown in the notification centre now (not snoozed).
+    pub fn visible(&self, now: u64) -> impl Iterator<Item = &Notification> {
+        self.notifications.iter().filter(move |n| n.snoozed_until <= now)
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +250,20 @@ mod tests {
 
         store.clear();
         assert!(store.notifications.is_empty());
+    }
+
+    #[test]
+    fn snoozed_notifications_hide_then_come_back_on_top() {
+        let mut store = NotificationStore::new();
+        let a = store.add(Notification::new(0, "a".into(), "A".into(), String::new()));
+        let b = store.add(Notification::new(0, "b".into(), "B".into(), String::new()));
+        assert!(store.snooze(a, 1000));
+        assert_eq!(store.visible(999).map(|n| n.id).collect::<Vec<_>>(), [b]);
+        assert!(store.wake_snoozed(999).is_empty());
+        assert_eq!(store.wake_snoozed(1000), [a]);
+        assert_eq!(store.notifications[0].id, a);
+        assert_eq!(store.notifications[0].snoozed_until, 0);
+        assert_eq!(store.visible(1000).count(), 2);
     }
 }
 

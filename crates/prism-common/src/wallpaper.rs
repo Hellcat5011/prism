@@ -195,6 +195,50 @@ pub fn set_wallpaper_filtered(
     Ok(())
 }
 
+/// Where prismd notes whether the "auto" colour mode is light or dark now.
+fn auto_mode_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".cache/prism/auto-theme")
+}
+
+/// The matugen mode for a configured one: "auto" (light by day, dark by night on the Night
+/// Light schedule; prismd keeps the state) resolves to "light" or "dark".
+pub fn matugen_mode(mode: &str) -> String {
+    if mode != "auto" {
+        return mode.to_string();
+    }
+    match fs::read_to_string(auto_mode_path()).map(|s| s.trim().to_string()) {
+        Ok(m) if m == "light" => m,
+        _ => "dark".to_string(),
+    }
+}
+
+/// prismd: the auto colour mode is now `mode` ("light" or "dark"). Returns true if it changed.
+pub fn set_auto_mode(mode: &str) -> bool {
+    if fs::read_to_string(auto_mode_path()).is_ok_and(|s| s.trim() == mode) {
+        return false;
+    }
+    let p = auto_mode_path();
+    if let Some(dir) = p.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    fs::write(&p, mode).is_ok()
+}
+
+/// Re-run matugen on the current wallpaper (~/.wa.jpg) with this scheme and mode.
+pub fn regenerate_palette(scheme: &str, mode: &str) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    let out = Command::new("matugen")
+        .args(["image", &format!("{home}/.wa.jpg"), "-m", &matugen_mode(mode), "-t", scheme, "--source-color-index", "0"])
+        .output()
+        .map_err(|e| format!("matugen not available: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("matugen failed: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")))
+    }
+}
+
 /// Derive the colour palette from `image`, if matugen is installed.
 fn run_matugen(image: &Path, scheme: Option<&str>, mode: Option<&str>) {
     let has_matugen = Command::new("matugen").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
@@ -204,7 +248,7 @@ fn run_matugen(image: &Path, scheme: Option<&str>, mode: Option<&str>) {
                 "image",
                 image.to_str().unwrap_or(""),
                 "-m",
-                mode.unwrap_or("smart"),
+                &matugen_mode(mode.unwrap_or("smart")),
                 "-t",
                 scheme.unwrap_or("scheme-smart"),
                 "--source-color-index",

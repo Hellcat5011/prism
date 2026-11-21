@@ -3,7 +3,7 @@
 //!   ┌ Control Centre ─────────── 🔋 ⚙ ┐
 //!   │ [Network] [BT] [Notifications] [☕]│  tiles: the selected one expands, the others are icons
 //!   │                                  │
-//!   │  page: notifications / network / bluetooth (cross-fade)
+//!   │  page: notifications / network / bluetooth / VPN / timer / sound (cross-fade)
 //!   │                                  │
 //!   │ [sink list ▲] 🔊 ───────●──── ⌃ │  footer
 //!   │               ☀ ─────●────────   │
@@ -28,6 +28,7 @@ use prism_common::notifications::Notification;
 use prism_common::Theme;
 
 use crate::cairo_backend::{self as cb, Cairo};
+use crate::launcher::{draw_text_caret, Query};
 use crate::desktop::layout::Rect;
 use crate::status::{self, StatusHandle, StatusRequest, StatusSnapshot};
 use crate::svg;
@@ -39,6 +40,11 @@ use widgets::{alpha, font, text_size, text_v, Pal, Tween, RADIUS};
 pub const CARD_W: f64 = 400.0;
 /// Height of the "Apps" heading over the per-app volume rows.
 const APPS_HEAD: f64 = 26.0;
+/// Height of the "Sound settings" row under the output panel.
+const MORE_ROW: f64 = 36.0;
+/// Fonts of the reply and password fields, and of the VPN filter.
+const FIELD_FONT: &str = "Inter, Sans 14px";
+const FILTER_FONT: &str = "Inter, Sans 13px";
 /// Height of the inline reply field.
 const REPLY_H: f64 = 40.0;
 /// Notification groups: the open header's height, entries shown before "Show N more", that
@@ -54,9 +60,12 @@ const PEEK: f64 = 5.0;
 const SPRING_GROUP: (f64, f64) = (0.34, 0.86);
 
 /// The notification a hit belongs to (its row, buttons or reply field).
+/// "Snooze" hides a notification for an hour.
+const SNOOZE_SECS: u64 = 3600;
+
 fn hit_nid(h: Hit) -> Option<u32> {
     match h {
-        Hit::Entry(n) | Hit::EntryAction(n, _) | Hit::EntryCopy(n) | Hit::EntryClose(n) | Hit::ReplyField(n) | Hit::ReplySend(n) => Some(n),
+        Hit::Entry(n) | Hit::EntryAction(n, _) | Hit::EntryCopy(n) | Hit::EntrySnooze(n) | Hit::EntryClose(n) | Hit::ReplyField(n) | Hit::ReplySend(n) => Some(n),
         _ => None,
     }
 }
@@ -69,10 +78,12 @@ const TILE_CAFFEINE: usize = 3;
 pub const TAB_VPN: usize = 4;
 const TILE_GAME: usize = 5;
 pub const TAB_TIMER: usize = 6;
-const TILES: usize = 7;
+/// Sound page (pavucontrol's features, `audio.rs`); also opened from the footer's output panel.
+pub const TAB_AUDIO: usize = 7;
+const TILES: usize = 8;
 /// Tile order on screen (QML order, VPN after Bluetooth) and their config names.
-const TILE_ORDER: [(usize, &str); TILES] = [(TAB_NET, "network"), (TAB_BT, "bluetooth"), (TAB_VPN, "vpn"), (TAB_NOTIFS, "notifications"), (TILE_CAFFEINE, "caffeine"), (TILE_GAME, "game"), (TAB_TIMER, "timer")];
-const PAGES: [usize; 5] = [TAB_NOTIFS, TAB_NET, TAB_BT, TAB_VPN, TAB_TIMER];
+const TILE_ORDER: [(usize, &str); TILES] = [(TAB_NET, "network"), (TAB_BT, "bluetooth"), (TAB_VPN, "vpn"), (TAB_NOTIFS, "notifications"), (TILE_CAFFEINE, "caffeine"), (TILE_GAME, "game"), (TAB_TIMER, "timer"), (TAB_AUDIO, "audio")];
+const PAGES: [usize; 6] = [TAB_NOTIFS, TAB_NET, TAB_BT, TAB_VPN, TAB_TIMER, TAB_AUDIO];
 
 /// Tab the next Control Centre opens on (tray icons), e.g. TAB_NET.
 static OPEN_TAB: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
@@ -122,7 +133,6 @@ const WIFI_POLL: Duration = Duration::from_secs(8);
 const SLIDER_HOLD: Duration = Duration::from_millis(1500);
 
 const ESC: u32 = 1;
-const BACKSPACE: u32 = 14;
 const ENTER: u32 = 28;
 
 pub enum Effect {
@@ -147,17 +157,19 @@ fn wants_preview(n: &Notification) -> bool {
 /// labels need plus a share of the spare room, followed by copy and close (40 px each); if
 /// the labels do not fit next to those, the actions get a row of their own. Without app
 /// actions, copy and close share the row (QML).
-fn entry_actions(cr: *mut Cairo, tx: f64, top: f64, tw: f64, n: &Notification) -> (Rect, Rect, Vec<Rect>, f64) {
+/// Entry buttons: (copy, snooze, close, the app's actions, height of the button rows).
+fn entry_actions(cr: *mut Cairo, tx: f64, top: f64, tw: f64, n: &Notification) -> (Rect, Rect, Rect, Vec<Rect>, f64) {
     const H: f64 = 28.0;
     let gap = 6.0;
-    let acts: Vec<&str> = n.actions.iter().take(3).map(|(_, l)| l.as_str()).collect();
+    let acts: Vec<&str> = n.actions.iter().take(4).map(|(_, l)| l.as_str()).collect();
     if acts.is_empty() {
-        let bw = (tw - gap) / 2.0;
-        return (Rect { x: tx, y: top, w: bw, h: H }, Rect { x: tx + bw + gap, y: top, w: bw, h: H }, Vec::new(), H);
+        let bw = (tw - 2.0 * gap) / 3.0;
+        let at = |i: f64| Rect { x: tx + i * (bw + gap), y: top, w: bw, h: H };
+        return (at(0.0), at(1.0), at(2.0), Vec::new(), H);
     }
     let small = 40.0;
     let natural: Vec<f64> = acts.iter().map(|l| widgets::button_size(cr, l, "", true).1).collect();
-    let beside = tw - 2.0 * (small + gap);
+    let beside = tw - 3.0 * (small + gap);
     let (widths, icons_y, rows_h) = if crate::ui::widths_fit(&natural, beside, gap) {
         (crate::ui::fit_widths(&natural, beside, gap), top, H)
     } else {
@@ -172,8 +184,9 @@ fn entry_actions(cr: *mut Cairo, tx: f64, top: f64, tw: f64, n: &Notification) -
             r
         })
         .collect();
-    let cx0 = tx + tw - 2.0 * small - gap;
-    (Rect { x: cx0, y: icons_y, w: small, h: H }, Rect { x: cx0 + small + gap, y: icons_y, w: small, h: H }, rects, rows_h)
+    let cx0 = tx + tw - 3.0 * small - 2.0 * gap;
+    let at = |i: f64| Rect { x: cx0 + i * (small + gap), y: icons_y, w: small, h: H };
+    (at(0.0), at(1.0), at(2.0), rects, rows_h)
 }
 
 /// Hover level 0..1 of `hit` (fades in and out), for widgets drawn with a hover state.
@@ -185,6 +198,8 @@ macro_rules! hv {
         $v.hover_fade.level_scaled(hit, on, ts)
     }};
 }
+
+mod audio;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Hit {
@@ -209,6 +224,8 @@ enum Hit {
     EntryReveal(u32),
     EntryCopy(u32),
     EntryClose(u32),
+    /// Snooze the entry for an hour.
+    EntrySnooze(u32),
     /// (notification id, action index)
     EntryAction(u32, usize),
     ReplyField(u32),
@@ -221,6 +238,17 @@ enum Hit {
     /// Per-app volume slider and mute button (index into `mixer`).
     AppVolume(usize),
     AppMute(usize),
+    /// Footer output panel: open the Sound page.
+    AudioPage,
+    /// Sound page: section tab, make default, volume / balance slider (node id), mute, open a
+    /// dropdown, an option of the open dropdown.
+    AudioSec(usize),
+    AudioDefault(u32),
+    AudioVol(u32),
+    AudioBal(u32),
+    AudioMute(u32),
+    AudioPick(audio::Pick),
+    AudioChoice(usize),
     EthHeader,
     Detail(usize),
     WifiSwitch,
@@ -238,6 +266,16 @@ enum Hit {
     BtSend(usize),
     VpnRow(usize),
     VpnImport,
+    VpnFilter,
+    /// The search field of the notifications page.
+    NotifFilter,
+    /// Focus: the button that opens its options, the two switches, an app of the allow-list.
+    Focus,
+    FocusShare,
+    FocusFull,
+    FocusApp(usize),
+    /// Animation key of a Focus switch's knob (0 screen share, 1 fullscreen).
+    FocusKnob(u8),
     Unnamed,
 }
 
@@ -245,6 +283,8 @@ enum Hit {
 enum Drag {
     Volume,
     AppVolume(usize),
+    /// A Sound page slider (Hit::AudioVol / Hit::AudioBal).
+    Audio(Hit),
     Brightness,
     /// Swiping a notification entry: (nid, start x).
     Entry(u32, f64),
@@ -264,7 +304,15 @@ pub struct NcView {
     /// Shown tiles (ids), from `nc_tiles`.
     tiles: Vec<usize>,
     /// VPN list filter (typed while the VPN page is open).
-    vpn_filter: String,
+    vpn_filter: Query,
+    /// Search text of the notifications page (app, summary or body).
+    notif_filter: Query,
+    /// The Focus options replace the notification list.
+    focus_open: bool,
+    /// Focus settings while the options are open: (on screen share, on fullscreen, allowed apps).
+    focus_cfg: (bool, bool, Vec<String>),
+    /// Apps shown as chips (index = `Hit::FocusApp`).
+    focus_apps: Vec<String>,
     hits: Vec<(Hit, Rect)>,
     hover: Option<Hit>,
     /// Hover fades of the hit targets (see `hv!`).
@@ -283,6 +331,8 @@ pub struct NcView {
     show_all: std::collections::HashSet<String>,
     /// Entries sliding out after a dismiss: nid -> start.
     dismissing: Vec<(u32, Instant)>,
+    /// Entries in `dismissing` that are snoozed, not dismissed.
+    snoozing: Vec<u32>,
     sink_open: bool,
     sink_t: Tween,
     eth_open: bool,
@@ -290,7 +340,7 @@ pub struct NcView {
     expanded_ssid: Option<String>,
     /// Network list frozen while a row is expanded (QML freezeList).
     frozen: Option<Vec<Net>>,
-    pw: String,
+    pw: Query,
     show_unnamed: bool,
     vol_local: Option<(u32, Instant)>,
     bri_local: Option<(u32, Instant)>,
@@ -311,7 +361,18 @@ pub struct NcView {
     /// A dragged app volume, shown until PipeWire reports it back.
     app_local: Option<(String, f64, Instant)>,
     /// Inline reply being typed: notification id and text.
-    reply: Option<(u32, String)>,
+    reply: Option<(u32, Query)>,
+    /// Text fields as drawn: hit, text x and width, font (clicks place the caret).
+    text_geo: Vec<(Hit, f64, f64, &'static str)>,
+    /// Sound page: section, its pill spring, the open dropdown and its options as drawn, a
+    /// dragged slider value, and the PipeWire state as drawn.
+    audio_sec: usize,
+    audio_seg: Tween,
+    audio_pick: Option<audio::Pick>,
+    audio_choices: Vec<audio::Choice>,
+    audio_local: Option<(Hit, f64, Instant)>,
+    audio: crate::pw_watch::Audio,
+    streams: Vec<crate::pw_watch::Stream>,
 }
 
 impl NcView {
@@ -319,7 +380,13 @@ impl NcView {
         let status = status::spawn(waker.clone());
         crate::pw_watch::start(waker.clone());
         let names = prism_common::Config::load().nc_tiles;
-        let tiles: Vec<usize> = TILE_ORDER.iter().filter(|(_, n)| names.iter().any(|x| x == n)).map(|(id, _)| *id).collect();
+        // Shown tiles in the configured order (Settings lets the user drag them).
+        let mut tiles: Vec<usize> = Vec::new();
+        for id in names.iter().filter_map(|n| TILE_ORDER.iter().find(|(_, t)| t == n).map(|(id, _)| *id)) {
+            if !tiles.contains(&id) {
+                tiles.push(id);
+            }
+        }
         let pages: Vec<usize> = tiles.iter().copied().filter(|t| PAGES.contains(t)).collect();
         let wanted = OPEN_TAB.lock().unwrap().take();
         let tab = wanted.filter(|t| PAGES.contains(t)).or(pages.contains(&TAB_NOTIFS).then_some(TAB_NOTIFS)).or(pages.first().copied()).unwrap_or(TAB_NOTIFS);
@@ -333,14 +400,26 @@ impl NcView {
             pw_seen: 0,
             timer_sec: 0,
             app_local: None,
-            reply: OPEN_REPLY.lock().unwrap().take().map(|id| (id, String::new())),
+            reply: OPEN_REPLY.lock().unwrap().take().map(|id| (id, Query::default())),
+            text_geo: Vec::new(),
+            audio_sec: audio::SEC_OUTPUT,
+            audio_seg: Tween::new(audio::SEC_OUTPUT as f64),
+            audio_pick: None,
+            audio_choices: Vec::new(),
+            audio_local: None,
+            audio: Default::default(),
+            streams: Vec::new(),
             status,
             snap: StatusSnapshot::default(),
             tab,
             page,
             tile_w,
             tiles,
-            vpn_filter: String::new(),
+            vpn_filter: Query::default(),
+            notif_filter: Query::default(),
+            focus_open: false,
+            focus_cfg: (false, false, Vec::new()),
+            focus_apps: Vec::new(),
             hits: Vec::new(),
             hover: None,
             hover_fade: crate::ui::Fades::default(),
@@ -354,13 +433,14 @@ impl NcView {
             expand: HashMap::new(),
             show_all: Default::default(),
             dismissing: Vec::new(),
+            snoozing: Vec::new(),
             sink_open: false,
             sink_t: Tween::new(0.0),
             eth_open: true,
             eth_t: Tween::new(1.0),
             expanded_ssid: None,
             frozen: None,
-            pw: String::new(),
+            pw: Query::default(),
             show_unnamed: false,
             vol_local: None,
             bri_local: None,
@@ -395,10 +475,12 @@ impl NcView {
             }
         }
         // Apps started or stopped playing: the open output panel shows them.
+        // Level meters move while a shown device makes sound.
+        changed |= self.meters_shown() && crate::meters::moving();
         let pw = crate::pw_watch::generation();
         if pw != self.pw_seen {
             self.pw_seen = pw;
-            changed |= self.sink_open;
+            changed |= self.sink_open || self.tab == TAB_AUDIO;
         }
         if let Some(rx) = &self.action_watch {
             match rx.try_recv() {
@@ -425,7 +507,12 @@ impl NcView {
             self.dismissing.retain(|(n, _)| !done.contains(n));
             for nid in done {
                 self.snap.notifications.retain(|n| n.id != nid);
-                self.daemon(IpcCommand::Notif(NotifAction::Dismiss(nid)));
+                if let Some(i) = self.snoozing.iter().position(|n| *n == nid) {
+                    self.snoozing.remove(i);
+                    self.daemon(IpcCommand::Notif(NotifAction::Snooze { id: nid, secs: SNOOZE_SECS }));
+                } else {
+                    self.daemon(IpcCommand::Notif(NotifAction::Dismiss(nid)));
+                }
             }
             changed = true;
         }
@@ -443,6 +530,7 @@ impl NcView {
     pub fn animating(&self) -> bool {
         self.page.iter().chain(self.tile_w.iter()).chain(self.knobs.iter()).any(|t| t.running())
             || self.sink_t.running()
+            || self.audio_seg.running()
             || self.eth_t.running()
             || !self.dismissing.is_empty()
             || (self.tab == 1 && self.snap.net.scanning)
@@ -471,7 +559,9 @@ impl NcView {
 
     fn groups(&self) -> Vec<Group<'_>> {
         let mut out: Vec<Group> = Vec::new();
-        for n in &self.snap.notifications {
+        let q = self.notif_filter.text.trim().to_lowercase();
+        let matches = |n: &Notification| q.is_empty() || [&n.app_name, &n.summary, &n.body].iter().any(|t| plain(t).to_lowercase().contains(&q));
+        for n in self.snap.notifications.iter().filter(|n| matches(n)) {
             let key = if n.app_name.is_empty() { "unknown".to_string() } else { n.app_name.to_lowercase() };
             match out.iter_mut().find(|g| g.key == key) {
                 Some(g) => g.items.push(n),
@@ -504,6 +594,7 @@ impl NcView {
     pub fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, theme: &Theme) {
         self.time_scale = style.time_scale();
         self.hits.clear();
+        self.text_geo.clear();
         self.detail_values.clear();
         let p = Pal {
             fg: style.fg,
@@ -580,6 +671,7 @@ impl NcView {
                 TAB_NET => self.draw_network(cr, page, &p),
                 TAB_VPN => self.draw_vpn(cr, page, &p),
                 TAB_TIMER => self.draw_timer(cr, page, &p),
+                TAB_AUDIO => self.draw_audio(cr, page, &p),
                 _ => self.draw_bluetooth(cr, page, &p),
             }
             if !interactive {
@@ -632,6 +724,10 @@ impl NcView {
             _ => "Off".into(),
         };
         let count = self.snap.notifications.len();
+        let sound = crate::pw_watch::audio();
+        let out = sound.sinks.iter().find(|d| d.is_default);
+        let sound_muted = out.is_some_and(|d| d.muted);
+        let sound_sub = out.map(|d| d.description.clone()).unwrap_or_else(|| "No output".into());
         let net_title = net.status_text();
         let net_sub = net.status_detail();
         let bt_title = if !bt.adapter {
@@ -736,14 +832,29 @@ impl NcView {
                 badge: 0,
                 expanded_w: wide,
             },
+            widgets::TileSpec {
+                icon: "volume",
+                title: "Sound",
+                subtitle: &sound_sub,
+                count: "",
+                selected: self.tab == TAB_AUDIO,
+                on: false,
+                dimmed: sound_muted,
+                slashed: sound_muted,
+                badge: 0,
+                expanded_w: wide,
+            },
         ];
         // Specs are listed network, bluetooth, notifications, VPN, caffeine: put them in TILE_ORDER.
         specs.swap(2, 3);
         // Network, bluetooth, VPN, notifications, caffeinate; hidden tiles close up the gap.
         let mut tx = x;
         let mut hits = Vec::new();
-        for (slot, spec) in specs.iter().enumerate() {
-            let tab = TILE_ORDER[slot].0;
+        // Shown tiles in their configured order, then hidden ones (shrinking to nothing).
+        let order: Vec<usize> = self.tiles.iter().copied().chain(TILE_ORDER.iter().map(|(id, _)| *id).filter(|id| !self.tiles.contains(id))).collect();
+        for tab in order {
+            let Some(slot) = TILE_ORDER.iter().position(|(id, _)| *id == tab) else { continue };
+            let spec = &specs[slot];
             let tw = self.tile_w[tab].value();
             if tw < 0.5 {
                 continue;
@@ -799,6 +910,127 @@ impl NcView {
 
     // ── Notifications page ───────────────────────────────────────────────
 
+    /// Up to three calendar events starting in the next 24 hours (or going on now); returns
+    /// the height used (0 without any).
+    fn draw_upcoming(&mut self, cr: *mut Cairo, r: Rect, p: &Pal) -> f64 {
+        let now = unix_ms() / 1000;
+        let events = crate::cal_events::snapshot();
+        let next: Vec<_> = events.iter().filter(|o| o.end > now && o.start < now + 86400 && !(o.all_day && o.start > now + 43200)).take(3).collect();
+        if next.is_empty() {
+            return 0.0;
+        }
+        let row_h = 26.0;
+        let h = 12.0 + next.len() as f64 * row_h + 10.0;
+        cb::fill_rounded_rect(cr, r.x, r.y, r.w, h, RADIUS, alpha(p.fg, 0.08));
+        let today = crate::cal_events::local(now).2;
+        let mut y = r.y + 10.0;
+        let tf = font(12.0, "Medium");
+        for o in next {
+            let when = if o.all_day {
+                "All day".to_string()
+            } else if o.start <= now {
+                "Now".to_string()
+            } else if crate::cal_events::local(o.start).2 != today {
+                format!("Tmrw {}", crate::cal_events::clock(o.start))
+            } else {
+                crate::cal_events::clock(o.start)
+            };
+            cb::fill_rounded_rect(cr, r.x + 12.0, y + 6.0, 3.0, row_h - 12.0, 1.5, p.primary);
+            text_v(cr, r.x + 22.0, y, row_h, &when, &tf, alpha(p.fg, 0.75), Some(80.0));
+            let title = if o.location.is_empty() { o.summary.clone() } else { format!("{}  \u{b7}  {}", o.summary, o.location) };
+            text_v(cr, r.x + 106.0, y, row_h, &title, &font(13.0, ""), p.fg, Some(r.w - 118.0));
+            y += row_h;
+        }
+        h + 10.0
+    }
+
+    /// Focus options: when silent mode turns on by itself, and which apps still pop up.
+    fn draw_focus(&mut self, cr: *mut Cairo, r: Rect, p: &Pal) {
+        let mut y = r.y;
+        cb::draw_pango_text(cr, r.x, y, "Focus", &font(16.0, "Bold"), p.fg, None);
+        let sub = "While silent, only critical notifications and the apps below pop up. The rest still arrive here.";
+        let (_, sh) = cb::draw_pango_text_wrapped(cr, r.x, y + 22.0, sub, &font(12.0, ""), alpha(p.fg, 0.7), r.w as i32, Some(3));
+        y += 22.0 + sh as f64 + 12.0;
+        let ts = self.time_scale;
+        let (share, full) = (self.focus_cfg.0, self.focus_cfg.1);
+        for (hit, label, on) in [(Hit::FocusShare, "Silent while sharing the screen", share), (Hit::FocusFull, "Silent while a window is fullscreen", full)] {
+            let row = Rect { x: r.x, y, w: r.w, h: 40.0 };
+            let hv = hv!(self, hit);
+            cb::fill_rounded_rect(cr, row.x, row.y, row.w, row.h, 12.0, alpha(p.fg, 0.08 + 0.06 * hv));
+            text_v(cr, row.x + 12.0, row.y, row.h, label, &font(13.0, ""), p.fg, Some(row.w - 70.0));
+            let knob = self.hover_fade.level_scaled(Hit::FocusKnob(if hit == Hit::FocusShare { 0 } else { 1 }), on, ts);
+            widgets::switch(cr, row.x + row.w - 54.0, row.y + 8.0, knob, true, p);
+            self.hits.push((hit, row));
+            y += row.h + 6.0;
+        }
+        y += 8.0;
+        cb::draw_pango_text(cr, r.x, y, "Allowed while silent", &font(12.0, "Bold"), alpha(p.fg, 0.7), None);
+        y += 22.0;
+        // Chips: the allowed apps, and the apps that sent the notifications shown.
+        let mut apps: Vec<String> = self.focus_cfg.2.clone();
+        for n in &self.snap.notifications {
+            if !n.app_name.is_empty() && !apps.iter().any(|a| a.eq_ignore_ascii_case(&n.app_name)) {
+                apps.push(n.app_name.clone());
+            }
+        }
+        if apps.is_empty() {
+            cb::draw_pango_text_wrapped(cr, r.x, y, "Apps appear here once they have sent a notification.", &font(12.0, ""), alpha(p.fg, 0.6), r.w as i32, Some(2));
+        }
+        let f = font(12.0, "Medium");
+        let mut x = r.x;
+        for (i, app) in apps.iter().enumerate() {
+            let on = self.focus_cfg.2.iter().any(|a| a.eq_ignore_ascii_case(app));
+            let (tw, _) = text_size(cr, app, &f);
+            let w = (tw + 24.0 + if on { 18.0 } else { 0.0 }).min(r.w);
+            if x + w > r.x + r.w {
+                x = r.x;
+                y += 36.0;
+            }
+            if y + 30.0 > r.y + r.h {
+                break;
+            }
+            let chip = Rect { x, y, w, h: 30.0 };
+            let hv = hv!(self, Hit::FocusApp(i));
+            cb::fill_rounded_rect(cr, chip.x, chip.y, chip.w, chip.h, 15.0, if on { alpha(p.fg, 0.85 + 0.1 * hv) } else { alpha(p.fg, 0.12 + 0.1 * hv) });
+            let c = if on { p.inv } else { p.fg };
+            let mut tx = chip.x + 12.0;
+            if on {
+                svg::icon(cr, "check", tx - 2.0, chip.y + 7.0, 16.0, c, false);
+                tx += 18.0;
+            }
+            text_v(cr, tx, chip.y, chip.h, app, &f, c, Some(chip.w - (tx - chip.x) - 10.0));
+            self.hits.push((Hit::FocusApp(i), chip));
+            x += w + 8.0;
+        }
+        self.focus_apps = apps;
+    }
+
+    /// A Focus option was clicked: change it and save the config (prismd reloads it).
+    fn focus_change(&mut self, h: Hit) {
+        match h {
+            Hit::FocusShare => self.focus_cfg.0 = !self.focus_cfg.0,
+            Hit::FocusFull => self.focus_cfg.1 = !self.focus_cfg.1,
+            Hit::FocusApp(i) => {
+                let Some(app) = self.focus_apps.get(i).cloned() else { return };
+                let list = &mut self.focus_cfg.2;
+                match list.iter().position(|a| a.eq_ignore_ascii_case(&app)) {
+                    Some(k) => {
+                        list.remove(k);
+                    }
+                    None => list.push(app),
+                }
+            }
+            _ => return,
+        }
+        let mut c = prism_common::Config::load();
+        c.focus_on_screen_share = self.focus_cfg.0;
+        c.focus_on_fullscreen = self.focus_cfg.1;
+        c.focus_allowed_apps = self.focus_cfg.2.clone();
+        if let Err(e) = c.save() {
+            eprintln!("[prism-ui/nc] focus: {e}");
+        }
+    }
+
     fn draw_notifications(&mut self, cr: *mut Cairo, r: Rect, p: &Pal) {
         let count = self.snap.notifications.len();
         let silent = self.snap.flags.silent;
@@ -810,11 +1042,25 @@ impl NcView {
             1 => "1 notification".to_string(),
             n => format!("{n} notifications"),
         };
+        let label = if self.notif_filter.text.trim().is_empty() {
+            label
+        } else {
+            let shown: usize = self.groups().iter().map(|g| g.items.len()).sum();
+            format!("{shown} of {count}")
+        };
         let (_, sw) = widgets::button_size(cr, "Silent", "bell", false);
         let (_, clw) = widgets::button_size(cr, "Clear", "close", false);
+        let (_, fw) = widgets::button_size(cr, "Focus", "moon", false);
         let clear = Rect { x: r.x + r.w - clw, y: row_y, w: clw, h: row_h };
         let sil = Rect { x: clear.x - 8.0 - sw, y: row_y, w: sw, h: row_h };
-        text_v(cr, r.x, row_y, row_h, &label, &font(14.0, ""), p.fg, Some(sil.x - r.x - 8.0));
+        let foc = Rect { x: sil.x - 8.0 - fw, y: row_y, w: fw, h: row_h };
+        let label = if self.snap.flags.auto_silent { "Focus is on".to_string() } else { label };
+        // Too long next to the buttons: just the number.
+        let avail = foc.x - r.x - 8.0;
+        let label = if text_size(cr, &label, &font(14.0, "")).0 > avail && !self.snap.flags.auto_silent && self.notif_filter.text.trim().is_empty() { count.to_string() } else { label };
+        text_v(cr, r.x, row_y, row_h, &label, &font(14.0, ""), p.fg, Some(avail));
+        widgets::button(cr, foc, "Focus", "moon", false, self.focus_open || self.snap.flags.auto_silent, true, hv!(self, Hit::Focus), p);
+        self.hits.push((Hit::Focus, foc));
         widgets::button(cr, sil, "Silent", "bell", false, silent, true, hv!(self, Hit::Silent), p);
         widgets::button(cr, clear, "Clear", "close", false, false, count > 0, hv!(self, Hit::ClearAll), p);
         self.hits.push((Hit::Silent, sil));
@@ -822,13 +1068,38 @@ impl NcView {
             self.hits.push((Hit::ClearAll, clear));
         }
 
-        let list = Rect { x: r.x, y: r.y, w: r.w, h: (row_y - 10.0 - r.y).max(0.0) };
+        let mut list = Rect { x: r.x, y: r.y, w: r.w, h: (row_y - 10.0 - r.y).max(0.0) };
+        if self.focus_open {
+            self.draw_focus(cr, list, p);
+            return;
+        }
         if count == 0 {
+            self.notif_filter.clear();
+            let used = self.draw_upcoming(cr, list, p);
+            list.y += used;
+            list.h = (list.h - used).max(0.0);
             self.empty_state(cr, list, "bell", silent, if silent { "Silent mode is on" } else { "No notifications" }, p);
             return;
         }
+        // Calendar: the next events of the coming day.
+        let used = self.draw_upcoming(cr, list, p);
+        list.y += used;
+        list.h = (list.h - used).max(0.0);
+        // Search: typing on this page goes here.
+        let fr = Rect { x: list.x, y: list.y, w: list.w, h: 36.0 };
+        cb::fill_rounded_rect(cr, fr.x, fr.y, fr.w, fr.h, 18.0, alpha(p.fg, 0.1));
+        draw_text_caret(cr, &self.notif_filter.text, Some(self.notif_filter.caret()), "Type to search notifications", fr.x + 16.0, fr.y, fr.w - 32.0, fr.h, FILTER_FONT, p.fg, alpha(p.fg, 0.5));
+        self.text_geo.push((Hit::NotifFilter, fr.x + 16.0, fr.w - 32.0, FILTER_FONT));
+        self.hits.push((Hit::NotifFilter, fr));
+        list.y += fr.h + 10.0;
+        list.h = (list.h - fr.h - 10.0).max(0.0);
         // Collect the group layout first (immutable borrow of the snapshot).
         let groups: Vec<(String, Vec<Notification>)> = self.groups().into_iter().map(|g| (g.key, g.items.into_iter().cloned().collect())).collect();
+        if groups.is_empty() {
+            let msg = format!("No notifications match \u{201C}{}\u{201D}", self.notif_filter.text.trim());
+            self.empty_state(cr, list, "bell", false, &msg, p);
+            return;
+        }
         let p = *p;
         self.scrolled(cr, 0, list, |v, mut y| {
             let start = y;
@@ -855,6 +1126,10 @@ impl NcView {
 
     /// Wake the loop each second while the timer or stopwatch counts (the page and tile show it).
     pub fn wake_in(&self) -> Option<std::time::Duration> {
+        if self.meters_shown() {
+            // Look for sound at about the frame rate.
+            return Some(std::time::Duration::from_millis(16));
+        }
         self.snap.flags.timer.ticking().then(|| std::time::Duration::from_millis(1000 - (unix_ms() % 1000) as u64 + 5))
     }
 
@@ -1120,7 +1395,7 @@ impl NcView {
                 };
                 let ph = crate::toasts::preview_height(entry_preview(n), tw);
                 let pic = if ph > 0.0 { 8.0 + ph } else { 0.0 };
-                let (_, _, _, rows_h) = entry_actions(cr, 0.0, 0.0, tw, n);
+                let (_, _, _, _, rows_h) = entry_actions(cr, 0.0, 0.0, tw, n);
                 let reply = if self.reply.as_ref().is_some_and(|(id, _)| *id == n.id) { 8.0 + REPLY_H } else { 0.0 };
                 (ENTRY_PAD + text + pic + (8.0 + rows_h) * reveal + reply + ENTRY_PAD, reveal, show_summary)
             })
@@ -1217,8 +1492,8 @@ impl NcView {
                     by += 8.0 + ph;
                 }
                 // Buttons, faded and folded in while the pointer is elsewhere.
-                let acts: Vec<(String, String)> = n.actions.iter().take(3).cloned().collect();
-                let (copy, close, action_rects, rows_h) = entry_actions(cr, tx, by + 8.0, tw, n);
+                let acts: Vec<(String, String)> = n.actions.iter().take(4).cloned().collect();
+                let (copy, snooze, close, action_rects, rows_h) = entry_actions(cr, tx, by + 8.0, tw, n);
                 if reveal > 0.01 {
                     unsafe {
                         cb::cairo_save(cr);
@@ -1230,6 +1505,7 @@ impl NcView {
                         widgets::button(cr, *r, label, "", true, false, true, hv!(self, Hit::EntryAction(n.id, j)), p);
                     }
                     widgets::button(cr, copy, "", "copy", true, false, true, hv!(self, Hit::EntryCopy(n.id)), p);
+                    widgets::button(cr, snooze, "", "timer", true, false, true, hv!(self, Hit::EntrySnooze(n.id)), p);
                     widgets::button(cr, close, "", "close", true, false, true, hv!(self, Hit::EntryClose(n.id)), p);
                     unsafe {
                         cb::cairo_pop_group_to_source(cr);
@@ -1239,31 +1515,19 @@ impl NcView {
                 }
                 by += (8.0 + rows_h) * reveal;
                 let mut reply_hits = Vec::new();
-                if let Some((_, text)) = self.reply.as_ref().filter(|(id, _)| *id == n.id) {
+                if let Some((_, q)) = self.reply.as_ref().filter(|(id, _)| *id == n.id) {
+                    let (text, caret) = (q.text.clone(), q.caret());
                     let field = Rect { x: tx, y: by + 8.0, w: tw, h: REPLY_H };
                     cb::fill_rounded_rect(cr, field.x, field.y, field.w, field.h, RADIUS, p.surface_variant);
                     cb::stroke_rounded_rect(cr, field.x + 1.0, field.y + 1.0, field.w - 2.0, field.h - 2.0, RADIUS, p.primary, 2.0);
                     let (bh, bw) = widgets::button_size(cr, "Send", "", true);
                     let send = Rect { x: field.x + field.w - 6.0 - bw, y: field.y + (REPLY_H - bh) / 2.0, w: bw, h: bh };
                     widgets::button(cr, send, "Send", "", true, false, !text.trim().is_empty(), hv!(self, Hit::ReplySend(n.id)), p);
-                    let f = font(14.0, "");
                     let ix = field.x + 10.0;
                     let iw = send.x - 8.0 - ix;
-                    if text.is_empty() {
-                        let hint = if n.reply_placeholder.is_empty() { "Reply" } else { n.reply_placeholder.as_str() };
-                        text_v(cr, ix, field.y, REPLY_H, hint, &f, p.on_surface_variant, Some(iw));
-                        cb::fill_rounded_rect(cr, ix, field.y + (REPLY_H - 18.0) / 2.0, 1.5, 18.0, 0.0, p.on_surface);
-                    } else {
-                        // Long replies: show the end, where the caret is.
-                        let mut shown: &str = text;
-                        while text_size(cr, shown, &f).0 > iw {
-                            let mut c = shown.chars();
-                            c.next();
-                            shown = c.as_str();
-                        }
-                        let tw2 = text_v(cr, ix, field.y, REPLY_H, shown, &f, p.on_surface, Some(iw));
-                        cb::fill_rounded_rect(cr, ix + tw2 + 1.0, field.y + (REPLY_H - 18.0) / 2.0, 1.5, 18.0, 0.0, p.on_surface);
-                    }
+                    let hint = if n.reply_placeholder.is_empty() { "Reply" } else { n.reply_placeholder.as_str() };
+                    draw_text_caret(cr, &text, Some(caret), hint, ix, field.y, iw, REPLY_H, FIELD_FONT, p.on_surface, p.on_surface_variant);
+                    self.text_geo.push((Hit::ReplyField(n.id), ix, iw, FIELD_FONT));
                     reply_hits.push((Hit::ReplyField(n.id), field));
                     reply_hits.push((Hit::ReplySend(n.id), send));
                 }
@@ -1276,6 +1540,7 @@ impl NcView {
                     self.hits.push((Hit::Entry(n.id), Rect { x, y, w, h }));
                     if reveal > 0.5 {
                         self.hits.push((Hit::EntryCopy(n.id), copy));
+                        self.hits.push((Hit::EntrySnooze(n.id), snooze));
                         self.hits.push((Hit::EntryClose(n.id), close));
                         for (j, r) in action_rects.iter().enumerate() {
                             self.hits.push((Hit::EntryAction(n.id, j), *r));
@@ -1487,17 +1752,11 @@ impl NcView {
                 widgets::button(cr, join, "Join", "", true, false, true, hv!(self, Hit::PwJoin), p);
                 self.hits.push((Hit::PwField, field));
                 self.hits.push((Hit::PwJoin, join));
-                let f = font(14.0, "");
                 let ix = field.x + 8.0;
                 let iw = join.x - 8.0 - ix;
-                if self.pw.is_empty() {
-                    text_v(cr, ix, field.y, 44.0, "Password", &f, p.on_surface_variant, None);
-                    cb::fill_rounded_rect(cr, ix, field.y + 13.0, 1.5, 18.0, 0.0, p.on_surface);
-                } else {
-                    let dots: String = "•".repeat(self.pw.chars().count());
-                    let w = text_v(cr, ix, field.y, 44.0, &dots, &f, p.on_surface, Some(iw));
-                    cb::fill_rounded_rect(cr, ix + w + 1.0, field.y + 13.0, 1.5, 18.0, 0.0, p.on_surface);
-                }
+                let dots: String = "\u{2022}".repeat(self.pw.text.chars().count());
+                draw_text_caret(cr, &dots, Some(self.pw.caret()), "Password", ix, field.y, iw, 44.0, FIELD_FONT, p.on_surface, p.on_surface_variant);
+                self.text_geo.push((Hit::PwField, ix, iw, FIELD_FONT));
                 y += 44.0;
             }
             y += 8.0;
@@ -1642,7 +1901,7 @@ impl NcView {
 
     /// VPNs matching the filter, in display order.
     fn vpn_list(&self) -> Vec<model::Vpn> {
-        let f = self.vpn_filter.to_lowercase();
+        let f = self.vpn_filter.text.to_lowercase();
         self.snap.net.vpns.iter().filter(|v| f.is_empty() || v.name.to_lowercase().contains(&f)).cloned().collect()
     }
 
@@ -1667,12 +1926,10 @@ impl NcView {
         // Type-to-filter field.
         let fr = Rect { x: r.x, y, w: r.w, h: 36.0 };
         cb::fill_rounded_rect(cr, fr.x, fr.y, fr.w, fr.h, 18.0, alpha(p.fg, 0.1));
-        let (shown, c) = if self.vpn_filter.is_empty() { ("Type to filter", alpha(p.fg, 0.5)) } else { (self.vpn_filter.as_str(), p.fg) };
-        text_v(cr, fr.x + 16.0, fr.y, fr.h, shown, &font(13.0, ""), c, Some(fr.w - 32.0));
-        if !self.vpn_filter.is_empty() {
-            let (tw, _) = text_size(cr, &self.vpn_filter, &font(13.0, ""));
-            cb::fill_rounded_rect(cr, fr.x + 16.0 + tw + 1.0, fr.y + 9.0, 1.5, fr.h - 18.0, 0.0, p.fg);
-        }
+        // Typing on this page always goes here, so the caret shows.
+        draw_text_caret(cr, &self.vpn_filter.text, Some(self.vpn_filter.caret()), "Type to filter", fr.x + 16.0, fr.y, fr.w - 32.0, fr.h, FILTER_FONT, p.fg, alpha(p.fg, 0.5));
+        self.text_geo.push((Hit::VpnFilter, fr.x + 16.0, fr.w - 32.0, FILTER_FONT));
+        self.hits.push((Hit::VpnFilter, fr));
         y += 36.0 + 10.0;
         if let Some((m, err)) = &net.vpn_msg {
             cb::draw_pango_text(cr, r.x + 4.0, y, m, &font(12.0, ""), if *err { p.error } else { alpha(p.fg, 0.75) }, Some(r.w as i32 - 8));
@@ -1681,7 +1938,7 @@ impl NcView {
         let list = Rect { x: r.x, y, w: r.w, h: (r.y + r.h - y).max(0.0) };
         let vpns = self.vpn_list();
         if vpns.is_empty() {
-            let msg = if net.vpns.is_empty() { "No VPN profiles yet. Import .ovpn files to add them.".to_string() } else { format!("No VPN matches \u{201C}{}\u{201D}", self.vpn_filter) };
+            let msg = if net.vpns.is_empty() { "No VPN profiles yet. Import .ovpn files to add them.".to_string() } else { format!("No VPN matches \u{201C}{}\u{201D}", self.vpn_filter.text) };
             self.empty_state(cr, list, "lock", false, &msg, p);
             return;
         }
@@ -1799,7 +2056,8 @@ impl NcView {
         let n = self.snap.sinks.len() as f64;
         let apps = crate::pw_watch::mixer().len() as f64;
         let mix = if apps > 0.0 { APPS_HEAD + apps * 40.0 } else { 0.0 };
-        (n * 36.0 + (n - 1.0).max(0.0) * 4.0 + mix).min(300.0)
+        // The "Sound settings" row stays below the (capped) lists.
+        (n * 36.0 + (n - 1.0).max(0.0) * 4.0 + mix).min(260.0) + 4.0 + MORE_ROW
     }
 
     fn draw_footer(&mut self, cr: *mut Cairo, r: Rect, sink_h: f64, p: &Pal) {
@@ -1808,9 +2066,11 @@ impl NcView {
         let w = r.w - 24.0;
         let mut y = r.y + 12.0;
         if sink_h > 0.5 {
+            // Sinks and apps above, the "Sound settings" row at the bottom of the panel.
+            let lists_h = (sink_h - 4.0 - MORE_ROW).max(0.0);
             unsafe {
                 cb::cairo_save(cr);
-                cb::cairo_rectangle(cr, x, y, w, sink_h);
+                cb::cairo_rectangle(cr, x, y, w, lists_h);
                 cb::cairo_clip(cr);
             }
             let mut sy = y;
@@ -1828,7 +2088,7 @@ impl NcView {
                 }
                 svg::icon(cr, model::sink_glyph(&s.name, &s.description), row.x + 30.0, row.y + 10.0, 16.0, c, false);
                 text_v(cr, row.x + 54.0, row.y, 36.0, &s.description, &font(13.0, ""), c, Some(row.w - 62.0));
-                if sy + 36.0 <= y + sink_h + 0.5 {
+                if sy + 36.0 <= y + lists_h + 0.5 {
                     self.hits.push((Hit::Sink(i), row));
                 }
                 sy += 40.0;
@@ -1854,12 +2114,29 @@ impl NcView {
                         cb::fill_circle(cr, mute.x + 16.0, mute.y + 16.0, 16.0, alpha(p.fg, 0.2));
                     }
                     svg::icon(cr, "speaker", mute.x + 7.0, mute.y + 7.0, 18.0, alpha(p.fg, if *muted { 0.5 } else { 1.0 }), *muted);
-                    if sy + 36.0 <= y + sink_h + 0.5 {
+                    if sy + 36.0 <= y + lists_h + 0.5 {
                         self.hits.push((Hit::AppVolume(i), slider));
                         self.hits.push((Hit::AppMute(i), mute));
                     }
                     sy += 40.0;
                 }
+            }
+            unsafe { cb::cairo_restore(cr) };
+            // Everything else (inputs, ports, balance, profiles, moving apps) on the Sound page.
+            unsafe {
+                cb::cairo_save(cr);
+                cb::cairo_rectangle(cr, x, y, w, sink_h);
+                cb::cairo_clip(cr);
+            }
+            let row = Rect { x, y: y + sink_h - MORE_ROW, w, h: MORE_ROW };
+            let hov = hv!(self, Hit::AudioPage);
+            if hov > 0.0 {
+                cb::fill_rounded_rect(cr, row.x, row.y, row.w, row.h, RADIUS, alpha(p.fg, 0.14 * hov));
+            }
+            svg::icon(cr, "gear", row.x + 8.0, row.y + 10.0, 16.0, p.fg, false);
+            text_v(cr, row.x + 54.0, row.y, row.h, "Sound settings", &font(13.0, ""), p.fg, Some(row.w - 62.0));
+            if row.y >= y - 0.5 {
+                self.hits.push((Hit::AudioPage, row));
             }
             unsafe { cb::cairo_restore(cr) };
             y += sink_h;
@@ -1919,6 +2196,10 @@ impl NcView {
                 }
                 return true;
             }
+            Some(Drag::Audio(h)) => {
+                self.audio_drag(h, x);
+                return true;
+            }
             Some(Drag::Brightness) => {
                 if let Some(r) = self.hit_rect(Hit::Brightness) {
                     let v = ((widgets::slider_value(r, x) * 100.0).round() as u32).max(1);
@@ -1965,6 +2246,15 @@ impl NcView {
                 self.motion(x, y);
                 Effect::Redraw
             }
+            Some(h @ (Hit::AudioVol(_) | Hit::AudioBal(_))) => {
+                self.drag = Some(Drag::Audio(h));
+                self.motion(x, y);
+                Effect::Redraw
+            }
+            Some(h @ (Hit::ReplyField(_) | Hit::PwField | Hit::VpnFilter | Hit::NotifFilter)) => {
+                self.place_caret(h, x);
+                Effect::Redraw
+            }
             Some(Hit::Entry(nid)) => {
                 self.drag = Some(Drag::Entry(nid, x));
                 self.swipe_dx = 0.0;
@@ -1977,7 +2267,7 @@ impl NcView {
     pub fn release(&mut self) -> Effect {
         let pressed = self.pressed.take();
         match self.drag.take() {
-            Some(Drag::Volume) | Some(Drag::Brightness) | Some(Drag::AppVolume(_)) => return Effect::Redraw,
+            Some(Drag::Volume) | Some(Drag::Brightness) | Some(Drag::AppVolume(_)) | Some(Drag::Audio(_)) => return Effect::Redraw,
             Some(Drag::Entry(nid, _)) => {
                 let width = self.hit_rect(Hit::Entry(nid)).map(|r| r.w).unwrap_or(340.0);
                 if self.swipe_dx > width * 0.35 {
@@ -1996,6 +2286,24 @@ impl NcView {
         let here = self.hit_at(self.pointer.0, self.pointer.1);
         let Some(h) = pressed.filter(|p| Some(*p) == here || matches!(p, Hit::Entry(_))) else { return Effect::None };
         self.activate(h)
+    }
+
+    /// A click in a text field puts the caret there.
+    fn place_caret(&mut self, h: Hit, px: f64) {
+        let Some(&(_, x, w, font)) = self.text_geo.iter().find(|(k, ..)| *k == h) else { return };
+        let q = match h {
+            Hit::ReplyField(id) => match self.reply.as_mut() {
+                Some((r, q)) if *r == id => q,
+                _ => return,
+            },
+            Hit::PwField => &mut self.pw,
+            Hit::NotifFilter => &mut self.notif_filter,
+            _ => &mut self.vpn_filter,
+        };
+        // The password shows one dot per character.
+        let shown = if h == Hit::PwField { "\u{2022}".repeat(q.text.chars().count()) } else { q.text.clone() };
+        let ci = crate::launcher::text_index_at(&shown, q.caret(), font, x, w, px);
+        q.set_caret(ci);
     }
 
     fn dismiss(&mut self, nid: u32) {
@@ -2019,6 +2327,14 @@ impl NcView {
             Hit::Tile(TILE_CAFFEINE) => self.daemon(IpcCommand::Caffeinate(Some(!self.snap.flags.caffeinate))),
             Hit::Tile(TILE_GAME) => self.daemon(IpcCommand::GameMode(Some(!self.snap.flags.game_mode))),
             Hit::Tile(t) => self.set_tab(t),
+            Hit::Focus => {
+                self.focus_open = !self.focus_open;
+                if self.focus_open {
+                    let c = prism_common::Config::load();
+                    self.focus_cfg = (c.focus_on_screen_share, c.focus_on_fullscreen, c.focus_allowed_apps);
+                }
+            }
+            Hit::FocusShare | Hit::FocusFull | Hit::FocusApp(_) => self.focus_change(h),
             Hit::Silent => {
                 self.snap.flags.silent = !self.snap.flags.silent;
                 self.daemon(IpcCommand::Notif(NotifAction::Silent(Some(self.snap.flags.silent))));
@@ -2069,7 +2385,11 @@ impl NcView {
                 }
             }
             Hit::EntryClose(nid) => self.dismiss(nid),
-            Hit::ReplyField(_) | Hit::EntryReveal(_) => {}
+            Hit::EntrySnooze(nid) => {
+                self.snoozing.push(nid);
+                self.dismiss(nid);
+            }
+            Hit::ReplyField(_) | Hit::EntryReveal(_) | Hit::VpnFilter | Hit::NotifFilter | Hit::FocusKnob(_) => {}
             Hit::ReplySend(nid) => return self.send_reply(nid),
             Hit::EntryAction(nid, i) => {
                 if let Some(key) = self.snap.notifications.iter().find(|n| n.id == nid).and_then(|n| n.actions.get(i)).map(|a| a.0.clone()) {
@@ -2077,7 +2397,7 @@ impl NcView {
                         // Type the answer here; the field toggles.
                         self.reply = match self.reply.take() {
                             Some((id, _)) if id == nid => None,
-                            _ => Some((nid, String::new())),
+                            _ => Some((nid, Query::default())),
                         };
                         return Effect::Redraw;
                     }
@@ -2100,6 +2420,12 @@ impl NcView {
                 }
             }
             Hit::AppVolume(_) => {}
+            Hit::AudioPage => {
+                self.sink_open = false;
+                self.sink_t.set(0.0, ANIM_MED_MS);
+                self.set_tab(TAB_AUDIO);
+            }
+            Hit::AudioSec(_) | Hit::AudioDefault(_) | Hit::AudioVol(_) | Hit::AudioBal(_) | Hit::AudioMute(_) | Hit::AudioPick(_) | Hit::AudioChoice(_) => self.audio_activate(h),
             Hit::AppMute(i) => {
                 if let Some((_, _, ids, _, muted)) = self.mixer.get(i) {
                     crate::pw_watch::set_mute(ids, !muted);
@@ -2224,10 +2550,10 @@ impl NcView {
 
     fn submit_password(&mut self) {
         let Some(ssid) = self.expanded_ssid.clone() else { return };
-        if self.pw.is_empty() {
+        if self.pw.text.is_empty() {
             return;
         }
-        let pw = std::mem::take(&mut self.pw);
+        let pw = std::mem::take(&mut self.pw).text;
         self.send(StatusRequest::ConnectWifi { ssid, password: Some(pw) });
         self.expanded_ssid = None;
         self.frozen = None;
@@ -2246,24 +2572,24 @@ impl NcView {
     }
 
     fn send_reply(&mut self, nid: u32) -> Effect {
-        let Some((id, text)) = self.reply.take_if(|(id, t)| *id == nid && !t.trim().is_empty()) else { return Effect::None };
-        crate::toasts::send_reply(id, text);
+        let Some((id, q)) = self.reply.take_if(|(id, q)| *id == nid && !q.text.trim().is_empty()) else { return Effect::None };
+        crate::toasts::send_reply(id, q.text);
         self.snap.notifications.retain(|n| n.id != id);
         Effect::Redraw
     }
 
-    pub fn key(&mut self, special: u32, typed: Option<char>) -> Effect {
+    pub fn key(&mut self, special: u32, typed: Option<char>, ctrl: bool) -> Effect {
         // An open reply field takes the keyboard; Esc closes the field, not the centre.
-        if let Some((nid, text)) = self.reply.as_mut() {
+        if let Some((nid, q)) = self.reply.as_mut() {
             let nid = *nid;
-            match (special, typed) {
-                (ESC, _) => self.reply = None,
-                (ENTER, _) => return self.send_reply(nid),
-                (BACKSPACE, _) => {
-                    text.pop();
+            match special {
+                ESC => self.reply = None,
+                ENTER => return self.send_reply(nid),
+                _ => {
+                    if q.key(special, typed, ctrl).is_none() {
+                        return Effect::None;
+                    }
                 }
-                (_, Some(c)) if !c.is_control() => text.push(c),
-                _ => return Effect::None,
             }
             return Effect::Redraw;
         }
@@ -2273,8 +2599,21 @@ impl NcView {
                 self.sink_t.set(0.0, ANIM_MED_MS);
                 return Effect::Redraw;
             }
-            if self.tab == TAB_VPN && !self.vpn_filter.is_empty() {
+            if self.tab == TAB_AUDIO && self.audio_pick.is_some() {
+                self.audio_pick = None;
+                return Effect::Redraw;
+            }
+            if self.tab == TAB_VPN && !self.vpn_filter.text.is_empty() {
                 self.vpn_filter.clear();
+                return Effect::Redraw;
+            }
+            if self.tab == TAB_NOTIFS && self.focus_open {
+                self.focus_open = false;
+                return Effect::Redraw;
+            }
+            if self.tab == TAB_NOTIFS && !self.notif_filter.text.is_empty() {
+                self.notif_filter.clear();
+                self.scroll[TAB_NOTIFS] = Default::default();
                 return Effect::Redraw;
             }
             if self.tab == 1 && self.expanded_ssid.is_some() {
@@ -2285,25 +2624,30 @@ impl NcView {
             }
             return Effect::Close;
         }
-        if self.tab == TAB_VPN {
-            match (special, typed) {
-                (BACKSPACE, _) if !self.vpn_filter.is_empty() => {
-                    self.vpn_filter.pop();
+        if self.tab == TAB_NOTIFS && !self.snap.notifications.is_empty() {
+            if let Some(changed) = self.notif_filter.key(special, typed, ctrl) {
+                if changed {
+                    self.scroll[TAB_NOTIFS] = Default::default();
                 }
-                (_, Some(c)) if !c.is_control() => self.vpn_filter.push(c),
-                _ => return Effect::None,
+                return Effect::Redraw;
             }
-            self.scroll[TAB_VPN] = Default::default();
+        }
+        if self.tab == TAB_VPN {
+            match self.vpn_filter.key(special, typed, ctrl) {
+                Some(true) => self.scroll[TAB_VPN] = Default::default(),
+                Some(false) => {}
+                None => return Effect::None,
+            }
             return Effect::Redraw;
         }
         if self.typing() {
-            match (special, typed) {
-                (ENTER, _) => self.submit_password(),
-                (BACKSPACE, _) => {
-                    self.pw.pop();
+            match special {
+                ENTER => self.submit_password(),
+                _ => {
+                    if self.pw.key(special, typed, ctrl).is_none() {
+                        return Effect::None;
+                    }
                 }
-                (_, Some(c)) if !c.is_control() => self.pw.push(c),
-                _ => return Effect::None,
             }
             return Effect::Redraw;
         }

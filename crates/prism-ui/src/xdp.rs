@@ -1,5 +1,7 @@
 //! xdg-desktop-portal backend (`org.freedesktop.impl.portal.desktop.prism`): Screenshot
-//! (screenshot, pick colour) and ScreenCast (screen sharing in browsers, OBS, Discord...).
+//! (screenshot, pick colour), ScreenCast (screen sharing in browsers, OBS, Discord...) and
+//! Settings (`org.freedesktop.appearance`: dark or light and the accent colour from the
+//! matugen palette, so GTK 4/libadwaita, Qt and Electron apps follow the Prism theme).
 //! While `portal_enabled` is on, prism-ui owns the name; `deploy/portal/prism.portal` tells
 //! xdg-desktop-portal which interfaces it implements and `mango-portals.conf` picks it.
 //!
@@ -65,6 +67,78 @@ fn queue(req: UiReq) -> bool {
     QUEUE.lock().unwrap().push(req);
     w.wake();
     true
+}
+
+// ── Settings ────────────────────────────────────────────────────────────
+
+const APPEARANCE: &str = "org.freedesktop.appearance";
+
+/// The appearance keys for `theme`: color-scheme (1 dark, 2 light), accent-color (r, g, b in
+/// 0..1) and contrast (0 normal).
+fn appearance(theme: &prism_common::Theme) -> Vec<(&'static str, OwnedValue)> {
+    let (r, g, b, _) = crate::cairo_backend::hex_to_rgba(&theme.background, 1.0);
+    let dark = 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5;
+    let (ar, ag, ab, _) = crate::cairo_backend::hex_to_rgba(&theme.primary, 1.0);
+    let ov = |v: Value<'_>| OwnedValue::try_from(v).expect("plain value");
+    vec![("color-scheme", ov(Value::U32(if dark { 1 } else { 2 }))), ("accent-color", ov(Value::from((ar, ag, ab)))), ("contrast", ov(Value::U32(0)))]
+}
+
+/// Whether `namespace` matches a ReadAll pattern (exact, or a prefix ending in `*`).
+fn ns_matches(patterns: &[String], namespace: &str) -> bool {
+    patterns.is_empty() || patterns.iter().any(|p| p.is_empty() || p.strip_suffix('*').map_or(p == namespace, |pre| namespace.starts_with(pre)))
+}
+
+#[derive(zbus::DBusError, Debug)]
+#[zbus(prefix = "org.freedesktop.portal.Error")]
+enum PortalError {
+    #[zbus(error)]
+    ZBus(zbus::Error),
+    NotFound(String),
+}
+
+struct Settings;
+
+#[zbus::interface(name = "org.freedesktop.impl.portal.Settings")]
+impl Settings {
+    async fn read_all(&self, namespaces: Vec<String>) -> HashMap<String, HashMap<String, OwnedValue>> {
+        let mut out = HashMap::new();
+        if ns_matches(&namespaces, APPEARANCE) {
+            out.insert(APPEARANCE.to_string(), appearance(&prism_common::Theme::load()).into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        }
+        out
+    }
+
+    async fn read(&self, namespace: String, key: String) -> Result<OwnedValue, PortalError> {
+        if namespace == APPEARANCE {
+            if let Some((_, v)) = appearance(&prism_common::Theme::load()).into_iter().find(|(k, _)| *k == key) {
+                return Ok(v);
+            }
+        }
+        Err(PortalError::NotFound(format!("{namespace}.{key}")))
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        2
+    }
+}
+
+/// The palette was reloaded: tell apps what changed (prism-ui calls this on every theme load).
+pub fn theme_changed(theme: &prism_common::Theme) {
+    static LAST: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
+    let Some(conn) = CONN.get() else { return };
+    let now = appearance(theme);
+    let shown: Vec<(&'static str, String)> = now.iter().map(|(k, v)| (*k, format!("{v:?}"))).collect();
+    let mut last = LAST.lock().unwrap();
+    for ((key, value), (_, text)) in now.iter().zip(&shown) {
+        if last.iter().any(|(k, t)| k == key && t == text) {
+            continue;
+        }
+        if let Err(e) = conn.emit_signal(None::<()>, PATH, "org.freedesktop.impl.portal.Settings", "SettingChanged", &(APPEARANCE, *key, &**value)) {
+            eprintln!("[prism-ui/portal] SettingChanged: {e}");
+        }
+    }
+    *last = shown;
 }
 
 // ── Screenshot ──────────────────────────────────────────────────────────
@@ -448,12 +522,28 @@ fn serve() {
         .and_then(|b| b.name(NAME))
         .and_then(|b| b.serve_at(PATH, Screenshot))
         .and_then(|b| b.serve_at(PATH, ScreenCast { sessions: sessions.clone() }))
+        .and_then(|b| b.serve_at(PATH, Settings))
         .and_then(|b| b.build());
     match conn {
         Ok(c) => {
             eprintln!("[prism-ui/portal] serving {NAME}");
             let _ = CONN.set(c);
+            // Remember what apps read first, so the next theme change signals only differences.
+            theme_changed(&prism_common::Theme::load());
         }
         Err(e) => eprintln!("[prism-ui/portal] cannot own {NAME}: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn namespace_patterns() {
+        assert!(ns_matches(&[], APPEARANCE));
+        assert!(ns_matches(&["org.freedesktop.*".into()], APPEARANCE));
+        assert!(ns_matches(&[APPEARANCE.into()], APPEARANCE));
+        assert!(!ns_matches(&["org.gnome.*".into()], APPEARANCE));
     }
 }

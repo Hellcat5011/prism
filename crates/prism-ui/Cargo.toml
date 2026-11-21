@@ -25,3 +25,5 @@ hkdf = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
+# Sound page level meters (meters.rs)
+pipewire = { version = "0.10", features = ["v0_3_34"] }

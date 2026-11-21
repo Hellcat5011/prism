@@ -20,6 +20,7 @@ Targets & Commands:
   theme [reload|palette]
   notif [list|clear|send <summary> [body]|toggle|open|close|silent [on|off]|state]
   caffeinate [on|off]
+  setup                             the first-time setup guide
   notes [toggle|open|close]         the Notes card
   timer [start <5m|90s|1h30m>|add <1m>|pause|resume|cancel|status]
   stopwatch [toggle|reset]
@@ -35,9 +36,10 @@ Targets & Commands:
   edit-mode [open|close|reset|status]
   network [status|toggle-wifi]
   bluetooth [status|toggle]
-  keybinds [list|toggle|open|close]
+  keybinds [list|toggle|open|close|edit|rules]   edit: Shortcuts editor, rules: Window Rules
   lock [lock|unlock|status]
-  screenshot [toggle|region|window|text|screen [--no-save] [--no-clipboard]|open <mode>|close|record|stop|status]
+  screenshot [toggle|region|window|text|screen [--no-save] [--no-clipboard]|open <mode>|close|record|stop|status
+             |replay [save|on|off|toggle]]   replay buffer: save the last seconds
   phone [toggle|open|close|status|refresh|connect <ip>|pair|unpair|accept|reject [device]
          |ping|ring|clipboard [text]|media [play|pause|next|previous]
          |send <file>...|send --text <text>|send --url <url>]
@@ -187,6 +189,7 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 Some(other) => return Err(format!("unknown stopwatch action '{other}'")),
             }))
         }
+        "setup" | "guide" => Ok(IpcCommand::Setup),
         "notes" => Ok(IpcCommand::Notes(args.get(1).cloned().unwrap_or_else(|| "toggle".into()))),
         "switcher" => Ok(IpcCommand::Switcher(args.get(1).cloned().unwrap_or_else(|| "next".into()))),
         "gamemode" | "game-mode" => Ok(IpcCommand::GameMode(on_off(args.get(1)))),
@@ -246,6 +249,8 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 Some("list") => KeybindsAction::List,
                 Some("open") => KeybindsAction::Open,
                 Some("close") => KeybindsAction::Close,
+                Some("edit") => KeybindsAction::Edit(false),
+                Some("rules") => KeybindsAction::Edit(true),
                 _ => KeybindsAction::Toggle,
             };
             Ok(IpcCommand::Keybinds(act))
@@ -412,6 +417,7 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 Some("record") => A::Record,
                 Some("stop") => A::Stop,
                 Some("status") => A::Status,
+                Some("replay") => A::Replay(args.get(2).cloned().unwrap_or_else(|| "save".into())),
                 Some(other) => return Err(format!("unknown screenshot action '{other}'")),
             };
             Ok(IpcCommand::Capture(act))

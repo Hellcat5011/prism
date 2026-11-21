@@ -56,6 +56,10 @@ pub enum UiCommand {
     Capture(CaptureAction),
     /// Recording state for the indicator: Some while prism-rec runs, None when it stopped.
     Recording(Option<crate::capture::RecordStatus>),
+    /// Open the Trim card for this recording.
+    Trim(String),
+    /// Downloads in progress (the downloads pill); empty hides it.
+    Downloads(Vec<DownloadProgress>),
     /// Show this wallpaper on the built-in background.
     Wallpaper(std::path::PathBuf),
 }
@@ -175,6 +179,8 @@ pub enum IpcCommand {
     /// The Notes card: "toggle", "open" or "close".
     #[serde(rename = "notes")]
     Notes(String),
+    /// Open the first-time setup guide.
+    Setup,
 
     /// Timer and stopwatch.
     #[serde(rename = "timer")]
@@ -210,6 +216,8 @@ pub enum CaptureAction {
     Status,
     /// Start recording (sent by prism-ui's overlay to prismd).
     Start(crate::capture::RecordJob),
+    /// Replay buffer: "save" the last seconds, or turn it "on", "off" or "toggle".
+    Replay(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -236,6 +244,10 @@ pub enum ClipboardAction {
     /// Put history entry `n` back on the clipboard (prismd owns it, so prism-ctl may exit).
     Copy(usize),
     Clear,
+    /// Pin (true) or unpin the entry with this id.
+    Pin(String, bool),
+    /// Delete the entry with this id.
+    Remove(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -312,6 +324,11 @@ pub enum NotifAction {
     Invoke { id: u32, action: String },
     /// The user typed an inline reply (sent to the app as NotificationReplied).
     Reply { id: u32, text: String },
+    /// Hide a notification for `secs` seconds, then show it again.
+    Snooze { id: u32, secs: u64 },
+    /// prism-ui: silent for a reason of its own (screen sharing, a fullscreen window); kept
+    /// apart from the user's silent switch.
+    AutoSilent(bool),
 }
 
 fn normal_urgency() -> u8 {
@@ -325,6 +342,9 @@ pub struct DaemonFlags {
     pub caffeinate: bool,
     #[serde(default)]
     pub game_mode: bool,
+    /// Silent because of screen sharing or a fullscreen window (Focus).
+    #[serde(default)]
+    pub auto_silent: bool,
     #[serde(default)]
     pub timer: TimerState,
 }
@@ -448,6 +468,8 @@ pub enum KeybindsAction {
     Open,
     Close,
     List,
+    /// The Shortcuts editor, or (true) its Window Rules tab.
+    Edit(bool),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -637,4 +659,14 @@ mod timer_tests {
         assert_eq!(clock_text(61_000), "01:01");
         assert_eq!(clock_text(3_600_000), "1:00:00");
     }
+}
+
+/// A download being written in the Downloads folder (prismd's downloads watcher).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DownloadProgress {
+    pub name: String,
+    /// Bytes on disk so far.
+    pub bytes: u64,
+    /// Bytes per second over the last few seconds.
+    pub rate: u64,
 }

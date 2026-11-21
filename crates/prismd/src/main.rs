@@ -11,9 +11,11 @@ use std::time::Duration;
 
 mod battery;
 mod bluelight;
+mod calendar;
 mod config_watch;
 mod depth;
 mod displays;
+mod downloads;
 mod drives;
 mod gamma;
 mod idle;
@@ -44,6 +46,20 @@ struct DaemonState {
     emojis: Vec<EmojiItem>,
     /// Silent mode: notifications are stored but only critical ones pop up.
     silent: bool,
+    /// Silent for Focus (screen sharing, fullscreen), set by prism-ui.
+    auto_silent: bool,
+}
+
+impl DaemonState {
+    /// Popups from this app are held back: silent (by the user, a schedule or game mode, or
+    /// Focus) and the app is not on the Focus allow-list.
+    fn quiet_for(&self, app: &str, desktop_entry: &str) -> bool {
+        if !self.silent && !self.auto_silent {
+            return false;
+        }
+        let allowed = |a: &String| a.eq_ignore_ascii_case(app) || (!desktop_entry.is_empty() && a.eq_ignore_ascii_case(desktop_entry));
+        !self.config.focus_allowed_apps.iter().any(allowed)
+    }
 }
 
 /// The daemon state, also after a thread panicked while holding it: one failed request must not
@@ -486,12 +502,13 @@ impl notifd::Handler for NotifHandler {
         n.reply_placeholder = i.reply_placeholder;
         let (popup, silent) = {
             let mut st = lock_state(&state);
+            let quiet = st.quiet_for(&n.app_name, &n.desktop_entry);
             if i.transient {
                 n.id = if i.replaces_id != 0 { i.replaces_id } else { st.notifications.reserve_id() };
             } else {
                 n.id = st.notifications.upsert(i.replaces_id, n.clone());
             }
-            (popup_for(&n), st.silent)
+            (popup_for(&n), quiet)
         };
         // Silent mode keeps critical notifications (QML silentAllowsCritical).
         if !silent || n.urgency >= 2 {
@@ -531,6 +548,25 @@ fn stop_python_bridge() {
             unsafe { libc::kill(pid, libc::SIGTERM) };
         }
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Snoozed notifications come back when their time is up (popup and top of the list).
+fn start_snooze_waker(state: Arc<Mutex<DaemonState>>) {
+    thread::spawn(move || loop {
+        let popups: Vec<prism_common::NotifOverlayMessage> = {
+            let mut st = lock_state(&state);
+            let ids = st.notifications.wake_snoozed(now_secs());
+            ids.iter().filter_map(|id| st.notifications.get(*id)).map(popup_for).collect()
+        };
+        for p in popups {
+            send_notif(p);
+        }
+        thread::sleep(Duration::from_secs(20));
+    });
 }
 
 fn start_clipboard_pruner(state: Arc<Mutex<DaemonState>>) {
@@ -720,6 +756,9 @@ fn apply_config(st: &DaemonState) {
     obex::apply(&st.config);
     battery::apply(&st.config);
     drives::apply(&st.config);
+    downloads::apply(&st.config);
+    calendar::apply(&st.config);
+    recording::apply_replay(&st.config);
     displays::apply(&st.config);
     st.bluelight.update_config(&st.config);
     st.depth.update_config(&st.config);
@@ -776,6 +815,25 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                         false => IpcResponse::Error("not recording".into()),
                     },
                     A::Status => IpcResponse::Ok(serde_json::to_string(&recording::status()).ok()),
+                    A::Replay(what) => match what.as_str() {
+                        "save" => match recording::save_replay() {
+                            true => IpcResponse::Ok(Some("saving".into())),
+                            false => IpcResponse::Error("the replay buffer is off (prism-ctl screenshot replay on)".into()),
+                        },
+                        "on" | "off" | "toggle" => {
+                            let mut cfg = Config::load();
+                            cfg.replay_enabled = match what.as_str() {
+                                "on" => true,
+                                "off" => false,
+                                _ => !cfg.replay_enabled,
+                            };
+                            match cfg.save() {
+                                Ok(()) => IpcResponse::Ok(Some(format!("replay:{}", cfg.replay_enabled))),
+                                Err(e) => IpcResponse::Error(e.to_string()),
+                            }
+                        }
+                        other => IpcResponse::Error(format!("unknown replay action '{other}'")),
+                    },
                     // Record toggles: stop a running recording, else open the overlay in record mode.
                     A::Record if recording::stop() => IpcResponse::Ok(Some("stopping".into())),
                     a => match send_ui(&prism_common::UiCommand::Capture(a)) {
@@ -792,6 +850,10 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 let t = timer_action(action);
                 IpcResponse::Ok(serde_json::to_string(&t).ok())
             }
+            Ok(IpcCommand::Setup) => match open_popup("setup") {
+                Ok(msg) => IpcResponse::Ok(Some(msg)),
+                Err(e) => IpcResponse::Error(e),
+            },
             Ok(IpcCommand::Notes(action)) => {
                 let cmd = match action.as_str() {
                     "open" => prism_common::UiCommand::Open("notes".into()),
@@ -927,6 +989,22 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 }
             }
 
+            Ok(IpcCommand::Clipboard(ClipboardAction::Pin(id, pinned))) => {
+                let mut st = lock_state(&state);
+                if st.clipboard.set_pinned(&id, pinned) {
+                    IpcResponse::Ok(Some(if pinned { "pinned" } else { "unpinned" }.to_string()))
+                } else {
+                    IpcResponse::Error(format!("No clipboard entry {id}"))
+                }
+            }
+            Ok(IpcCommand::Clipboard(ClipboardAction::Remove(id))) => {
+                let mut st = lock_state(&state);
+                if st.clipboard.remove(&id) {
+                    IpcResponse::Ok(Some("removed".to_string()))
+                } else {
+                    IpcResponse::Error(format!("No clipboard entry {id}"))
+                }
+            }
             Ok(IpcCommand::Clipboard(ClipboardAction::Clear)) => {
                 let mut st = lock_state(&state);
                 st.clipboard.clear();
@@ -1118,7 +1196,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 let silent = {
                     let mut st = lock_state(&state);
                     notif.id = st.notifications.add(notif.clone());
-                    st.silent
+                    st.quiet_for(&notif.app_name, "")
                 };
                 let id = notif.id;
                 if !silent {
@@ -1188,7 +1266,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             }
             Ok(IpcCommand::Notif(NotifAction::State)) => {
                 let st = lock_state(&state);
-                let flags = prism_common::ipc::DaemonFlags { silent: st.silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst), game_mode: GAME_MODE.load(Ordering::SeqCst), timer: *TIMER.lock().unwrap() };
+                let flags = prism_common::ipc::DaemonFlags { silent: st.silent, auto_silent: st.auto_silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst), game_mode: GAME_MODE.load(Ordering::SeqCst), timer: *TIMER.lock().unwrap() };
                 IpcResponse::Ok(serde_json::to_string(&flags).ok())
             }
             Ok(IpcCommand::GameMode(want)) => {
@@ -1201,6 +1279,23 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 match set_caffeinate(on) {
                     Ok(()) => IpcResponse::Ok(Some(format!("caffeinate:{}", on))),
                     Err(e) => IpcResponse::Error(e),
+                }
+            }
+            Ok(IpcCommand::Notif(NotifAction::AutoSilent(on))) => {
+                let mut st = lock_state(&state);
+                if st.auto_silent != on {
+                    eprintln!("[prismd] focus: auto silent {}", if on { "on" } else { "off" });
+                }
+                st.auto_silent = on;
+                IpcResponse::Ok(Some(format!("auto_silent:{on}")))
+            }
+            Ok(IpcCommand::Notif(NotifAction::Snooze { id, secs })) => {
+                send_notif(prism_common::NotifOverlayMessage::Dismiss { id });
+                let until = now_secs() + secs.max(60);
+                if lock_state(&state).notifications.snooze(id, until) {
+                    IpcResponse::Ok(Some(format!("Snoozed notification #{id}")))
+                } else {
+                    IpcResponse::Error(format!("Notification #{} not found", id))
                 }
             }
             Ok(IpcCommand::Notif(NotifAction::Dismiss(id))) => {
@@ -1457,6 +1552,13 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                     Err(e) => IpcResponse::Error(e),
                 }
             }
+            Ok(IpcCommand::Keybinds(KeybindsAction::Edit(rules))) => {
+                let name = if rules { "window-rules" } else { "shortcuts" };
+                match send_ui(&prism_common::UiCommand::Open(name.into())) {
+                    Ok(_) => IpcResponse::Ok(None),
+                    Err(e) => IpcResponse::Error(e),
+                }
+            }
             Ok(IpcCommand::Keybinds(KeybindsAction::Close)) => {
                 let msg = close_active_popup();
                 IpcResponse::Ok(Some(msg))
@@ -1645,6 +1747,9 @@ fn main() {
     obex::apply(&cfg);
     battery::apply(&cfg);
     drives::apply(&cfg);
+    downloads::apply(&cfg);
+    calendar::apply(&cfg);
+    recording::apply_replay(&cfg);
     displays::apply(&cfg);
     let state = Arc::new(Mutex::new(DaemonState {
         config: cfg,
@@ -1658,8 +1763,10 @@ fn main() {
         notifications,
         emojis,
         silent: false,
+        auto_silent: false,
     }));
     start_silent_schedule(Arc::clone(&state));
+    start_snooze_waker(Arc::clone(&state));
 
     let idle = idle::start_idle_monitor(
         idle_start,

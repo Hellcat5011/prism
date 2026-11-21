@@ -931,7 +931,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Edit {
                 }
                 // Typing filters the open font list.
                 if let Some((_, dd)) = e.font_dd.as_mut() {
-                    if dd.key(if code == 14 { None } else { typed }, code == 14) {
+                    let ctrl = e.xkb_state.as_ref().is_some_and(|x| x.mod_name_is_active(xkbcommon::xkb::MOD_NAME_CTRL, xkbcommon::xkb::STATE_MODS_EFFECTIVE));
+                    if dd.key(code, typed, ctrl) {
                         e.request(qh);
                     }
                 }

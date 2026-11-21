@@ -171,6 +171,8 @@ pub struct EmojiView {
     grid: Rect,
     tabs: Vec<Rect>,
     clear_btn: Rect,
+    /// The search text's box as drawn: a click there places the caret.
+    query_rect: Rect,
     pointer: (f64, f64),
     last_hover_pos: (f64, f64),
     target: Arc<Mutex<Option<Target>>>,
@@ -199,6 +201,7 @@ impl EmojiView {
             grid: Rect::default(),
             tabs: Vec::new(),
             clear_btn: Rect::default(),
+            query_rect: Rect::default(),
             pointer: (-1.0, -1.0),
             last_hover_pos: (-100.0, -100.0),
             target,
@@ -355,6 +358,7 @@ impl CardView for EmojiView {
             centered_text(cr, "✕", "Inter, Sans 12px", self.clear_btn.x + 13.0, self.clear_btn.y + 13.0, sv_text);
             qw -= 26.0 + 8.0;
         }
+        self.query_rect = Rect { x: qx, y, w: qw, h: 46.0 };
         draw_query(cr, &self.query, "Search emojis...", qx, y + 11.0, qw, 24.0, "Inter, Sans 15px", on_surface, sv_text);
         y += 46.0 + 10.0;
 
@@ -495,6 +499,12 @@ impl CardView for EmojiView {
             self.refresh();
             return Effect::Redraw;
         }
+        let q = self.query_rect;
+        if q.contains(x, y) {
+            let ci = crate::launcher::text_index_at(&self.query.text, self.query.caret(), "Inter, Sans 15px", q.x, q.w, x);
+            self.query.set_caret(ci);
+            return Effect::Redraw;
+        }
         match self.cell_at(x, y) {
             Some(i) => {
                 self.selected = i;
@@ -520,6 +530,11 @@ impl CardView for EmojiView {
             }
             ENTER if ctrl => return Effect::None,
             ENTER => return self.select(self.selected, !shift),
+            // Shift+Left/Right move the caret by a character, Ctrl+Left/Right by a word (Home/End
+            // to the ends, a click anywhere); plain Left/Right drive the grid.
+            LEFT | RIGHT if ctrl || shift => {
+                self.query.key(special, None, ctrl);
+            }
             LEFT => self.move_selection(-1),
             RIGHT => self.move_selection(1),
             UP => self.move_selection(-cols),

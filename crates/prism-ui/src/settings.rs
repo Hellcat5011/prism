@@ -50,6 +50,11 @@ pub enum Action {
     DepthInstallCpu,
     DepthInstallGpu,
     OpenPhone,
+    ExportConfig,
+    ImportConfig,
+    EditShortcuts,
+    EditRules,
+    RunGuide,
     PlayNotificationSound,
     ChooseVideoWallpaper,
 }
@@ -163,14 +168,92 @@ struct Row {
     visible: fn(&Config) -> bool,
 }
 
+/// A Settings option the setup guide shows (switches and choices).
+pub(crate) enum GuideControl {
+    Switch(fn(&Config) -> bool, fn(&mut Config, bool)),
+    Choice(fn() -> Vec<(String, String)>, fn(&Config) -> String, fn(&mut Config, &str)),
+}
+
+pub(crate) struct GuideRow {
+    pub title: &'static str,
+    pub control: GuideControl,
+    pub visible: fn(&Config) -> bool,
+}
+
+/// The Settings rows (tab, title) as guide rows, in the order asked; rows that are neither a
+/// switch nor a choice are left out.
+pub(crate) fn guide_rows(want: &[(usize, &str)]) -> Vec<GuideRow> {
+    let all = rows();
+    want.iter()
+        .filter_map(|(tab, title)| {
+            // A section heading may share the title: take the row with a switch or a choice.
+            all.iter().filter(|r| r.tab == *tab && r.title == *title).find_map(|r| {
+                let control = match &r.control {
+                    Control::Switch(g, s) => GuideControl::Switch(*g, *s),
+                    Control::Combo { options, get, set, .. } => GuideControl::Choice(*options, *get, *set),
+                    _ => return None,
+                };
+                Some(GuideRow { title: r.title, control, visible: r.visible })
+            })
+        })
+        .collect()
+}
+
 /// A row's subtitle; the depth status row shows the last runtime status.
 /// Labels and minimum widths of a Buttons / Pills row.
-fn button_labels(r: &Row) -> Vec<(&'static str, f64)> {
+fn button_labels(r: &Row, c: &Config) -> Vec<(&'static str, f64)> {
     match &r.control {
         Control::Buttons(btns) => btns.iter().map(|(l, _, _)| (*l, 120.0)).collect(),
-        Control::Pills { options, .. } => options.iter().map(|(l, _)| (*l, 100.0)).collect(),
+        Control::Pills { options, get, .. } => pill_order(options, &get(c)).into_iter().map(|b| (options[b].0, 100.0)).collect(),
         _ => Vec::new(),
     }
+}
+
+/// Pills as shown: the ones that are on in their configured order, then the others as listed.
+fn pill_order(options: &[(&str, &str)], on: &[String]) -> Vec<usize> {
+    let mut order: Vec<usize> = Vec::new();
+    for b in on.iter().filter_map(|v| options.iter().position(|(_, o)| o == v)) {
+        if !order.contains(&b) {
+            order.push(b);
+        }
+    }
+    let off: Vec<usize> = (0..options.len()).filter(|b| !order.contains(b)).collect();
+    order.extend(off);
+    order
+}
+
+/// Where a pill dropped at `pos` goes: its index among the other pills (reading order).
+fn pill_slot(others: &[Rect], pos: (f64, f64)) -> usize {
+    others.iter().filter(|r| r.y + r.h < pos.1 || (pos.1 >= r.y && r.x + r.w / 2.0 < pos.0)).count()
+}
+
+/// The on list after moving pill `b` to `slot` among the others: dropping an off pill before
+/// the last pill that is on turns it on.
+fn pills_after_move(options: &[(&str, &str)], on: &[String], b: usize, slot: usize) -> Vec<String> {
+    let order = pill_order(options, on);
+    let is_on = |k: usize| on.iter().any(|v| v == options[k].1);
+    let mut rest: Vec<usize> = order.into_iter().filter(|&k| k != b).collect();
+    let on_count = rest.iter().filter(|&&k| is_on(k)).count();
+    let slot = slot.min(rest.len());
+    let turn_on = is_on(b) || slot < on_count;
+    rest.insert(slot, b);
+    rest.into_iter().filter(|&k| is_on(k) || (k == b && turn_on)).map(|k| options[k].1.to_string()).collect()
+}
+
+/// Text style of the sidebar search field.
+fn search_style(p: &Palette, color: (f64, f64, f64, f64)) -> TextStyle<'_> {
+    TextStyle { family: &p.family, px: 14.0, bold: false, color }
+}
+
+/// A pill being dragged to a new place.
+struct PillDrag {
+    row: usize,
+    b: usize,
+    start: (f64, f64),
+    pos: (f64, f64),
+    offset: (f64, f64),
+    size: (f64, f64),
+    moved: bool,
 }
 
 /// Where a button goes in a wrapped row (offsets from the row's top left).
@@ -206,6 +289,8 @@ fn flow_height(places: &[Place]) -> f64 {
 
 /// The window switcher row's compositor advice (filled when the switcher is turned on).
 const SWITCHER_ROW: &str = "Compositor Setup";
+/// A battery here can stop charging early (the Charge Limit row is shown).
+static CHARGE_LIMIT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| !prism_common::hardware::charge_limit_files().is_empty());
 static SWITCHER_STATUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 /// Turning the switcher on: look for Alt+Tab in the compositor's config and say what to change
@@ -320,6 +405,45 @@ fn valid_time(s: &str) -> bool {
     }
 }
 
+/// Saved settings to go back to, newest first ("" = keep the present ones).
+fn history_options() -> Vec<(String, String)> {
+    let mut out = vec![("Choose\u{2026}".to_string(), String::new())];
+    for (ts, path) in prism_common::config_history::list() {
+        out.push((local_time_label(ts), path.to_string_lossy().to_string()));
+    }
+    out
+}
+
+/// "21 Nov, 14:05" in local time.
+fn local_time_label(ts: u64) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let t = ts as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return ts.to_string();
+    }
+    format!("{} {}, {:02}:{:02}", tm.tm_mday, MONTHS[tm.tm_mon.clamp(0, 11) as usize], tm.tm_hour, tm.tm_min)
+}
+
+/// An import replaced config.json: Settings reloads it.
+static RELOAD_CONFIG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a hot corner can do (`desktop/corners.rs`).
+fn corner_actions() -> Vec<(String, String)> {
+    opts(&[
+        ("Nothing", "none"),
+        ("Launcher", "launcher"),
+        ("Search", "search"),
+        ("Notification Centre", "notifications"),
+        ("Window Overview", "overview"),
+        ("Clipboard", "clipboard"),
+        ("Screenshot", "screenshot"),
+        ("Power Menu", "power"),
+        ("Lock Screen", "lock"),
+        ("Settings", "settings"),
+    ])
+}
+
 fn rows() -> Vec<Row> {
     use Control::*;
     let pct = |v: f64| format!("{:.0}%", v * 100.0);
@@ -327,8 +451,8 @@ fn rows() -> Vec<Row> {
     vec![
         // ── Appearance ──
         heading(0, "Colours"),
-        Row { tab: 0, title: "Matugen Colour Mode", subtitle: "Light or dark palette generated from the wallpaper.", visible: always,
-            control: Combo { options: || opts(&[("Dark", "dark"), ("Light", "light"), ("Smart", "smart")]), get: |c| c.matugen_mode.clone(), set: |c, v| c.matugen_mode = v.to_string(), fonts: false } },
+        Row { tab: 0, title: "Matugen Colour Mode", subtitle: "Light or dark palette generated from the wallpaper. Auto is light by day and dark at night, on the Night Light schedule (its times, or sunset and sunrise), even while Night Light itself is off.", visible: always,
+            control: Combo { options: || opts(&[("Dark", "dark"), ("Light", "light"), ("Smart", "smart"), ("Auto (day and night)", "auto")]), get: |c| c.matugen_mode.clone(), set: |c, v| c.matugen_mode = v.to_string(), fonts: false } },
         Row { tab: 0, title: "Palette Scheme", subtitle: "Material You scheme used by matugen.", visible: always,
             control: Combo {
                 options: || opts(&[("Smart", "scheme-smart"), ("Tonal Spot", "scheme-tonal-spot"), ("Expressive", "scheme-expressive"),
@@ -440,6 +564,22 @@ fn rows() -> Vec<Row> {
         Row { tab: 2, title: "Cat", subtitle: "A black cat that sleeps on your desktop. Hover over it to wake it up and watch it play.", visible: always,
             control: Switch(|c| c.desktop_layout.cat.visible, |c, v| c.desktop_layout.set_cat_visible(v)) },
         // ── Bar ──
+        heading(2, "Calendar Events"),
+        Row { tab: 2, title: "Calendar Feeds", subtitle: "iCalendar (.ics) links, separated by spaces: Google Calendar's secret address in iCal format, a Nextcloud or iCloud share link, Outlook's ICS link, or a .ics file. Events show on the Calendar widget and in the notification centre.", visible: always,
+            control: Text { get: |c| c.calendar_feeds.join(" "), set: |c, v| { c.calendar_feeds = v.split_whitespace().map(str::to_string).collect(); true }, placeholder: "https://… .ics", browse: false } },
+        Row { tab: 2, title: "Event Reminders", subtitle: "A notification before each event with a start time.", visible: |c| !c.calendar_feeds.is_empty(),
+            control: Combo { options: || opts(&[("Off", "0"), ("5 minutes before", "5"), ("10 minutes before", "10"), ("15 minutes before", "15"), ("30 minutes before", "30"), ("1 hour before", "60")]), get: |c| c.calendar_reminder_minutes.to_string(), set: |c, v| c.calendar_reminder_minutes = v.parse().unwrap_or(10), fonts: false } },
+        heading(2, "Hot Corners"),
+        Row { tab: 2, title: "Top Left Corner", subtitle: "Push the pointer into this corner of the screen to run an action. Fullscreen windows cover the corners.", visible: always,
+            control: Combo { options: corner_actions, get: |c| c.hot_corners.top_left.clone(), set: |c, v| c.hot_corners.top_left = v.to_string(), fonts: false } },
+        Row { tab: 2, title: "Top Right Corner", subtitle: "", visible: always,
+            control: Combo { options: corner_actions, get: |c| c.hot_corners.top_right.clone(), set: |c, v| c.hot_corners.top_right = v.to_string(), fonts: false } },
+        Row { tab: 2, title: "Bottom Left Corner", subtitle: "", visible: always,
+            control: Combo { options: corner_actions, get: |c| c.hot_corners.bottom_left.clone(), set: |c, v| c.hot_corners.bottom_left = v.to_string(), fonts: false } },
+        Row { tab: 2, title: "Bottom Right Corner", subtitle: "", visible: always,
+            control: Combo { options: corner_actions, get: |c| c.hot_corners.bottom_right.clone(), set: |c, v| c.hot_corners.bottom_right = v.to_string(), fonts: false } },
+        Row { tab: 2, title: "Corner Delay", subtitle: "How long the pointer rests in a corner before its action runs.", visible: |c| c.hot_corners.actions().iter().any(|a| *a != "none"),
+            control: Combo { options: || opts(&[("Instant", "0"), ("Short", "150"), ("Medium", "300"), ("Long", "600")]), get: |c| c.hot_corners.delay_ms.to_string(), set: |c, v| c.hot_corners.delay_ms = v.parse().unwrap_or(150), fonts: false } },
         heading(3, "Bar"),
         Row { tab: 3, title: "Show Bar", subtitle: "A panel along one edge of the screen.", visible: always,
             control: Switch(|c| c.bar.enabled, |c, v| c.bar.enabled = v) },
@@ -552,8 +692,8 @@ fn rows() -> Vec<Row> {
                 set: |c, v| c.notification_center_position = v.to_string(),
                 fonts: false,
             } },
-        Row { tab: 7, title: "Control Centre Tiles", subtitle: "Tiles shown in the Control Centre; the others close up the gap.", visible: always,
-            control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine"), ("Game Mode", "game"), ("Timer", "timer")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
+        Row { tab: 7, title: "Control Centre Tiles", subtitle: "Tiles shown in the Control Centre; the others close up the gap. Drag a tile to change the order.", visible: always,
+            control: Pills { options: &[("Network", "network"), ("Bluetooth", "bluetooth"), ("VPN", "vpn"), ("Notifications", "notifications"), ("Caffeine", "caffeine"), ("Game Mode", "game"), ("Timer", "timer"), ("Sound", "audio")], get: |c| c.nc_tiles.clone(), set: |c, v| c.nc_tiles = v } },
         Row { tab: 7, title: "Silent on a Schedule", subtitle: "Turn silent mode on and off at set times every day (critical notifications still pop up). Switching it by hand in between sticks until the next change.", visible: always,
             control: Switch(|c| c.silent_schedule_enabled, |c, v| c.silent_schedule_enabled = v) },
         Row { tab: 7, title: "Silent From", subtitle: "24-hour time, HH:MM.", visible: |c| c.silent_schedule_enabled,
@@ -724,6 +864,11 @@ fn rows() -> Vec<Row> {
         Row { tab: 14, title: "Microphone", subtitle: "Record the default microphone. Also switchable in the capture overlay.", visible: always,
             control: Switch(|c| c.capture_audio_mic, |c, v| c.capture_audio_mic = v) },
         // ── System ──
+        heading(14, "Replay Buffer"),
+        Row { tab: 14, title: "Replay Buffer", subtitle: "Keeps the last seconds of the screen in memory (encoded on the GPU when it can) so you can save something that just happened: bind prism-ctl screenshot replay to a key. Uses the recording folder, format, codec and quality above; desktop audio when that is on.", visible: always,
+            control: Switch(|c| c.replay_enabled, |c, v| c.replay_enabled = v) },
+        Row { tab: 14, title: "Replay Length", subtitle: "How much a saved replay holds.", visible: |c| c.replay_enabled,
+            control: Combo { options: || opts(&[("15 seconds", "15"), ("30 seconds", "30"), ("1 minute", "60"), ("2 minutes", "120"), ("5 minutes", "300")]), get: |c| c.replay_seconds.to_string(), set: |c, v| c.replay_seconds = v.parse().unwrap_or(30), fonts: false } },
         heading(15, "Authentication"),
         Row { tab: 15, title: "Polkit Agent", subtitle: "Ask for your password when an app needs administrator rights. Replaces polkit-gnome (stop it first: only one agent per session).", visible: always,
             control: Switch(|c| c.polkit_agent_enabled, |c, v| c.polkit_agent_enabled = v) },
@@ -748,6 +893,28 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.battery_warnings, |c, v| c.battery_warnings = v) },
         Row { tab: 15, title: "Power Saver When Low", subtitle: "Switch to the power-saver profile at the first warning; the previous profile comes back when you plug in.", visible: |c| c.battery_warnings,
             control: Switch(|c| c.battery_auto_saver, |c, v| c.battery_auto_saver = v) },
+        Row { tab: 15, title: "Charge Limit", subtitle: "Stop charging before the battery is full, so it wears out more slowly when the laptop stays plugged in. Changing it may ask for your password.", visible: |_| *CHARGE_LIMIT,
+            control: Combo { options: || opts(&[("Off", "0"), ("60 %", "60"), ("70 %", "70"), ("80 %", "80"), ("90 %", "90")]), get: |c| c.battery_charge_limit.to_string(), set: |c, v| c.battery_charge_limit = v.parse().unwrap_or(0), fonts: false } },
+        heading(15, "Setup Guide"),
+        Row { tab: 15, title: "Setup Guide", subtitle: "The tour shown after installing: the main features with an option to turn each on.", visible: always,
+            control: Buttons(&[("Open Setup Guide", Action::RunGuide, ButtonKind::Outline)]) },
+        heading(15, "Compositor"),
+        Row { tab: 15, title: "Shortcuts and Window Rules", subtitle: "Change your compositor's key bindings and window rules (MangoWM, niri or Hyprland). Prism edits the config files in place and keeps a .prism-bak copy of each.", visible: always,
+            control: Buttons(&[("Shortcuts\u{2026}", Action::EditShortcuts, ButtonKind::Outline), ("Window Rules\u{2026}", Action::EditRules, ButtonKind::Outline)]) },
+        heading(15, "Backup"),
+        Row { tab: 15, title: "Earlier Settings", subtitle: "Before the first change each time Settings is used, Prism keeps a copy of your settings (the last 20). Pick one to go back to it; Undo brings the present ones back.", visible: always,
+            control: Combo { options: history_options, get: |_| String::new(), set: |c, v| {
+                if let Some(old) = (!v.is_empty()).then(|| prism_common::config_history::load(std::path::Path::new(v))).flatten() {
+                    *c = old;
+                }
+            }, fonts: false } },
+        Row { tab: 15, title: "Backup File", subtitle: "Export saves all of ~/.config/prism (settings, dock, notes, colours) as one file; Import puts such a file back.", visible: always,
+            control: Buttons(&[("Export\u{2026}", Action::ExportConfig, ButtonKind::Outline), ("Import\u{2026}", Action::ImportConfig, ButtonKind::Outline)]) },
+        heading(15, "Downloads"),
+        Row { tab: 15, title: "Download Progress", subtitle: "A pill at the top of the screen while browsers or brisk download into your Downloads folder, and a notification with Open and Show in Folder when a download finishes.", visible: always,
+            control: Switch(|c| c.downloads_watch, |c, v| c.downloads_watch = v) },
+        Row { tab: 15, title: "More Download Folders", subtitle: "Prism follows your Downloads folder and the folders Firefox, Chromium-based browsers and brisk save to. Add other folders here, separated by spaces.", visible: |c| c.downloads_watch,
+            control: Text { get: |c| c.downloads_extra_dirs.join(" "), set: |c, v| { c.downloads_extra_dirs = v.split_whitespace().map(str::to_string).collect(); true }, placeholder: "~/Videos/Incoming", browse: false } },
         heading(15, "Removable Drives"),
         Row { tab: 15, title: "Drive Notifications", subtitle: "Announce USB drives and SD cards as they are plugged in, with Open and Eject. Replaces udiskie.", visible: always,
             control: Switch(|c| c.drives_enabled, |c, v| c.drives_enabled = v) },
@@ -930,6 +1097,9 @@ pub struct SettingsView {
     rows: Vec<Row>,
     /// The bar's module arrangement, as last drawn.
     board: Board,
+    /// Pills as drawn (row, option, rect) and the one being dragged.
+    pills: Vec<(usize, usize, Rect)>,
+    pill_drag: Option<PillDrag>,
     /// The config as it was when the window opened: rows that differ from it are marked
     /// as changed and can be reverted to it.
     baseline: Config,
@@ -952,9 +1122,13 @@ pub struct SettingsView {
     /// Where the selected tab was drawn last frame (target of `tab_glide`).
     last_tab_rect: Option<Rect>,
     content_h: f64,
-    search: String,
+    search: crate::launcher::Query,
     search_focus: bool,
-    editing: Option<(usize, String)>,
+    /// Where the search field was drawn (clicks place its caret).
+    search_rect: Rect,
+    /// Palette of the last draw (text measuring for clicks in fields).
+    last_palette: Option<Palette>,
+    editing: Option<(usize, crate::launcher::Query)>,
     invalid: Option<usize>,
     combo: Option<(usize, Dropdown)>,
     drag: Option<usize>,
@@ -986,6 +1160,8 @@ pub struct SettingsView {
     hidden: bool,
     hide_rx: Receiver<bool>,
     hide_tx: std::sync::mpsc::Sender<bool>,
+    /// The settings as they were before this session's first change are in the history.
+    snapshotted: bool,
 }
 
 impl SettingsView {
@@ -1012,9 +1188,13 @@ impl SettingsView {
             time_scale: Some(1.0),
             last_tab_rect: None,
             board: Board::default(),
+            pills: Vec::new(),
+            pill_drag: None,
             content_h: 0.0,
-            search: String::new(),
+            search: Default::default(),
             search_focus: false,
+            search_rect: Rect::default(),
+            last_palette: None,
             editing: None,
             invalid: None,
             combo: None,
@@ -1040,6 +1220,7 @@ impl SettingsView {
             hidden: false,
             hide_rx,
             hide_tx,
+            snapshotted: false,
         }
     }
 
@@ -1055,6 +1236,12 @@ impl SettingsView {
         }
         for m in self.bg_rx.try_iter() {
             self.message = Some(m);
+            changed = true;
+        }
+        if RELOAD_CONFIG.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.config = Config::load();
+            self.undo.clear();
+            self.redo.clear();
             changed = true;
         }
         if let Ok(result) = self.pick_rx.try_recv() {
@@ -1117,7 +1304,7 @@ impl SettingsView {
     }
 
     fn query(&self) -> String {
-        self.search.trim().to_lowercase()
+        self.search.text.trim().to_lowercase()
     }
 
     fn row_matches(&self, i: usize, q: &str) -> bool {
@@ -1141,7 +1328,7 @@ impl SettingsView {
     }
 
     fn tab_matches(&self, tab: usize) -> bool {
-        let q = self.search.trim().to_lowercase();
+        let q = self.search.text.trim().to_lowercase();
         q.is_empty()
             || TABS[tab].to_lowercase().contains(&q)
             || self.rows.iter().any(|r| r.tab == tab && (r.title.to_lowercase().contains(&q) || r.subtitle.to_lowercase().contains(&q)))
@@ -1163,6 +1350,7 @@ impl SettingsView {
             }
         }
         let p = Self::palette(style, theme);
+        self.last_palette = Some(p.clone());
         self.time_scale = style.time_scale();
         self.card = card;
         self.hits.clear();
@@ -1178,13 +1366,13 @@ impl SettingsView {
         let ring = if self.search_focus || self.hover == Some(Hit::Search) { (p.accent.0, p.accent.1, p.accent.2, 1.0) } else { (p.fg.0, p.fg.1, p.fg.2, 0.15) };
         stroke_rounded_rect(cr, search.x + 0.5, search.y + 0.5, search.w - 1.0, search.h - 1.0, 18.0, ring, 1.0);
         draw_in_box(cr, "\u{2315}", &TextStyle { family: &p.family, px: 15.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.5) }, search.x + 12.0, search.y, 16.0, search.h, Align::Start);
-        let stext = if self.search.is_empty() && !self.search_focus { "Search" } else { &self.search };
-        let scol = if self.search.is_empty() { (p.fg.0, p.fg.1, p.fg.2, 0.5) } else { p.fg };
-        let (bx, _, bw, _) = draw_in_box(cr, stext, &TextStyle { family: &p.family, px: 14.0, bold: false, color: scol }, search.x + 34.0, search.y, search.w - 46.0, search.h, Align::Start);
-        if self.search_focus {
-            let cx = if self.search.is_empty() { search.x + 34.0 } else { bx + bw + 1.0 };
-            fill_rounded_rect(cr, cx, search.y + 9.0, 1.5, search.h - 18.0, 0.0, p.accent);
+        let caret = self.search_focus.then(|| self.search.caret());
+        if self.search.text.is_empty() && !self.search_focus {
+            uikit::caret_text(cr, "Search", None, &search_style(&p, (p.fg.0, p.fg.1, p.fg.2, 0.5)), search.x + 34.0, search.y, search.w - 46.0, search.h, p.accent);
+        } else {
+            uikit::caret_text(cr, &self.search.text, caret, &search_style(&p, p.fg), search.x + 34.0, search.y, search.w - 46.0, search.h, p.accent);
         }
+        self.search_rect = search;
         self.hits.push((Hit::Search, search));
 
         let mut ty = sy + 36.0 + 16.0;
@@ -1235,7 +1423,7 @@ impl SettingsView {
         let ix = pane.x + PANE_PAD;
         let iw = pane.w - 2.0 * PANE_PAD;
         let hy = pane.y + PANE_PAD;
-        let title = if self.query().is_empty() { format!("\u{2699}  {} Settings", TABS[self.tab]) } else { format!("\u{2315}  Results for \u{201C}{}\u{201D}", self.search.trim()) };
+        let title = if self.query().is_empty() { format!("\u{2699}  {} Settings", TABS[self.tab]) } else { format!("\u{2315}  Results for \u{201C}{}\u{201D}", self.search.text.trim()) };
         draw_in_box(cr, &title, &TextStyle { family: &format!("{} Semi-Bold", p.family), px: 20.0, bold: false, color: p.fg }, ix, hy, iw - 40.0, 32.0, Align::Start);
         let close = Rect { x: ix + iw - 32.0, y: hy, w: 32.0, h: 32.0 };
         let ch = self.hover_fade.level(Hit::Close, self.hover == Some(Hit::Close), style);
@@ -1296,7 +1484,7 @@ impl SettingsView {
             let sub = row_subtitle(r);
             let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
-                Control::Buttons(_) | Control::Pills { .. } => th + 12.0 + flow_height(&flow(cr, &button_labels(r), &p.family, list.w)),
+                Control::Buttons(_) | Control::Pills { .. } => th + 12.0 + flow_height(&flow(cr, &button_labels(r, &draft), &p.family, list.w)),
                 Control::BarModules => th + 12.0 + board_height(&self.config.bar),
                 _ => th.max(36.0),
             };
@@ -1335,8 +1523,9 @@ impl SettingsView {
         self.focus_order.clear();
         self.board.chips.clear();
         self.board.zones.clear();
+        self.pills.clear();
         if visible.is_empty() {
-            let msg = if searching { format!("No settings match \u{201C}{}\u{201D}", self.search.trim()) } else { "Nothing to configure here".into() };
+            let msg = if searching { format!("No settings match \u{201C}{}\u{201D}", self.search.text.trim()) } else { "Nothing to configure here".into() };
             draw_in_box(cr, &msg, &TextStyle { family: &p.family, px: 14.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) }, list.x, list.y + 20.0, list.w, 24.0, Align::Center);
         }
         for (k, &i) in visible.iter().enumerate() {
@@ -1424,11 +1613,11 @@ impl SettingsView {
                         uikit::button(cr, br, "\u{2026}", ButtonKind::Outline, bh, !busy, &p);
                         self.hits.push((Hit::Browse(i), br));
                     }
-                    let (text, editing) = match &self.editing {
-                        Some((ei, buf)) if *ei == i => (buf.clone(), true),
-                        _ => (get(&draft), false),
+                    let (text, caret) = match &self.editing {
+                        Some((ei, q)) if *ei == i => (q.text.clone(), Some(q.caret())),
+                        _ => (get(&draft), None),
                     };
-                    uikit::text_field(cr, tr, &text, placeholder, editing, hov, self.invalid == Some(i), &p);
+                    uikit::text_field(cr, tr, &text, placeholder, caret, hov, self.invalid == Some(i), &p);
                     self.control_rects.push((i, tr));
                 }
                 Control::Combo { options, get, fonts, .. } => {
@@ -1445,7 +1634,7 @@ impl SettingsView {
                     self.control_rects.push((i, tr));
                 }
                 Control::Buttons(btns) => {
-                    let places = flow(cr, &button_labels(r), &p.family, list.w);
+                    let places = flow(cr, &button_labels(r, &draft), &p.family, list.w);
                     let top = y + h - 14.0 - flow_height(&places);
                     for (b, ((label, _, kind), pl)) in btns.iter().zip(&places).enumerate() {
                         let br = Rect { x: list.x + pl.x, y: top + pl.y, w: pl.w, h: 34.0 };
@@ -1456,14 +1645,40 @@ impl SettingsView {
                 }
                 Control::Pills { options, get, .. } => {
                     let on = get(&self.config);
-                    let places = flow(cr, &button_labels(r), &p.family, list.w);
+                    let places = flow(cr, &button_labels(r, &draft), &p.family, list.w);
                     let top = y + h - 14.0 - flow_height(&places);
-                    for (b, ((label, value), pl)) in options.iter().zip(&places).enumerate() {
+                    let dragged = self.pill_drag.as_ref().filter(|d| d.moved && d.row == i).map(|d| (d.b, d.pos));
+                    for (&b, pl) in pill_order(options, &on).iter().zip(&places) {
+                        let (label, value) = options[b];
                         let br = Rect { x: list.x + pl.x, y: top + pl.y, w: pl.w, h: 34.0 };
                         let bh = self.hover_fade.level(Hit::Button(i, b), self.hover == Some(Hit::Button(i, b)), style);
                         let kind = if on.iter().any(|v| v == value) { ButtonKind::Primary } else { ButtonKind::Outline };
+                        // The dragged pill stays as a faint placeholder.
+                        let ghost = dragged.is_some_and(|(d, _)| d == b);
+                        if ghost {
+                            unsafe { cairo_push_group(cr) };
+                        }
                         uikit::button(cr, br, label, kind, bh, true, &p);
+                        if ghost {
+                            unsafe {
+                                cairo_pop_group_to_source(cr);
+                                cairo_paint_with_alpha(cr, 0.3);
+                            }
+                        }
                         self.hits.push((Hit::Button(i, b), br));
+                        self.pills.push((i, b, br));
+                    }
+                    // Where the dragged pill would land.
+                    if let Some((d, pos)) = dragged {
+                        let others: Vec<Rect> = self.pills.iter().filter(|(row, k, _)| *row == i && *k != d).map(|(_, _, r)| *r).collect();
+                        let slot = pill_slot(&others, pos);
+                        let (mx, my) = match (others.get(slot), slot.checked_sub(1).and_then(|k| others.get(k))) {
+                            (Some(n), Some(prev)) if (prev.y - n.y).abs() < 1.0 => ((prev.x + prev.w + n.x) / 2.0, n.y),
+                            (Some(n), _) => (n.x - 5.0, n.y),
+                            (None, Some(prev)) => (prev.x + prev.w + 5.0, prev.y),
+                            (None, None) => (list.x, top),
+                        };
+                        fill_rounded_rect(cr, mx - 1.0, my, 2.0, 34.0, 1.0, p.accent);
                     }
                 }
                 Control::BarModules => {
@@ -1512,6 +1727,12 @@ impl SettingsView {
         self.hits.retain(|(h, r)| !matches!(h, Hit::Button(..) | Hit::Reset(_) | Hit::Browse(_)) || (r.y + r.h > list.y && r.y < list.y + list.h));
 
         draw_dragged_chip(cr, &self.board, &p);
+        if let Some(d) = self.pill_drag.as_ref().filter(|d| d.moved) {
+            if let Control::Pills { options, .. } = self.rows[d.row].control {
+                let r = Rect { x: d.pos.0 - d.offset.0, y: d.pos.1 - d.offset.1, w: d.size.0, h: d.size.1 };
+                uikit::button(cr, r, options[d.b].0, ButtonKind::Primary, 1.0, true, &p);
+            }
+        }
 
         // Open dropdown on top of everything else in the card.
         if let (Some(anchor), Some((ci, dd))) = (open_combo_anchor, self.combo.as_mut()) {
@@ -1543,6 +1764,11 @@ impl SettingsView {
 
     /// Pointer motion; returns true if a redraw is needed.
     pub fn motion(&mut self, x: f64, y: f64, pressed: bool) -> bool {
+        if let Some(d) = self.pill_drag.as_mut() {
+            d.pos = (x, y);
+            d.moved |= (x - d.start.0).hypot(y - d.start.1) > 4.0;
+            return true;
+        }
         if let Some(d) = self.board.drag.as_mut() {
             d.pos = (x, y);
             d.moved |= (x - d.start.0).hypot(y - d.start.1) > 4.0;
@@ -1571,6 +1797,23 @@ impl SettingsView {
     }
 
     pub fn release(&mut self) -> bool {
+        if let Some(d) = self.pill_drag.take() {
+            if !d.moved {
+                // A click turns it on or off.
+                self.toggle_pill(d.row, d.b);
+            } else if let Control::Pills { options, get, set } = self.rows[d.row].control {
+                let others: Vec<Rect> = self.pills.iter().filter(|(row, k, _)| *row == d.row && *k != d.b).map(|(_, _, r)| *r).collect();
+                let on = get(&self.config);
+                let after_on = pills_after_move(options, &on, d.b, pill_slot(&others, d.pos));
+                if after_on != on {
+                    let before = self.config.clone();
+                    let mut after = before.clone();
+                    set(&mut after, after_on);
+                    self.change(before, after);
+                }
+            }
+            return true;
+        }
         if let Some(d) = self.board.drag.take() {
             let before = self.config.clone();
             let mut after = before.clone();
@@ -1620,10 +1863,10 @@ impl SettingsView {
     }
 
     fn commit_edit(&mut self) {
-        if let Some((i, buf)) = self.editing.take() {
+        if let Some((i, q)) = self.editing.take() {
             if let Control::Text { set, .. } = &self.rows[i].control {
                 let mut after = self.config.clone();
-                if set(&mut after, &buf) {
+                if set(&mut after, &q.text) {
                     self.invalid = None;
                     let before = self.config.clone();
                     self.change(before, after);
@@ -1671,7 +1914,14 @@ impl SettingsView {
             self.focus = Some(hit);
         }
         match hit {
-            Hit::Search => self.search_focus = true,
+            Hit::Search => {
+                self.search_focus = true;
+                if let Some(p) = self.last_palette.clone() {
+                    let r = self.search_rect;
+                    let ci = uikit::caret_index_at(&self.search.text, self.search.caret(), &search_style(&p, p.fg), r.x + 34.0, r.w - 46.0, x);
+                    self.search.set_caret(ci);
+                }
+            }
             Hit::Tab(t) => {
                 if t != self.tab {
                     self.tab_entrance();
@@ -1699,7 +1949,10 @@ impl SettingsView {
                     let action = btns[b].1;
                     return self.run_action(action);
                 }
-                self.toggle_pill(i, b);
+                // Pills toggle on release, unless dragged to a new place.
+                if let Some(r) = self.pills.iter().find(|(row, k, _)| *row == i && *k == b).map(|(_, _, r)| *r) {
+                    self.pill_drag = Some(PillDrag { row: i, b, start: (x, y), pos: (x, y), offset: (x - r.x, y - r.y), size: (r.w, r.h), moved: false });
+                }
             }
             Hit::Control(i) => match &self.rows[i].control {
                 Control::Switch(get, set) => {
@@ -1715,7 +1968,13 @@ impl SettingsView {
                 }
                 Control::Text { get, .. } => {
                     if self.editing.as_ref().map(|(e, _)| *e != i).unwrap_or(true) {
-                        self.editing = Some((i, get(&self.config)));
+                        self.editing = Some((i, crate::launcher::Query::with_text(&get(&self.config))));
+                    }
+                    // The caret goes where the field was clicked.
+                    let rect = self.control_rects.iter().find(|(k, _)| *k == i).map(|(_, r)| *r);
+                    if let (Some(r), Some(p), Some((_, q))) = (rect, self.last_palette.clone(), self.editing.as_mut()) {
+                        let ci = uikit::field_index_at(r, &q.text, q.caret(), &p, x);
+                        q.set_caret(ci);
                     }
                 }
                 Control::Combo { .. } => self.combo = Some((i, Dropdown::default())),
@@ -1757,7 +2016,7 @@ impl SettingsView {
         const PGDN: u32 = 109;
 
         if special == ESC {
-            if self.combo.is_none() && self.editing.is_none() && !self.search.is_empty() {
+            if self.combo.is_none() && self.editing.is_none() && !self.search.text.is_empty() {
                 self.search.clear();
                 self.search_focus = false;
                 self.scroll.reset(0.0);
@@ -1828,23 +2087,24 @@ impl SettingsView {
                     self.combo = None;
                 }
                 TAB => self.combo = None,
-                _ => return if dd.key(typed, special == BACKSPACE) { Effect::Redraw } else { Effect::None },
+                _ => return if dd.key(special, typed, ctrl) { Effect::Redraw } else { Effect::None },
             }
             return Effect::Redraw;
         }
 
-        if let Some((_, buf)) = self.editing.as_mut() {
-            match (special, typed) {
-                (ENTER, _) => self.commit_edit(),
-                (TAB, _) => {
+        if let Some((_, q)) = self.editing.as_mut() {
+            match special {
+                ENTER => self.commit_edit(),
+                TAB => {
                     self.commit_edit();
                     self.move_focus(if shift { -1 } else { 1 });
                 }
-                (BACKSPACE, _) => {
-                    buf.pop();
+                // Arrows, Home/End, Delete, Ctrl+Backspace move and edit inside the text.
+                _ => {
+                    if q.key(special, typed, ctrl).is_none() {
+                        return Effect::None;
+                    }
                 }
-                (_, Some(c)) => buf.push(c),
-                _ => return Effect::None,
             }
             return Effect::Redraw;
         }
@@ -1856,15 +2116,11 @@ impl SettingsView {
                     self.focus = None;
                     self.move_focus(1);
                 }
-                (BACKSPACE, _) => {
-                    self.search.pop();
-                    self.scroll.reset(0.0);
-                }
-                (_, Some(c)) => {
-                    self.search.push(c);
-                    self.scroll.reset(0.0);
-                }
-                _ => return Effect::None,
+                _ => match self.search.key(special, typed, ctrl) {
+                    Some(true) => self.scroll.reset(0.0),
+                    Some(false) => {}
+                    None => return Effect::None,
+                },
             }
             return Effect::Redraw;
         }
@@ -1918,15 +2174,17 @@ impl SettingsView {
                 self.focus = None;
                 self.move_focus(-1);
             }
-            (BACKSPACE, _) if !self.search.is_empty() => {
-                self.search.pop();
+            (BACKSPACE, _) if !self.search.text.is_empty() => {
+                self.search.set_caret(usize::MAX);
+                self.search.key(BACKSPACE, None, ctrl);
                 self.search_focus = true;
             }
             // Typing anywhere else goes to the search box (like the QML window).
-            (_, Some(c)) if c != ' ' => {
+            (_, Some(c)) if c != ' ' && !ctrl => {
                 self.search_focus = true;
                 self.focus_visible = false;
-                self.search.push(c);
+                self.search.set_caret(usize::MAX);
+                self.search.key(0, Some(c), false);
                 self.scroll.reset(0.0);
             }
             _ => return Effect::None,
@@ -1952,7 +2210,7 @@ impl SettingsView {
         self.scroll_to_focus = true;
     }
 
-    /// Turn pill `b` of row `i` on or off (options keep their listed order).
+    /// Turn pill `b` of row `i` on (after the others that are on) or off.
     fn toggle_pill(&mut self, i: usize, b: usize) {
         let Control::Pills { options, get, set } = self.rows[i].control else { return };
         let mut on = get(&self.config);
@@ -1963,7 +2221,6 @@ impl SettingsView {
             }
             None => on.push(v),
         }
-        on.sort_by_key(|x| options.iter().position(|(_, o)| o == x));
         let before = self.config.clone();
         let mut after = before.clone();
         set(&mut after, on);
@@ -1987,7 +2244,7 @@ impl SettingsView {
                     let before = self.config.clone();
                     self.change(before, after);
                 }
-                Control::Text { get, .. } => self.editing = Some((i, get(&self.config))),
+                Control::Text { get, .. } => self.editing = Some((i, crate::launcher::Query::with_text(&get(&self.config)))),
                 Control::Combo { options, get, .. } => {
                     let cur = get(&self.config);
                     let dd = Dropdown { hover: options().iter().position(|(_, v)| *v == cur), ..Dropdown::default() };
@@ -2158,6 +2415,12 @@ impl SettingsView {
             Ok(c) => c,
             Err(_) => after.clone(),
         };
+        if !self.snapshotted {
+            self.snapshotted = true;
+            if let Err(e) = prism_common::config_history::snapshot() {
+                eprintln!("[prism-settings] history: {e}");
+            }
+        }
         if let Err(e) = merged.save() {
             self.message = Some((format!("Save failed: {}", e), false));
             return false;
@@ -2184,19 +2447,11 @@ impl SettingsView {
 
     /// Re-run matugen on the current wallpaper with the saved mode/scheme (regenerate-theme.sh).
     fn regenerate_palette(&mut self) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let wallpaper = format!("{}/.wa.jpg", home);
         let (mode, scheme) = (self.config.matugen_mode.clone(), self.config.matugen_scheme.clone());
         self.message = Some(("Regenerating colours…".into(), true));
-        self.spawn_job(move || {
-            let out = std::process::Command::new("matugen")
-                .args(["image", &wallpaper, "-m", &mode, "-t", &scheme, "--source-color-index", "0"])
-                .output();
-            match out {
-                Ok(o) if o.status.success() => ("Colours regenerated".into(), true),
-                Ok(o) => (format!("matugen failed: {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")), false),
-                Err(e) => (format!("matugen not available: {}", e), false),
-            }
+        self.spawn_job(move || match prism_common::wallpaper::regenerate_palette(&scheme, &mode) {
+            Ok(()) => ("Colours regenerated".into(), true),
+            Err(e) => (e, false),
         });
     }
 
@@ -2216,6 +2471,55 @@ impl SettingsView {
                 self.commit_edit();
                 let file = self.config.notification_sound_file.clone();
                 std::thread::spawn(move || prism_common::sound::play(&file));
+            }
+            Action::RunGuide => {
+                self.commit_edit();
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let _ = prism_common::ipc::request(&prism_common::IpcCommand::Setup);
+                });
+                return Effect::Close;
+            }
+            Action::EditShortcuts | Action::EditRules => {
+                self.commit_edit();
+                let rules = action == Action::EditRules;
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let _ = prism_common::ipc::request(&prism_common::IpcCommand::Keybinds(prism_common::ipc::KeybindsAction::Edit(rules)));
+                });
+                return Effect::Close;
+            }
+            Action::ExportConfig | Action::ImportConfig => {
+                self.commit_edit();
+                let export = action == Action::ExportConfig;
+                // Hide the card while the file dialog is up.
+                self.hidden = true;
+                self.layer_request = Some(true);
+                let (hide_tx, hide_waker) = (self.hide_tx.clone(), self.waker.clone());
+                self.spawn_job(move || {
+                    let picked = if export {
+                        crate::portal::save_file("Export Prism Settings", &format!("prism-settings-{}.tar.gz", local_time_label(now_unix()).replace([' ', ',', ':'], "-").replace("--", "-")))
+                    } else {
+                        crate::portal::pick_backup("Import Prism Settings")
+                    };
+                    let _ = hide_tx.send(false);
+                    hide_waker.wake();
+                    match (picked, export) {
+                        (Ok(None), _) => ("Cancelled".into(), true),
+                        (Err(e), _) => (format!("File dialog: {e}"), false),
+                        (Ok(Some(path)), true) => match prism_common::config_history::export(&path) {
+                            Ok(()) => (format!("Exported to {}", path.display()), true),
+                            Err(e) => (e, false),
+                        },
+                        (Ok(Some(path)), false) => match prism_common::config_history::import(&path) {
+                            Ok(()) => {
+                                RELOAD_CONFIG.store(true, std::sync::atomic::Ordering::SeqCst);
+                                ("Settings imported (the ones before are under Earlier Settings)".into(), true)
+                            }
+                            Err(e) => (e, false),
+                        },
+                    }
+                });
             }
             Action::OpenPhone => {
                 self.commit_edit();
@@ -2341,6 +2645,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pills_reorder() {
+        let opts: &[(&str, &str)] = &[("A", "a"), ("B", "b"), ("C", "c"), ("D", "d")];
+        let on = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(pill_order(opts, &on(&["c", "a"])), vec![2, 0, 1, 3]);
+        // Move A (on) to the front: shown C A B D, others C B D.
+        assert_eq!(pills_after_move(opts, &on(&["c", "a"]), 0, 0), on(&["a", "c"]));
+        // Drop D (off) between C and A: turns on there.
+        assert_eq!(pills_after_move(opts, &on(&["c", "a"]), 3, 1), on(&["c", "d", "a"]));
+        // Drop B (off) after the on pills: stays off.
+        assert_eq!(pills_after_move(opts, &on(&["c", "a"]), 1, 2), on(&["c", "a"]));
+        // Drop C (on) among the off ones: stays on, last.
+        assert_eq!(pills_after_move(opts, &on(&["c", "a"]), 2, 3), on(&["a", "c"]));
+    }
+
+    #[test]
     fn the_sound_list_ends_with_the_way_to_add_one() {
         *ADDED_SOUNDS.lock().unwrap() = vec!["~/Music/door-bell.ogg".to_string()];
         let list = sound_options();
@@ -2376,4 +2695,8 @@ mod tests {
         v.truncate_front(3);
         assert_eq!(v, vec![7, 8, 9]);
     }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

@@ -234,3 +234,53 @@ mod tests {
         assert_eq!(vol_cap, 100);
     }
 }
+
+/// Battery attributes that stop charging early (laptops whose firmware supports it).
+pub fn charge_limit_files() -> Vec<std::path::PathBuf> {
+    let Ok(dir) = std::fs::read_dir("/sys/class/power_supply") else { return Vec::new() };
+    let mut out: Vec<std::path::PathBuf> = dir
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("BAT"))
+        .map(|e| e.path().join("charge_control_end_threshold"))
+        .filter(|p| p.exists())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Stop charging at `limit` % (0 or 100: charge fully). Writes the attribute directly (the
+/// installer's udev rule makes it writable for the wheel group); with `ask`, falls back to
+/// `pkexec tee` (a password prompt) when that is not allowed.
+pub fn set_charge_limit(limit: u8, ask: bool) -> Result<(), String> {
+    let value = if limit == 0 { 100 } else { limit.clamp(20, 100) };
+    let files = charge_limit_files();
+    if files.is_empty() {
+        return Err("no battery with a charge limit".into());
+    }
+    for f in files {
+        if std::fs::read_to_string(&f).is_ok_and(|v| v.trim() == value.to_string()) {
+            continue;
+        }
+        match std::fs::write(&f, format!("{value}\n")) {
+            Ok(()) => {}
+            Err(e) if ask && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                use std::io::Write;
+                let mut child = Command::new("pkexec")
+                    .arg("tee")
+                    .arg(&f)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("pkexec: {e}"))?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = writeln!(stdin, "{value}");
+                }
+                if !child.wait().map_err(|e| e.to_string())?.success() {
+                    return Err(format!("could not write {}", f.display()));
+                }
+            }
+            Err(e) => return Err(format!("{}: {e}", f.display())),
+        }
+    }
+    Ok(())
+}

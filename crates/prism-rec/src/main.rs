@@ -2,6 +2,10 @@
 //! `RecordJob` as the only argument and stops it with SIGINT; it writes the file as it goes
 //! and exits when done. Capture is ext-image-copy-capture (prism-capture), encoding is the
 //! system FFmpeg (NVENC when available).
+//!
+//! Replay buffer (`replay_secs` > 0): the last seconds stay in memory; SIGUSR1 saves them as
+//! Replay_<time>.<ext> next to `path` and prints `SAVED <path> <seconds>` (or `FAILED <why>`)
+//! on stdout for prismd.
 
 mod audio;
 mod cast;
@@ -14,9 +18,35 @@ use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_shm;
 
 pub(crate) static STOP: AtomicBool = AtomicBool::new(false);
+/// Replay buffer: save what is in memory.
+static SAVE: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn on_save(_: libc::c_int) {
+    SAVE.store(true, Ordering::SeqCst);
+}
+
+/// Replay buffer: write the clip and tell prismd.
+fn save_replay(rec: &encode::Recorder, job: &RecordJob) {
+    use std::io::Write;
+    let base = std::path::Path::new(&job.path);
+    let ext = base.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "mkv".into());
+    let dir = base.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    let path = dir.join(format!("Replay_{}.{ext}", prism_common::capture::timestamp())).to_string_lossy().into_owned();
+    let line = match rec.save_replay(&path) {
+        Ok(secs) => format!("SAVED {path} {secs:.1}"),
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            format!("FAILED {e}")
+        }
+    };
+    eprintln!("[prism-rec] replay: {line}");
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 fn main() {
@@ -52,8 +82,10 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGUSR1, on_save as extern "C" fn(libc::c_int) as libc::sighandler_t);
     }
     match record(&job) {
+        Ok(()) if job.replay_secs > 0 => eprintln!("[prism-rec] replay buffer stopped"),
         Ok(()) => eprintln!("[prism-rec] saved {}", job.path),
         Err(e) => {
             eprintln!("[prism-rec] {e}");
@@ -102,7 +134,13 @@ fn record(job: &RecordJob) -> Result<(), String> {
     };
     let first = clamp_area(crop, sw, sh);
     let opts = encode::VideoOpts { width: first.2, height: first.3, fps: job.fps, codec: job.codec.clone(), quality: job.quality.clone() };
-    let mut rec: Option<encode::Recorder> = Some(encode::Recorder::new(&job.path, &opts, audio.is_some())?);
+    let replay = job.replay_secs > 0;
+    let mut rec: Option<encode::Recorder> = Some(if replay {
+        let ext = std::path::Path::new(&job.path).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "mkv".into());
+        encode::Recorder::new_replay(&opts, audio.is_some(), &ext, job.replay_secs)?
+    } else {
+        encode::Recorder::new(&job.path, &opts, audio.is_some())?
+    });
     if let Some(a) = audio.as_mut() {
         a.clear();
     }
@@ -112,6 +150,11 @@ fn record(job: &RecordJob) -> Result<(), String> {
     let mut frames = 0u64;
     let started = Instant::now();
     while !STOP.load(Ordering::SeqCst) {
+        if replay && SAVE.swap(false, Ordering::SeqCst) {
+            if let Some(r) = rec.as_ref() {
+                save_replay(r, job);
+            }
+        }
         // Pace requests to the fps cap.
         let now = Instant::now();
         if now < next {

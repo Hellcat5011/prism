@@ -171,6 +171,9 @@ pub struct Config {
     /// The app dock (Settings > Dock). Pinned apps live in dock.json next to this file.
     #[serde(default)]
     pub dock: DockConfig,
+    /// Actions on screen corners (Settings > Desktop > Hot Corners); all off by default.
+    #[serde(default)]
+    pub hot_corners: HotCorners,
 
     // ── Global UI (applies to every Prism card) ────────────────────────
     /// Enter/exit and in-card animations. Off = instant.
@@ -331,6 +334,41 @@ pub struct Config {
     /// ... and switch to the power-saver profile at the first warning (back when charging).
     #[serde(default)]
     pub battery_auto_saver: bool,
+    /// The first-time setup guide was shown (a fresh install has no config file: false then).
+    #[serde(default = "default_true")]
+    pub setup_done: bool,
+    /// Replay buffer: keep the last `replay_seconds` of the screen in memory (NVENC) and save
+    /// them with `prism-ctl screenshot replay`.
+    #[serde(default)]
+    pub replay_enabled: bool,
+    #[serde(default = "default_replay_seconds")]
+    pub replay_seconds: u32,
+    /// Calendar feeds: iCalendar (.ics) URLs (https or webcal) or local files.
+    #[serde(default)]
+    pub calendar_feeds: Vec<String>,
+    /// Remind this many minutes before timed events (0 = no reminders).
+    #[serde(default = "default_calendar_reminder")]
+    pub calendar_reminder_minutes: u32,
+    /// Focus: apps whose notifications still pop up while silent (app names, case-insensitive).
+    #[serde(default)]
+    pub focus_allowed_apps: Vec<String>,
+    /// Silent automatically while the screen is shared (through Prism's portal).
+    #[serde(default)]
+    pub focus_on_screen_share: bool,
+    /// Silent automatically while the focused window is fullscreen.
+    #[serde(default)]
+    pub focus_on_fullscreen: bool,
+    /// Downloads watcher: a pill while files download into the Downloads folder and a
+    /// notification when one finishes (browsers' .part/.crdownload files, brisk).
+    #[serde(default = "default_true")]
+    pub downloads_watch: bool,
+    /// More folders to follow for downloads (the browsers' and brisk's own are found by
+    /// themselves).
+    #[serde(default)]
+    pub downloads_extra_dirs: Vec<String>,
+    /// Stop charging at this percentage (charge_control_end_threshold); 0 = off (100 %).
+    #[serde(default)]
+    pub battery_charge_limit: u8,
     /// Silent mode between two times ("HH:MM", may cross midnight).
     #[serde(default)]
     pub silent_schedule_enabled: bool,
@@ -755,6 +793,8 @@ fn default_wallpaper_daemon() -> String { "prism".to_string() }
 fn default_wallpaper_transition() -> String { "random".to_string() }
 fn default_wallpaper_dir() -> String { "~/Pictures/Wallpapers".to_string() }
 fn default_wallpaper_filters_enabled() -> bool { true }
+fn default_calendar_reminder() -> u32 { 10 }
+fn default_replay_seconds() -> u32 { 30 }
 fn default_matugen_mode() -> String { "smart".to_string() }
 fn default_matugen_scheme() -> String { "scheme-smart".to_string() }
 fn default_max_results() -> u32 { 20 }
@@ -874,6 +914,32 @@ impl BarConfig {
     }
 }
 
+/// What touching a screen corner with the pointer does: "none", "launcher", "search",
+/// "notifications", "overview", "lock", "screenshot", "power", "clipboard" or "settings".
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct HotCorners {
+    pub top_left: String,
+    pub top_right: String,
+    pub bottom_left: String,
+    pub bottom_right: String,
+    /// How long the pointer rests in the corner before the action runs.
+    pub delay_ms: u32,
+}
+
+impl Default for HotCorners {
+    fn default() -> Self {
+        HotCorners { top_left: "none".into(), top_right: "none".into(), bottom_left: "none".into(), bottom_right: "none".into(), delay_ms: 150 }
+    }
+}
+
+impl HotCorners {
+    /// Actions of the corners: top left, top right, bottom left, bottom right.
+    pub fn actions(&self) -> [&str; 4] {
+        [&self.top_left, &self.top_right, &self.bottom_left, &self.bottom_right]
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct DockConfig {
@@ -963,6 +1029,7 @@ impl Default for Config {
             notification_sounds: Vec::new(),
             bar: BarConfig::default(),
             dock: DockConfig::default(),
+            hot_corners: HotCorners::default(),
             animations_enabled: true,
             animation_speed: default_animation_speed(),
             dim_enabled: true,
@@ -1022,6 +1089,17 @@ impl Default for Config {
             ocr_language: default_ocr_language(),
             battery_warnings: true,
             battery_auto_saver: false,
+            battery_charge_limit: 0,
+            downloads_watch: true,
+            downloads_extra_dirs: Vec::new(),
+            setup_done: false,
+            replay_enabled: false,
+            replay_seconds: default_replay_seconds(),
+            calendar_feeds: Vec::new(),
+            calendar_reminder_minutes: default_calendar_reminder(),
+            focus_allowed_apps: Vec::new(),
+            focus_on_screen_share: false,
+            focus_on_fullscreen: false,
             silent_schedule_enabled: false,
             silent_schedule_start: default_silent_start(),
             silent_schedule_end: default_silent_end(),

@@ -233,6 +233,7 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
         CalView::Days => {
             let gh = (iy + ih - (4.0 * sf).round()) - gy;
             let first_wday = weekday_of(cal.year, cal.month + 1, 1);
+            let events = crate::cal_events::days_with_events(cal.year, cal.month);
             let dim = days_in_month(cal.year, cal.month + 1);
             let cells = if first_wday + dim > 35 { 42 } else { 35 };
             let rows = 1 + cells / 7;
@@ -264,6 +265,17 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
                 }
                 let color = if is_today { look.background } else { look.fg };
                 draw_in_box(cr, &day.to_string(), &TextStyle { family: &family, px, bold: is_today, color }, x, y, cell_w, cell_h, Align::Center);
+                // A dot under days with calendar events.
+                if events & (1 << day) != 0 {
+                    let r = (2.0 * sf).max(1.5);
+                    let dy = (cell_h / 2.0 + px * 0.62).min(cell_h - r - 1.0);
+                    unsafe {
+                        cairo_new_path(cr);
+                        cairo_arc(cr, x + cell_w / 2.0, y + dy, r, 0.0, PI * 2.0);
+                    }
+                    set_rgba(cr, if is_today { look.background } else { look.primary });
+                    unsafe { cairo_fill(cr) };
+                }
             }
         }
         CalView::Months | CalView::Years => {

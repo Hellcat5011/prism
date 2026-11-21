@@ -122,7 +122,8 @@ fn refresh(snap: &mut StatusSnapshot, ops: &Ops, bus: Option<&Bus>) {
     snap.muted = muted;
     snap.sinks = prism_common::network::list_audio_sinks();
     snap.battery = prism_common::network::get_battery_status();
-    snap.notifications = NotificationStore::load().notifications;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    snap.notifications = NotificationStore::load().visible(now).cloned().collect();
     if let Ok(Some(json)) = prism_common::ipc::request(&IpcCommand::Notif(NotifAction::State)) {
         snap.flags = serde_json::from_str(&json).unwrap_or_default();
     }

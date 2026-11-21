@@ -82,6 +82,18 @@ fn run(
         }
 
         let location = location_for(&cfg, ip_location);
+        if cfg.matugen_mode == "auto" {
+            let mode = if night_now(&cfg, location, &LocalTime::now()) { "dark" } else { "light" };
+            if prism_common::wallpaper::set_auto_mode(mode) {
+                eprintln!("[prismd/bluelight] auto colour mode: {mode}");
+                let scheme = cfg.matugen_scheme.clone();
+                thread::spawn(move || {
+                    if let Err(e) = prism_common::wallpaper::regenerate_palette(&scheme, "auto") {
+                        eprintln!("[prismd/bluelight] {e}");
+                    }
+                });
+            }
+        }
         let target = if cfg.blue_light_enabled { Some(target_kelvin(&cfg, location, &LocalTime::now())) } else { None };
         if target != applied || first {
             if let Some(g) = &gamma {
@@ -106,7 +118,7 @@ fn run(
             location,
         };
 
-        let wait = if cfg.blue_light_enabled { Duration::from_secs(5) } else { Duration::from_secs(3600) };
+        let wait = if cfg.blue_light_enabled { Duration::from_secs(5) } else if cfg.matugen_mode == "auto" { Duration::from_secs(30) } else { Duration::from_secs(3600) };
         match rx.recv_timeout(wait) {
             Ok(Msg::Config(c)) => {
                 if c.blue_light_use_ip_location != cfg.blue_light_use_ip_location {
@@ -128,8 +140,14 @@ fn is_sun_mode(cfg: &Config) -> bool {
     matches!(cfg.blue_light_mode.as_str(), "sunset_sunrise" | "realtime")
 }
 
+/// Inside the night window now (the auto colour mode's dark half).
+fn night_now(cfg: &Config, location: Option<(f64, f64)>, t: &LocalTime) -> bool {
+    let (start, end) = night_window(cfg, location, t);
+    is_night(t.minutes, start, end)
+}
+
 fn wants_ip_location(cfg: &Config) -> bool {
-    cfg.blue_light_enabled && is_sun_mode(cfg) && cfg.blue_light_use_ip_location
+    (cfg.blue_light_enabled || cfg.matugen_mode == "auto") && is_sun_mode(cfg) && cfg.blue_light_use_ip_location
 }
 
 fn location_for(cfg: &Config, ip: Option<(f64, f64)>) -> Option<(f64, f64)> {
@@ -271,15 +289,20 @@ pub fn sun_times(lat: f64, lon: f64, t: &LocalTime) -> (f64, f64) {
     (sunset, sunrise)
 }
 
+/// Start and end of the night (minutes after midnight).
+fn night_window(cfg: &Config, location: Option<(f64, f64)>, t: &LocalTime) -> (f64, f64) {
+    match location {
+        Some((lat, lon)) if is_sun_mode(cfg) => sun_times(lat, lon, t),
+        // fixed_time, or sun mode without coordinates: the configured window.
+        _ => (parse_hhmm(&cfg.blue_light_night_start, 22.0 * 60.0), parse_hhmm(&cfg.blue_light_night_end, 6.0 * 60.0)),
+    }
+}
+
 pub fn target_kelvin(cfg: &Config, location: Option<(f64, f64)>, t: &LocalTime) -> u32 {
     if cfg.blue_light_manual_on {
         return cfg.blue_light_night_temp;
     }
-    let (start, end) = match location {
-        Some((lat, lon)) if is_sun_mode(cfg) => sun_times(lat, lon, t),
-        // fixed_time, or sun mode without coordinates: the configured window.
-        _ => (parse_hhmm(&cfg.blue_light_night_start, 22.0 * 60.0), parse_hhmm(&cfg.blue_light_night_end, 6.0 * 60.0)),
-    };
+    let (start, end) = night_window(cfg, location, t);
     temperature_for_time(
         t.minutes,
         start,

@@ -11,25 +11,36 @@ use zbus::MatchRule;
 
 /// Ask the user for a folder. Ok(None) when the dialog was cancelled.
 pub fn pick_folder(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>, String> {
-    Ok(open_file(title, start, true, false, None)?.into_iter().next())
+    Ok(open_file(title, start, true, false, None, None)?.into_iter().next())
 }
 
 /// Ask the user for an audio file. Ok(None) when the dialog was cancelled.
 pub fn pick_audio(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>, String> {
-    Ok(open_file(title, start, false, false, Some(("Audio", "audio/*")))?.into_iter().next())
+    Ok(open_file(title, start, false, false, Some(("Audio", "audio/*")), None)?.into_iter().next())
 }
 
 /// Ask the user for a video file. Ok(None) when the dialog was cancelled.
 pub fn pick_video(title: &str, start: Option<&Path>) -> Result<Option<PathBuf>, String> {
-    Ok(open_file(title, start, false, false, Some(("Videos", "video/*")))?.into_iter().next())
+    Ok(open_file(title, start, false, false, Some(("Videos", "video/*")), None)?.into_iter().next())
 }
 
 /// Pick files to open (several allowed); empty when cancelled.
 pub fn pick_files(title: &str) -> Result<Vec<PathBuf>, String> {
-    open_file(title, None, false, true, None)
+    open_file(title, None, false, true, None, None)
 }
 
-fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool, filter: Option<(&str, &str)>) -> Result<Vec<PathBuf>, String> {
+/// Pick a Prism backup to import. Ok(None) when cancelled.
+pub fn pick_backup(title: &str) -> Result<Option<PathBuf>, String> {
+    Ok(open_file(title, None, false, false, Some(("Prism backups", "application/gzip")), None)?.into_iter().next())
+}
+
+/// Ask where to save a file, suggesting `name`. Ok(None) when cancelled.
+pub fn save_file(title: &str, name: &str) -> Result<Option<PathBuf>, String> {
+    Ok(open_file(title, None, false, false, None, Some(name))?.into_iter().next())
+}
+
+/// OpenFile, or SaveFile when `save_as` names the suggested file.
+fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool, filter: Option<(&str, &str)>, save_as: Option<&str>) -> Result<Vec<PathBuf>, String> {
     let e = |e: zbus::Error| e.to_string();
     let conn = Connection::session().map_err(e)?;
     let token = format!(
@@ -52,8 +63,12 @@ fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool,
 
     let mut opts: HashMap<&str, Value> = HashMap::new();
     opts.insert("handle_token", Value::from(token.as_str()));
-    opts.insert("directory", Value::from(directory));
-    opts.insert("multiple", Value::from(multiple));
+    if let Some(name) = save_as {
+        opts.insert("current_name", Value::from(name));
+    } else {
+        opts.insert("directory", Value::from(directory));
+        opts.insert("multiple", Value::from(multiple));
+    }
     opts.insert("modal", Value::from(true));
     if let Some((name, mime)) = filter {
         // A list of (name, [(1 = MIME type, pattern)]).
@@ -69,7 +84,7 @@ fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool,
         Some("org.freedesktop.portal.Desktop"),
         "/org/freedesktop/portal/desktop",
         Some("org.freedesktop.portal.FileChooser"),
-        "OpenFile",
+        if save_as.is_some() { "SaveFile" } else { "OpenFile" },
         &("", title, opts),
     )
     .map_err(e)?;

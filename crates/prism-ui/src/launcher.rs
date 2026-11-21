@@ -103,7 +103,7 @@ impl Query {
                 Some(false)
             }
             (RIGHT, _) => {
-                self.caret = (self.caret + 1).min(self.len());
+                self.caret = if ctrl { self.word_end() } else { (self.caret + 1).min(self.len()) };
                 Some(false)
             }
             (HOME, _) => {
@@ -136,9 +136,31 @@ impl Query {
         i
     }
 
-    /// Text before the caret (for placing it).
-    pub fn before_caret(&self) -> &str {
-        &self.text[..self.byte(self.caret)]
+    fn word_end(&self) -> usize {
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut i = self.caret;
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// Caret position (char index).
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
+
+    /// Put the caret at char index `ci` (a click in the field).
+    pub fn set_caret(&mut self, ci: usize) {
+        self.caret = ci.min(self.len());
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.caret = 0;
     }
 }
 
@@ -159,6 +181,19 @@ pub fn search_icon(cr: *mut Cairo, x: f64, y: f64, size: f64, color: Rgba, strok
 /// Draw the query text (or placeholder) and caret, vertically centred in `h`.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_query(cr: *mut Cairo, q: &Query, placeholder: &str, x: f64, y: f64, w: f64, h: f64, font: &str, color: Rgba, placeholder_color: Rgba) {
+    draw_text_caret(cr, &q.text, Some(q.caret), placeholder, x, y, w, h, font, color, placeholder_color);
+}
+
+/// How far text scrolls left so the caret (at `before` px) stays inside `w`.
+fn text_shift(before: f64, w: f64) -> f64 {
+    (before - (w - 2.0)).max(0.0)
+}
+
+/// One line of text (or the placeholder) with a blinking caret at char `caret` (None: no
+/// caret), vertically centred in `h` and scrolled so the caret stays visible. `text` may be a
+/// masked form of the value (one dot per char).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_text_caret(cr: *mut Cairo, text: &str, caret: Option<usize>, placeholder: &str, x: f64, y: f64, w: f64, h: f64, font: &str, color: Rgba, placeholder_color: Rgba) {
     let (_, th) = cb::measure_pango_text(cr, "Ag", font, 4000, Some(1));
     let ty = y + ((h - th as f64) / 2.0).round();
     unsafe {
@@ -166,17 +201,45 @@ pub fn draw_query(cr: *mut Cairo, q: &Query, placeholder: &str, x: f64, y: f64, 
         cb::cairo_rectangle(cr, x, y, w + 2.0, h);
         cb::cairo_clip(cr);
     }
-    if q.text.is_empty() {
+    let on = caret.is_some() && crate::ui::caret_on();
+    if text.is_empty() {
         cb::draw_pango_text(cr, x, ty, placeholder, font, placeholder_color, Some(w as i32));
-        cb::fill_rounded_rect(cr, x, ty + 1.0, 1.5, th as f64 - 2.0, 0.0, color);
+        if on {
+            cb::fill_rounded_rect(cr, x, ty + 1.0, 1.5, th as f64 - 2.0, 0.0, color);
+        }
     } else {
-        let (bw, _) = cb::measure_pango_text(cr, q.before_caret(), font, 100_000, Some(1));
-        // Scroll left when the caret would leave the field.
-        let shift = (bw as f64 - (w - 2.0)).max(0.0);
-        cb::draw_pango_text(cr, x - shift, ty, &q.text, font, color, None);
-        cb::fill_rounded_rect(cr, x - shift + bw as f64, ty + 1.0, 1.5, th as f64 - 2.0, 0.0, color);
+        let ci = caret.unwrap_or(0);
+        let before = &text[..text.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(text.len())];
+        let (bw, _) = cb::measure_pango_text(cr, before, font, 100_000, Some(1));
+        let shift = if caret.is_some() { text_shift(bw as f64, w) } else { 0.0 };
+        cb::draw_pango_text(cr, x - shift, ty, text, font, color, if caret.is_some() { None } else { Some(w as i32) });
+        if on {
+            cb::fill_rounded_rect(cr, x - shift + bw as f64, ty + 1.0, 1.5, th as f64 - 2.0, 0.0, color);
+        }
     }
     unsafe { cb::cairo_restore(cr) };
+}
+
+/// The char index nearest to `px` in text drawn by `draw_text_caret` at `x` (width `w`) with
+/// the caret at `caret`: where a click puts the caret.
+pub fn text_index_at(text: &str, caret: usize, font: &str, x: f64, w: f64, px: f64) -> usize {
+    unsafe {
+        let surf = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, 1, 1);
+        let cr = cb::cairo_create(surf);
+        let width = |s: &str| cb::measure_pango_text(cr, s, font, 100_000, Some(1)).0 as f64;
+        let before = &text[..text.char_indices().nth(caret).map(|(b, _)| b).unwrap_or(text.len())];
+        let target = px - x + text_shift(width(before), w);
+        let mut best = (0, f64::MAX);
+        for (ci, b) in text.char_indices().map(|(b, _)| b).chain(std::iter::once(text.len())).enumerate() {
+            let d = (width(&text[..b]) - target).abs();
+            if d < best.1 {
+                best = (ci, d);
+            }
+        }
+        cb::cairo_destroy(cr);
+        cb::cairo_surface_destroy(surf);
+        best.0
+    }
 }
 
 /// Themed icon at (x, y) in a `size` box; falls back to `fallback`.

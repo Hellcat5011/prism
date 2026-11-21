@@ -5,6 +5,7 @@ use std::process::{exit, Command};
 
 mod apps_watch;
 mod background;
+mod cal_events;
 mod caffeinate;
 mod displays;
 mod capture;
@@ -27,9 +28,11 @@ mod picker;
 mod privacy;
 mod weather;
 mod pw_watch;
+mod meters;
 mod quick;
 mod xdp;
 mod rec_indicator;
+mod downloads_pill;
 mod nm_agent;
 mod polkit_agent;
 mod power;
@@ -39,6 +42,9 @@ mod settings;
 mod shadow;
 mod spotlight;
 mod toasts;
+mod trim;
+mod compedit;
+mod guide;
 mod status;
 mod status_tray;
 mod window_watch;
@@ -119,6 +125,12 @@ enum UiMode {
     Phone,
     /// Password / secret prompt for the polkit and NetworkManager agents (prompt.rs).
     Prompt,
+    /// Trim a recording (trim.rs).
+    Trim,
+    /// Shortcuts and Window Rules editor (compedit.rs).
+    CompEdit,
+    /// First-time setup guide (guide.rs).
+    Guide,
 }
 
 struct UiState {
@@ -221,6 +233,8 @@ struct UiState {
     content_dirty: bool,
     /// The last content render was mid in-card animation (spotlight height, NC tiles...).
     content_animating: bool,
+    /// Blink phase of the text caret in the last rendered content (None: no caret shown).
+    caret: Option<u64>,
     card_cache: Option<(*mut cairo_backend::CairoSurface, i32, i32)>,
     /// Current scrim level (0..1 of dim_opacity); -1 = nothing attached yet.
     scrim_shown: f64,
@@ -567,6 +581,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
             // Hidden Settings (polkit dialog up): the scrim must not close it on a click.
             wl_pointer::Event::Button { .. } if state.settings_hidden() => {}
             wl_pointer::Event::Button { button, state: btn_state, .. } => {
+                ui::caret_reset();
                 match btn_state {
                     WEnum::Value(wl_pointer::ButtonState::Pressed) if state.wallpaper.is_some() => {
                         state.pointer_down = true;
@@ -623,7 +638,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                             let is_modal = matches!(
                                 state.mode,
                                 UiMode::Launcher | UiMode::Spotlight | UiMode::Clipboard | UiMode::Emoji |
-                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt
+                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide
                             );
 
                             if is_modal && cw > 0 && ch > 0
@@ -782,6 +797,7 @@ impl UiState {
         // layout actually produces (respecting Shift, AltGr, non-US layouts, wtype).
         let raw_key = key;
         let (key, typed) = translate_key(state.xkb_state.as_ref(), key);
+        ui::caret_reset();
         if state.wallpaper.is_some() {
             let style = state.style.clone();
             let eff = state.wallpaper.as_mut().unwrap().key(key, &style);
@@ -819,7 +835,8 @@ impl UiState {
         }
         if let Some(v) = state.nc.as_mut() {
             let special = if typed.is_none() { key } else { 0 };
-            let eff = v.key(special, typed);
+            let ctrl = state.xkb_state.as_ref().is_some_and(|x| x.mod_name_is_active(xkbcommon::xkb::MOD_NAME_CTRL, xkbcommon::xkb::STATE_MODS_EFFECTIVE));
+            let eff = v.key(special, typed, ctrl);
             state.apply_nc_effect(eff, qh);
             return;
         }
@@ -1190,6 +1207,9 @@ impl UiState {
             }
             UiMode::Emoji => centered(emoji::CARD_W, emoji::CARD_H),
             UiMode::Notes => centered(notes::CARD_W, notes::CARD_H),
+            UiMode::Trim => centered(trim::CARD_W, trim::CARD_H),
+            UiMode::CompEdit => centered(compedit::CARD_W.min(sw - 40.0), compedit::CARD_H.min(sh - 40.0)),
+            UiMode::Guide => centered(guide::CARD_W.min(sw - 40.0), guide::CARD_H.min(sh - 40.0)),
             // Hidden for a polkit dialog: a 1x1 transparent surface (a full-size transparent
             // card would still show the compositor blur).
             UiMode::Settings if self.settings_hidden() => (0, 0, 1, 1),
@@ -1487,6 +1507,9 @@ impl UiState {
             cairo_backend::cairo_save(cr);
             let content_t0 = std::time::Instant::now();
             ui::take_anim_pending(); // only what is drawn in this frame counts
+            if redraw_content {
+                ui::take_caret_drawn();
+            }
 
             if redraw_content {
             match &self.mode {
@@ -1518,7 +1541,7 @@ impl UiState {
                         is_animating |= v.animating();
                     }
                 }
-                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt => {
+                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide => {
                     let card = self.design_card();
                     self.card_bounds = self.desired_card_rect();
                     let (style, theme) = (self.style.clone(), self.theme.clone());
@@ -1552,6 +1575,7 @@ impl UiState {
             if redraw_content {
                 self.content_dirty = false;
                 self.content_animating = use_cache && is_animating;
+                self.caret = ui::take_caret_drawn().then(ui::caret_phase);
             }
 
             let mut pose = Pose::REST;
@@ -1852,6 +1876,9 @@ fn mode_from_name(name: &str) -> Option<UiMode> {
         "keybinds" => UiMode::Keybinds,
         "notes" => UiMode::Notes,
         "phone" => UiMode::Phone,
+        "trim" => UiMode::Trim,
+        "shortcuts" | "window-rules" => UiMode::CompEdit,
+        "setup" | "guide" => UiMode::Guide,
         "launcher" => UiMode::Launcher,
         "desktop" => UiMode::Desktop,
         "desktop-edit" | "edit-mode" => UiMode::DesktopEdit,
@@ -1872,6 +1899,9 @@ fn mode_name(mode: &UiMode) -> &'static str {
         UiMode::Notes => "notes",
         UiMode::Phone => "phone",
         UiMode::Prompt => "prompt",
+        UiMode::Trim => "trim",
+        UiMode::CompEdit => "shortcuts",
+        UiMode::Guide => "setup",
         UiMode::NotificationCenter => "notif-center",
         UiMode::Osd { .. } => "osd",
         UiMode::Desktop => "desktop",
@@ -1929,7 +1959,7 @@ impl Overlay {
                 &style,
             )),
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt => Some(Transition::enter(Motion::Scale, &style)),
+            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
         // Rows of the new card start hidden; the entrance restarts with its first shown frame.
@@ -2008,6 +2038,7 @@ impl Overlay {
             closing: false,
             content_dirty: true,
             content_animating: false,
+            caret: None,
             card_cache: None,
             scrim_shown: 0.0,
             scrim_pending: None,
@@ -2033,6 +2064,9 @@ impl Overlay {
             UiMode::Keybinds => state.view = Some(Box::new(keybinds::KeybindsView::new(waker.clone()))),
             UiMode::Notes => state.view = Some(Box::new(notes::NotesView::new())),
             UiMode::Phone => state.view = Some(Box::new(phone::PhoneView::new(waker.clone()))),
+            UiMode::Trim => state.view = Some(Box::new(trim::TrimView::new(waker.clone()))),
+            UiMode::CompEdit => state.view = Some(Box::new(compedit::CompEditView::new())),
+            UiMode::Guide => state.view = Some(Box::new(guide::GuideView::new())),
             UiMode::Prompt => match prompt::next_view() {
                 Some(v) => state.view = Some(Box::new(v)),
                 None => return Err("no prompt queued".into()),
@@ -2047,7 +2081,7 @@ impl Overlay {
         let uses_card_surface = matches!(
             state.mode,
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt
+                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide
         );
         if uses_card_surface {
             // The power menu blurs the whole screen behind its dim. Mapped first so it stays below
@@ -2248,6 +2282,15 @@ impl Overlay {
         if let Some(d) = state.view.as_ref().and_then(|v| v.wake_in()) {
             let ms = (d.as_millis() as i32).max(1);
             timeout_ms = if timeout_ms < 0 { ms } else { timeout_ms.min(ms) };
+        }
+        // A text caret blinks: re-render when its phase changes.
+        if let Some(drawn) = state.caret {
+            if ui::caret_phase() != drawn {
+                state.render_and_commit(&qh);
+            } else if let Some(d) = ui::caret_wake_in() {
+                let ms = (d.as_millis() as i32).max(1);
+                timeout_ms = if timeout_ms < 0 { ms } else { timeout_ms.min(ms) };
+            }
         }
         if state.exit_requested {
             return None;
@@ -2468,6 +2511,11 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut portal_shot: Option<std::sync::mpsc::Sender<Option<prism_capture::Image>>> = None;
     let mut portal_color: Option<std::sync::mpsc::Sender<Option<(u8, u8, u8)>>> = None;
     let mut indicator: Option<rec_indicator::Indicator> = None;
+    let mut dl_pill: Option<downloads_pill::Pill> = None;
+    // Focus's automatic silent mode as last sent to prismd.
+    let mut auto_silent = false;
+    // A fresh install (no config yet): the setup guide opens shortly after start.
+    let mut guide_at = (daemon && !Config::load().setup_done).then(|| std::time::Instant::now() + std::time::Duration::from_secs(4));
     // Microphone / camera / screen-share pill (privacy.rs), checked when PipeWire or the
     // portal change.
     let mut privacy_pill: Option<privacy::Indicator> = None;
@@ -2603,6 +2651,19 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 }
                 continue;
             }
+            if let prism_common::UiCommand::Downloads(list) = &cmd {
+                match (dl_pill.as_mut(), list.is_empty()) {
+                    (Some(p), false) => p.set(list.clone()),
+                    (Some(_), true) => {
+                        if let Some(p) = dl_pill.take() {
+                            p.teardown();
+                        }
+                    }
+                    (None, false) => dl_pill = downloads_pill::Pill::open(&conn, &globals, list.clone(), indicator.is_some()),
+                    (None, true) => {}
+                }
+                continue;
+            }
             if let prism_common::UiCommand::Recording(status) = &cmd {
                 if let Some(i) = indicator.take() {
                     i.teardown();
@@ -2687,13 +2748,39 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 timeout = t;
             }
         }
+        if let Some(at) = guide_at {
+            let now = std::time::Instant::now();
+            if now >= at {
+                guide_at = None;
+                handle_command(prism_common::UiCommand::Open("setup".into()), &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
+            } else {
+                let ms = (at - now).as_millis() as i32 + 1;
+                if timeout < 0 || ms < timeout {
+                    timeout = ms;
+                }
+            }
+        }
+        // Focus: silent while the screen is shared or a fullscreen window has focus.
+        if let Some(d) = desktop.as_ref() {
+            let c = d.config();
+            let want = (c.focus_on_screen_share && !xdp::casts().is_empty()) || (c.focus_on_fullscreen && tracker.as_ref().is_some_and(|t| t.focused_fullscreen()));
+            if want != auto_silent {
+                auto_silent = want;
+                std::thread::spawn(move || {
+                    let _ = prism_common::ipc::request(&prism_common::IpcCommand::Notif(prism_common::ipc::NotifAction::AutoSilent(want)));
+                });
+            }
+        }
         if let Some(t) = background.as_mut().and_then(|b| b.tick()) {
             if timeout < 0 || t < timeout {
                 timeout = t;
             }
         }
         if let Some(s) = shooter.as_mut() {
-            s.tick();
+            let t = s.tick();
+            if t >= 0 && (timeout < 0 || t < timeout) {
+                timeout = t;
+            }
         }
         if let Some(i) = indicator.as_mut() {
             let t = i.tick();
@@ -2715,6 +2802,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             }
         }
         if let Some(p) = privacy_pill.as_mut() {
+            p.tick();
+        }
+        if let Some(p) = dl_pill.as_mut() {
             p.tick();
         }
         if let Some(s) = switcher.as_mut() {
@@ -2830,6 +2920,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         if let Some(i) = indicator.as_mut() {
             ok &= i.dispatch();
         }
+        if let Some(p) = dl_pill.as_mut() {
+            ok &= p.dispatch();
+        }
         if let Some(p) = privacy_pill.as_mut() {
             ok &= p.dispatch();
         }
@@ -2902,6 +2995,9 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         if let Some(i) = indicator.as_mut() {
             i.dispatch();
         }
+        if let Some(p) = dl_pill.as_mut() {
+            p.dispatch();
+        }
         if let Some(p) = privacy_pill.as_mut() {
             p.dispatch();
         }
@@ -2945,6 +3041,17 @@ fn handle_command(
             }
         }
     };
+    let cmd = match cmd {
+        UiCommand::Trim(path) => {
+            trim::set_pending(path.into());
+            UiCommand::Open("trim".into())
+        }
+        UiCommand::Open(name) | UiCommand::Toggle(name) if name == "window-rules" || name == "shortcuts" => {
+            compedit::open_on_rules(name == "window-rules");
+            UiCommand::Open("shortcuts".into())
+        }
+        c => c,
+    };
     match cmd {
         UiCommand::Toggle(name) => {
             let canonical = mode_from_name(&name).map(|m| mode_name(&m)).unwrap_or("");
@@ -2984,7 +3091,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Wallpaper(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Downloads(_) | UiCommand::Trim(_) | UiCommand::Wallpaper(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {
