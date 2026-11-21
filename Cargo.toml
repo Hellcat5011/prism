@@ -4,6 +4,7 @@ members = [
     "crates/prism-common",
     "crates/prism-capture",
     "crates/prism-ctl",
+    "crates/prism-download",
     "crates/prism-lock",
     "crates/prism-phone",
     "crates/prism-rec",

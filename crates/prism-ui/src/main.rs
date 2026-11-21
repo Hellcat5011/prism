@@ -43,6 +43,8 @@ mod shadow;
 mod spotlight;
 mod toasts;
 mod trim;
+mod download_confirm;
+mod downloads_card;
 mod compedit;
 mod guide;
 mod status;
@@ -127,6 +129,10 @@ enum UiMode {
     Prompt,
     /// Trim a recording (trim.rs).
     Trim,
+    /// Confirm a browser download (download_confirm.rs).
+    DownloadConfirm,
+    /// Prism's downloads (downloads_card.rs).
+    Downloads,
     /// Shortcuts and Window Rules editor (compedit.rs).
     CompEdit,
     /// First-time setup guide (guide.rs).
@@ -638,7 +644,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                             let is_modal = matches!(
                                 state.mode,
                                 UiMode::Launcher | UiMode::Spotlight | UiMode::Clipboard | UiMode::Emoji |
-                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide
+                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide
                             );
 
                             if is_modal && cw > 0 && ch > 0
@@ -1209,6 +1215,8 @@ impl UiState {
             UiMode::Emoji => centered(emoji::CARD_W, emoji::CARD_H),
             UiMode::Notes => centered(notes::CARD_W, notes::CARD_H),
             UiMode::Trim => centered(trim::CARD_W, trim::CARD_H),
+            UiMode::DownloadConfirm => centered(download_confirm::CARD_W, download_confirm::CARD_H),
+            UiMode::Downloads => centered(downloads_card::CARD_W, downloads_card::CARD_H),
             UiMode::CompEdit => centered(compedit::CARD_W.min(sw - 40.0), compedit::CARD_H.min(sh - 40.0)),
             UiMode::Guide => centered(guide::CARD_W.min(sw - 40.0), guide::CARD_H.min(sh - 40.0)),
             // Hidden for a polkit dialog: a 1x1 transparent surface (a full-size transparent
@@ -1542,7 +1550,7 @@ impl UiState {
                         is_animating |= v.animating();
                     }
                 }
-                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide => {
+                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide => {
                     let card = self.design_card();
                     self.card_bounds = self.desired_card_rect();
                     let (style, theme) = (self.style.clone(), self.theme.clone());
@@ -1878,6 +1886,8 @@ fn mode_from_name(name: &str) -> Option<UiMode> {
         "notes" => UiMode::Notes,
         "phone" => UiMode::Phone,
         "trim" => UiMode::Trim,
+        "download-confirm" => UiMode::DownloadConfirm,
+        "downloads" => UiMode::Downloads,
         "shortcuts" | "window-rules" => UiMode::CompEdit,
         "setup" | "guide" => UiMode::Guide,
         "launcher" => UiMode::Launcher,
@@ -1901,6 +1911,8 @@ fn mode_name(mode: &UiMode) -> &'static str {
         UiMode::Phone => "phone",
         UiMode::Prompt => "prompt",
         UiMode::Trim => "trim",
+        UiMode::DownloadConfirm => "download-confirm",
+        UiMode::Downloads => "downloads",
         UiMode::CompEdit => "shortcuts",
         UiMode::Guide => "setup",
         UiMode::NotificationCenter => "notif-center",
@@ -1960,7 +1972,7 @@ impl Overlay {
                 &style,
             )),
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide => Some(Transition::enter(Motion::Scale, &style)),
+            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
         // Rows of the new card start hidden; the entrance restarts with its first shown frame.
@@ -2066,6 +2078,8 @@ impl Overlay {
             UiMode::Notes => state.view = Some(Box::new(notes::NotesView::new())),
             UiMode::Phone => state.view = Some(Box::new(phone::PhoneView::new(waker.clone()))),
             UiMode::Trim => state.view = Some(Box::new(trim::TrimView::new(waker.clone()))),
+            UiMode::DownloadConfirm => state.view = Some(Box::new(download_confirm::DownloadConfirmView::new(waker.clone()))),
+            UiMode::Downloads => state.view = Some(Box::new(downloads_card::DownloadsView::new(waker.clone()))),
             UiMode::CompEdit => state.view = Some(Box::new(compedit::CompEditView::new())),
             UiMode::Guide => state.view = Some(Box::new(guide::GuideView::new(waker.clone()))),
             UiMode::Prompt => match prompt::next_view() {
@@ -2082,7 +2096,7 @@ impl Overlay {
         let uses_card_surface = matches!(
             state.mode,
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::CompEdit | UiMode::Guide
+                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide
         );
         if uses_card_surface {
             // The power menu blurs the whole screen behind its dim. Mapped first so it stays below
@@ -3069,6 +3083,10 @@ fn handle_command(
             trim::set_pending(path.into());
             UiCommand::Open("trim".into())
         }
+        UiCommand::DownloadConfirm(ask) => {
+            download_confirm::set_pending(ask);
+            UiCommand::Open("download-confirm".into())
+        }
         UiCommand::Search(text) => {
             spotlight::set_pending_query(text);
             waker.wake();
@@ -3124,7 +3142,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Downloads(_) | UiCommand::DownloadDone(_) | UiCommand::Trim(_) | UiCommand::Wallpaper(_) | UiCommand::Search(_) | UiCommand::SettingsTab(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Downloads(_) | UiCommand::DownloadDone(_) | UiCommand::Trim(_) | UiCommand::Wallpaper(_) | UiCommand::Search(_) | UiCommand::SettingsTab(_) | UiCommand::DownloadConfirm(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

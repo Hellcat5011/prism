@@ -17,7 +17,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/prism"
-BINARIES=(prismd prism-ui prism-ctl prism-lock prism-phoned prism-rec prism-video)
+BINARIES=(prismd prism-ui prism-ctl prism-native-host prism-lock prism-phoned prism-rec prism-video)
 
 GREETER=ask
 YES=0
@@ -178,6 +178,8 @@ gtk-update-icon-cache -q -t "$DATA_HOME/icons/hicolor" 2>/dev/null || true
 install -Dm644 "$SCRIPT_DIR/prism-settings.desktop" "$DATA_HOME/applications/prism-settings.desktop"
 # man finds ~/.local/share/man through ~/.local/bin on PATH.
 install -Dm644 "$REPO_DIR/man/prism-ctl.1" "$DATA_HOME/man/man1/prism-ctl.1"
+# prismd registers prism-native-host (the Prism Downloads Firefox extension's helper) with the
+# installed browsers itself when it starts (dl.rs register_native_host).
 install -Dm644 "$SCRIPT_DIR/portal/prism.portal" "$DATA_HOME/xdg-desktop-portal/portals/prism.portal"
 install -Dm644 "$SCRIPT_DIR/portal/org.freedesktop.impl.portal.desktop.prism.service" "$DATA_HOME/dbus-1/services/org.freedesktop.impl.portal.desktop.prism.service"
 install -Dm644 "$SCRIPT_DIR/portal/xdg-desktop-portal-prism.conf" "$SYSTEMD_USER_DIR/xdg-desktop-portal.service.d/prism.conf"

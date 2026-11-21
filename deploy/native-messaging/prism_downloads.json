@@ -1,0 +1,7 @@
+{
+  "name": "prism_downloads",
+  "description": "Prism download manager (for the Prism Downloads extension)",
+  "path": "@BIN_DIR@/prism-native-host",
+  "type": "stdio",
+  "allowed_extensions": ["downloads@prism-shell"]
+}

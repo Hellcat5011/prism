@@ -66,6 +66,8 @@ pub enum UiCommand {
     Wallpaper(std::path::PathBuf),
     /// Open search with this text typed in (replacing any text it has).
     Search(String),
+    /// Ask before a browser download starts (download_confirm.rs).
+    DownloadConfirm(DownloadAsk),
     /// Open Settings on this tab (index into `SETTINGS_TABS`).
     SettingsTab(usize),
 }
@@ -187,6 +189,10 @@ pub enum IpcCommand {
     Notes(String),
     /// Open the first-time setup guide.
     Setup,
+
+    /// Prism's download manager (prismd `dl.rs`).
+    #[serde(rename = "download")]
+    Download(DownloadAction),
 
     /// Timer and stopwatch.
     #[serde(rename = "timer")]
@@ -502,8 +508,99 @@ pub enum SettingsAction {
     OpenTab(u32),
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadAction {
+    /// Start a download (or, with `ask`, offer it in the confirmation card first); answers its id.
+    Add(DownloadRequest),
+    /// The confirmation card's Download: start it, with this name and folder when given.
+    Start { id: u64, name: Option<String>, dir: Option<String> },
+    /// The confirmation card closed without Download: forget it if it still waits.
+    Decline(u64),
+    Pause(u64),
+    /// Continue a paused or failed download.
+    Resume(u64),
+    /// Stop and delete what was fetched; the entry stays as cancelled.
+    Cancel(u64),
+    /// Forget an entry (cancels it first when it runs). The file stays.
+    Remove(u64),
+    /// Every download, newest first, as JSON `[DownloadInfo]`.
+    List,
+    /// Forget finished, failed and cancelled entries.
+    Clear,
+    /// Open a finished download with its default app.
+    Open(u64),
+    /// Show a download in the file manager.
+    Show(u64),
+    /// The Downloads card: "toggle", "open" or "close".
+    Card(String),
+}
+
+/// A download as the browser (or a script) would fetch it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct DownloadRequest {
+    pub url: String,
+    #[serde(default)]
+    pub referer: Option<String>,
+    /// `Cookie` header for the URL.
+    #[serde(default)]
+    pub cookie: Option<String>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    /// File name to use instead of the server's.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Folder instead of `download_dir`.
+    #[serde(default)]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Show the confirmation card first (browser downloads; Settings `download_confirm`).
+    #[serde(default)]
+    pub ask: bool,
+    /// "hls": `url` is an HLS playlist, saved as one MP4. Empty: a plain file.
+    #[serde(default)]
+    pub kind: String,
+    /// HLS: the variant playlist to fetch from the master playlist at `url` (else the best).
+    #[serde(default)]
+    pub variant: Option<String>,
+}
+
+/// What the confirmation card shows (prismd to prism-ui).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct DownloadAsk {
+    pub id: u64,
+    pub name: String,
+    pub size: Option<u64>,
+    pub url: String,
+    /// The folder it would go to.
+    pub dir: String,
+    /// The server could not be asked about the file (the card says so; it can still start).
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct DownloadInfo {
+    pub id: u64,
+    /// File name (final, or the one it will get).
+    pub name: String,
+    /// Full path once known.
+    pub path: String,
+    pub url: String,
+    /// queued, probing, running, paused, done, failed, cancelled.
+    pub state: String,
+    pub done: u64,
+    pub size: Option<u64>,
+    /// Bytes per second now.
+    pub rate: u64,
+    pub connections: u32,
+    pub error: Option<String>,
+    /// Unix seconds.
+    pub added: i64,
+}
+
 /// The Settings card's tabs, in order (prism-ui draws them; prism-ctl resolves names).
-pub const SETTINGS_TABS: [&str; 16] = ["Appearance", "Wallpaper", "Desktop", "Bar", "Dock", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "System"];
+pub const SETTINGS_TABS: [&str; 17] = ["Appearance", "Wallpaper", "Desktop", "Bar", "Dock", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "Downloads", "System"];
 
 /// A Settings tab by name (case, spaces and hyphens ignored; a unique prefix is enough) or by
 /// its number counted from 1.
@@ -594,14 +691,15 @@ mod tests {
     #[test]
     fn settings_tab_names() {
         assert_eq!(settings_tab("1"), Some(0));
-        assert_eq!(settings_tab("16"), Some(15));
+        assert_eq!(settings_tab("17"), Some(16));
         assert_eq!(settings_tab("0"), None);
-        assert_eq!(settings_tab("17"), None);
+        assert_eq!(settings_tab("18"), None);
         assert_eq!(settings_tab("lock-screen"), Some(8));
         assert_eq!(settings_tab("Lock Screen"), Some(8));
         assert_eq!(settings_tab("wall"), Some(1));
         assert_eq!(settings_tab("dis"), Some(11));
-        // "D" is Desktop, Dock or Display; "s" is Search or System.
+        assert_eq!(settings_tab("down"), Some(15));
+        // "D" is Desktop, Dock, Display or Downloads; "s" is Search or System.
         assert_eq!(settings_tab("d"), None);
         assert_eq!(settings_tab("s"), None);
         assert_eq!(settings_tab(""), None);
@@ -718,4 +816,7 @@ pub struct DownloadProgress {
     /// How far along (0 to 1) when the browser says (its dock progress), else unknown.
     #[serde(default)]
     pub progress: Option<f64>,
+    /// Prism's own downloads (dl.rs): the id for `prism-ctl download cancel`.
+    #[serde(default)]
+    pub id: Option<u64>,
 }

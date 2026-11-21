@@ -44,6 +44,39 @@ static LAUNCHER: std::sync::Mutex<Vec<(String, f64, Instant)>> = std::sync::Mute
 /// Dock progress older than this is not trusted (the app may have quit mid-download).
 const LAUNCHER_STALE: Duration = Duration::from_secs(10);
 
+/// Prism's own downloads for the pill (dl.rs), shown next to the browsers'.
+static ENGINE: std::sync::Mutex<Vec<DownloadProgress>> = std::sync::Mutex::new(Vec::new());
+/// Written when ENGINE changes, so the watcher shows it at once.
+static WAKE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// Files Prism's downloads just put in place: never announced a second time as a browser's.
+static OWN: std::sync::Mutex<Vec<(PathBuf, Instant)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_engine(list: Vec<DownloadProgress>) {
+    let mut e = ENGINE.lock().unwrap();
+    if *e == list {
+        return;
+    }
+    let appeared = e.is_empty() && !list.is_empty();
+    *e = list;
+    drop(e);
+    let fd = WAKE_FD.load(Ordering::SeqCst);
+    if appeared && fd >= 0 {
+        let one: u64 = 1;
+        unsafe { libc::write(fd, &one as *const u64 as *const libc::c_void, 8) };
+    }
+}
+
+/// Call before moving a finished download of Prism's into place.
+pub fn own(path: &Path) {
+    let mut o = OWN.lock().unwrap();
+    o.retain(|(_, t)| t.elapsed() < Duration::from_secs(30));
+    o.push((path.to_path_buf(), Instant::now()));
+}
+
+fn is_own(path: &Path) -> bool {
+    OWN.lock().unwrap().iter().any(|(p, t)| p == path && t.elapsed() < Duration::from_secs(30))
+}
+
 /// Follow the LauncherEntry `Update` signals on the session bus.
 fn watch_launchers() {
     use zbus::message::Type as MsgType;
@@ -100,16 +133,15 @@ pub fn apply(cfg: &Config) {
     ENABLED.store(cfg.downloads_watch, Ordering::SeqCst);
     *EXTRA.lock().unwrap() = cfg.downloads_extra_dirs.clone();
     ROOTS_DIRTY.store(true, Ordering::SeqCst);
-    if cfg.downloads_watch {
-        START.call_once(|| {
-            std::thread::Builder::new().name("prism-downloads".into()).spawn(run).ok();
-            std::thread::Builder::new().name("prism-dock-progress".into()).spawn(watch_launchers).ok();
-        });
-    }
+    // Runs even with the watcher off: it also shows Prism's own downloads in the pill.
+    START.call_once(|| {
+        std::thread::Builder::new().name("prism-downloads".into()).spawn(run).ok();
+        std::thread::Builder::new().name("prism-dock-progress".into()).spawn(watch_launchers).ok();
+    });
 }
 
 /// XDG_DOWNLOAD_DIR from user-dirs.dirs, else ~/Downloads.
-fn download_dir() -> PathBuf {
+pub fn download_dir() -> PathBuf {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let dirs = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).unwrap_or_default();
     for line in dirs.lines() {
@@ -157,6 +189,10 @@ fn classify(roots: &Roots, path: &Path) -> Kind {
         return Kind::Ignore;
     }
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    // Prism's own downloads report themselves (dl.rs).
+    if ext == "prismdl" || is_own(path) {
+        return Kind::Ignore;
+    }
     if TEMP_EXT.contains(&ext.as_str()) {
         return Kind::Temp(path.to_path_buf());
     }
@@ -279,7 +315,7 @@ impl Active {
             (Some(a), Some(b)) if b.0 > a.0 => ((b.1.saturating_sub(a.1)) as f64 / (b.0 - a.0).as_secs_f64()) as u64,
             _ => 0,
         };
-        DownloadProgress { name: self.name.clone(), bytes, rate, progress: None }
+        DownloadProgress { name: self.name.clone(), bytes, rate, progress: None, id: None }
     }
 }
 
@@ -422,6 +458,7 @@ impl Watcher {
         if !ENABLED.load(Ordering::SeqCst) {
             list.clear();
         }
+        list.extend(ENGINE.lock().unwrap().iter().cloned());
         if list != self.shown {
             self.shown = list.clone();
             let _ = crate::send_ui(&UiCommand::Downloads(list));
@@ -435,6 +472,8 @@ fn run() {
         eprintln!("[prismd/downloads] inotify unavailable");
         return;
     }
+    let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    WAKE_FD.store(wake, Ordering::SeqCst);
     let mut w = Watcher { fd, roots: Roots::default(), wds: HashMap::new(), active: HashMap::new(), ended: Vec::new(), arrived: Vec::new(), shown: Vec::new() };
     let mut buf = vec![0u8; 16 * 1024];
     let mut last_sample = Instant::now();
@@ -445,11 +484,17 @@ fn run() {
             last_roots = Some(Instant::now());
             w.set_roots(find_roots());
         }
-        let busy = !w.active.is_empty() || !w.shown.is_empty();
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let engine = !ENGINE.lock().unwrap().is_empty();
+        let busy = !w.active.is_empty() || !w.shown.is_empty() || engine;
+        let mut pfds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: wake, events: libc::POLLIN, revents: 0 }];
         let timeout = if busy { 1000 } else { 5_000 };
-        let r = unsafe { libc::poll(&mut pfd, 1, timeout) };
-        if r > 0 {
+        let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, timeout) };
+        if r > 0 && pfds[1].revents & libc::POLLIN != 0 {
+            let mut v = 0u64;
+            unsafe { libc::read(wake, &mut v as *mut u64 as *mut libc::c_void, 8) };
+            last_sample = Instant::now() - Duration::from_secs(1);
+        }
+        if r > 0 && pfds[0].revents & libc::POLLIN != 0 {
             let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             let mut off = 0usize;
             let head = std::mem::size_of::<libc::inotify_event>();
@@ -463,43 +508,51 @@ fn run() {
                 off += head + ev.len as usize;
             }
         }
-        if (!w.active.is_empty() || !w.shown.is_empty()) && last_sample.elapsed() >= Duration::from_millis(900) {
+        if (!w.active.is_empty() || !w.shown.is_empty() || !ENGINE.lock().unwrap().is_empty()) && last_sample.elapsed() >= Duration::from_millis(900) {
             last_sample = Instant::now();
             w.sample();
         }
     }
 }
 
-/// "Download finished" with Open and Show in Folder.
+/// A browser's download finished (when the watcher is on).
 fn finished(path: PathBuf) {
-    if !ENABLED.load(Ordering::SeqCst) {
-        return;
+    if ENABLED.load(Ordering::SeqCst) {
+        announce(path);
     }
+}
+
+/// "Download finished" with Open and Show in Folder, and the pill's "Download completed".
+pub fn announce(path: PathBuf) {
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let _ = crate::send_ui(&UiCommand::DownloadDone(name));
     std::thread::spawn(move || {
         let Ok(session) = zbus::blocking::Connection::session() else { return };
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let body = format!("{name}\n{}", human(size_of(&path).unwrap_or(0)));
         let answer = crate::obex::ask_as(&session, "Downloads", "Download finished", &body, "folder-download", &["default", "Open", "open", "Open", "folder", "Show in Folder"], None);
         match answer.as_deref() {
-            Some("open") | Some("default") => {
-                let _ = prism_common::apps::app_command("xdg-open", &[path.to_string_lossy().to_string()]).spawn();
-            }
-            Some("folder") => {
-                // The file manager selects the file when it can (FileManager1), else opens the folder.
-                let uri = format!("file://{}", path.to_string_lossy());
-                let shown = session
-                    .call_method(Some("org.freedesktop.FileManager1"), "/org/freedesktop/FileManager1", Some("org.freedesktop.FileManager1"), "ShowItems", &(vec![uri.as_str()], ""))
-                    .is_ok();
-                if !shown {
-                    let _ = prism_common::apps::app_command("xdg-open", &[folder.to_string_lossy().to_string()]).spawn();
-                }
-            }
+            Some("open") | Some("default") => open_file(&path),
+            Some("folder") => show_in_folder(&path),
             _ => {}
         }
     });
+}
+
+pub fn open_file(path: &Path) {
+    let _ = prism_common::apps::app_command("xdg-open", &[path.to_string_lossy().to_string()]).spawn();
+}
+
+/// The file manager selects the file when it can (FileManager1), else opens the folder.
+pub fn show_in_folder(path: &Path) {
+    let uri = format!("file://{}", path.to_string_lossy());
+    let shown = zbus::blocking::Connection::session()
+        .and_then(|s| s.call_method(Some("org.freedesktop.FileManager1"), "/org/freedesktop/FileManager1", Some("org.freedesktop.FileManager1"), "ShowItems", &(vec![uri.as_str()], "")))
+        .is_ok();
+    if !shown {
+        let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let _ = prism_common::apps::app_command("xdg-open", &[folder.to_string_lossy().to_string()]).spawn();
+    }
 }
 
 /// 1.4 GB, 230 MB, 12 KB.

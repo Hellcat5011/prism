@@ -374,6 +374,22 @@ pub struct Config {
     /// themselves).
     #[serde(default)]
     pub downloads_extra_dirs: Vec<String>,
+    /// Prism's own downloads (prism-ctl download, the Firefox extension): the folder they go
+    /// to; empty = the XDG Downloads folder.
+    #[serde(default)]
+    pub download_dir: String,
+    /// Most connections per download.
+    #[serde(default = "default_download_connections")]
+    pub download_connections: u32,
+    /// Downloads running at once; more wait in the queue.
+    #[serde(default = "default_download_max_active")]
+    pub download_max_active: u32,
+    /// Speed limit over all downloads in KB/s; 0 = none.
+    #[serde(default)]
+    pub download_speed_limit_kb: u32,
+    /// Browser downloads open a card to confirm them (name, folder) before they start.
+    #[serde(default = "default_true")]
+    pub download_confirm: bool,
     /// Stop charging at this percentage (charge_control_end_threshold); 0 = off (100 %).
     #[serde(default)]
     pub battery_charge_limit: u8,
@@ -783,6 +799,8 @@ fn default_section_order() -> String { "apps,folders,files".to_string() }
 fn default_max_folder_results() -> u32 { 10 }
 fn default_dim_opacity() -> f32 { 0.38 }
 fn default_true() -> bool { true }
+fn default_download_connections() -> u32 { 8 }
+fn default_download_max_active() -> u32 { 3 }
 fn default_alignment() -> String { "left".to_string() }
 fn default_session() -> String { "mango".to_string() }
 fn default_window_radius() -> u32 { 16 }
@@ -1106,6 +1124,11 @@ impl Default for Config {
             battery_charge_limit: 0,
             downloads_watch: true,
             downloads_extra_dirs: Vec::new(),
+            download_dir: String::new(),
+            download_connections: 8,
+            download_max_active: 3,
+            download_speed_limit_kb: 0,
+            download_confirm: true,
             setup_done: false,
             replay_enabled: false,
             replay_seconds: default_replay_seconds(),

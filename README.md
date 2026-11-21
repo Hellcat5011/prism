@@ -49,6 +49,16 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 - **Window switcher** (Alt+Tab) with live thumbnails; Settings checks the compositor's own Alt+Tab binding and
   says what to change.
 - **Copy text** from the screen (OCR with tesseract) in the screenshot overlay.
+- **Download manager**: downloads over several connections (added on the fly, fewer when a server limits them),
+  pause and resume even across restarts, a queue and a speed limit (`prism-ctl download`, Settings > Downloads).
+  The **Prism Downloads** Firefox extension (`extension/`) hands browser downloads to it, has a "Download with
+  Prism" link menu and a popup with the list; it talks to Prism through `prism-native-host` (native messaging,
+  no open port). It also finds the videos a page plays (HLS streams with their qualities, video files) and puts
+  a "Download video" button over them, like Brisk; streams are saved as MP4. A card asks to confirm each
+  browser download (name, folder) first. The **Downloads card** (`prism-ctl download toggle`, or click the
+  pill) lists Prism's downloads with their controls. Load the extension from `about:debugging` > This Firefox >
+  Load Temporary Add-on (`extension/manifest.json`); `deploy/package-extension.sh` builds the `.xpi` to have it
+  signed on addons.mozilla.org so it stays installed.
 - **Timer and stopwatch** in the Control Centre (`prism-ctl timer`), **weather** and **notes** desktop widgets,
   **low battery warnings** and **silent mode on a schedule**.
 - **Motion**: cards open and close on springs (and shrink back to the button they were opened from), rows fade in
@@ -176,6 +186,7 @@ Choose a design in Settings > Lock Screen. The greeter can mirror it or use its 
 | `prism-phone` (`prism-phoned`) | Phone sync over the KDE Connect protocol (v8), run by `prismd` while phone sync is on. |
 | `prism-capture` | Screen capture core (`ext-image-copy-capture-v1`, screencopy fallback) shared by `prism-ui` and `prism-rec`. |
 | `prism-rec` | Screen recorder (FFmpeg, PipeWire audio), run by `prismd` only while recording. |
+| `prism-download` | Download engine: segmented HTTP downloads that add connections while they help, with pause and resume. Used by `prismd`'s download manager. |
 | `prism-common` | Shared library: config, theme, IPC types, app/file search, clipboard store, hardware helpers. |
 
 Apps launched from Prism run in their own systemd scope (`app.slice`), so restarting `prismd` never closes them.

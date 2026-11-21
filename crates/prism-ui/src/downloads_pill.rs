@@ -35,6 +35,7 @@ const FADE_S: f64 = 0.45;
 const FINISH_WAIT_S: f64 = 6.0;
 /// Lucide "check".
 const CHECK: &str = "M20 6 9 17l-5-5";
+const CROSS: &str = "M7 7l10 10M17 7 7 17";
 /// Lucide "download".
 const ICON: &str = "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3";
 
@@ -69,6 +70,11 @@ struct State {
     frame_cb: Option<wl_callback::WlCallback>,
     dirty: bool,
     hover: bool,
+    /// Pointer position on the surface.
+    pos: (f64, f64),
+    /// The Cancel button (a download of Prism's own, large layout) and which download it stops.
+    cancel: Option<((f64, f64, f64, f64), u64)>,
+    cancel_lit: f64,
 }
 
 fn human(bytes: u64) -> String {
@@ -168,6 +174,9 @@ impl Pill {
                 frame_cb: None,
                 dirty: true,
                 hover: false,
+                pos: (-1.0, -1.0),
+                cancel: None,
+                cancel_lit: 0.0,
             },
         })
     }
@@ -294,6 +303,8 @@ impl State {
         };
         self.bufs[idx].busy = true;
         let alpha = (REST + (1.0 - REST) * self.lit) * shown;
+        let cancel_was = self.cancel_lit;
+        self.cancel = None;
         let going = self.going();
         let list = if going.is_empty() { self.last.clone() } else { going };
         let progress = overall(&list).filter(|_| phase == Phase::Active);
@@ -357,9 +368,22 @@ impl State {
                     let (title, detail) = labels(&list);
                     let detail = if phase == Phase::Finishing { "Finishing\u{2026}".to_string() } else { detail };
                     let tx = cx + 22.0;
+                    // One download of Prism's own: a Cancel button at the end of the title row.
+                    let mut right = w - 20.0;
+                    if let (true, [one]) = (phase == Phase::Active, list.as_slice()) {
+                        if let Some(id) = one.id {
+                            let r = (w - 16.0 - 22.0, 6.0, 22.0, 22.0);
+                            let hot = r.0 <= self.pos.0 && self.pos.0 <= r.0 + r.2 && r.1 <= self.pos.1 && self.pos.1 <= r.1 + r.3;
+                            ease(&mut self.cancel_lit, if hot { 1.0 } else { 0.0 }, 0.1);
+                            cb::fill_circle(cr, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, r.2 / 2.0, white((0.06 + 0.14 * self.cancel_lit) * big));
+                            crate::svg::draw_path(cr, CROSS, r.0 + 4.0, r.1 + 4.0, 14.0, white((0.6 + 0.4 * self.cancel_lit) * big), Some(2.2));
+                            self.cancel = (big > 0.5).then_some((r, id));
+                            right = r.0 - 8.0;
+                        }
+                    }
                     let (dw, _) = cb::measure_pango_text(cr, &detail, "Inter, Sans 11px", 400, Some(1));
-                    cb::draw_pango_text(cr, w - 20.0 - dw as f64, 13.0, &detail, "Inter, Sans 11px", white(0.6 * big), None);
-                    cb::draw_pango_text(cr, tx, 10.0, &title, "Inter, Sans Semi-Bold 13px", white(big), Some((w - tx - 32.0 - dw as f64) as i32));
+                    cb::draw_pango_text(cr, right - dw as f64, 13.0, &detail, "Inter, Sans 11px", white(0.6 * big), None);
+                    cb::draw_pango_text(cr, tx, 10.0, &title, "Inter, Sans Semi-Bold 13px", white(big), Some((right - tx - 12.0 - dw as f64) as i32));
                     let label = pct(progress);
                     let (pw, ph) = cb::measure_pango_text(cr, &label, "Inter, Sans Semi-Bold 12px", 400, Some(1));
                     let by = 42.0;
@@ -375,7 +399,7 @@ impl State {
         // Keep drawing while anything moves: the sweep, a fade, the hover easing, the tick.
         let sweeping = phase != Phase::Completed && (phase == Phase::Finishing || progress.is_none());
         let fading = shown < 1.0 || self.done.is_some() || self.ended.is_some();
-        self.dirty = sweeping || fading || self.lit != lit_to || self.grow != grow_to;
+        self.dirty = sweeping || fading || self.lit != lit_to || self.grow != grow_to || self.cancel_lit != cancel_was;
         self.surface.attach(Some(&self.bufs[idx].buffer), 0, 0);
         self.surface.damage_buffer(0, 0, iw, ih);
         self.frame_cb = Some(self.surface.frame(qh, ()));
@@ -407,9 +431,27 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             }
             wl_pointer::Event::Leave { surface, .. } if surface == st.surface => {
                 st.hover = false;
+                st.pos = (-1.0, -1.0);
                 st.dirty = true;
             }
+            wl_pointer::Event::Motion { surface_x, surface_y, .. } if st.hover => {
+                st.pos = (surface_x, surface_y);
+                st.dirty = true;
+            }
+            wl_pointer::Event::Button { button: 0x110, state: WEnum::Value(wl_pointer::ButtonState::Pressed), .. } if st.hover && st.cancel.is_some_and(|(r, _)| r.0 <= st.pos.0 && st.pos.0 <= r.0 + r.2 && r.1 <= st.pos.1 && st.pos.1 <= r.1 + r.3) => {
+                let id = st.cancel.map(|(_, id)| id).unwrap_or_default();
+                if let Ok(c) = std::process::Command::new("prism-ctl").args(["download", "cancel", &id.to_string()]).spawn() {
+                    crate::reap(c);
+                }
+            }
             wl_pointer::Event::Button { button: 0x110, state: WEnum::Value(wl_pointer::ButtonState::Pressed), .. } if st.hover => {
+                // Prism's own downloads: the Downloads card; the browsers': the Downloads folder.
+                if st.list.iter().chain(st.last.iter()).any(|d| d.id.is_some()) {
+                    if let Ok(c) = std::process::Command::new("prism-ctl").args(["download", "open"]).spawn() {
+                        crate::reap(c);
+                    }
+                    return;
+                }
                 let dir = std::process::Command::new("xdg-user-dir").arg("DOWNLOAD").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|d| !d.is_empty());
                 let dir = dir.unwrap_or_else(|| format!("{}/Downloads", std::env::var("HOME").unwrap_or_default()));
                 if let Ok(c) = prism_common::apps::app_command("xdg-open", &[dir]).spawn() {

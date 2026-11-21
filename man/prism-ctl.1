@@ -83,9 +83,9 @@ one tab is enough, for example
 .B wall
 or
 .BR dis )
-or a number from 1 to 16 in this order: Appearance, Wallpaper, Desktop, Bar,
+or a number from 1 to 17 in this order: Appearance, Wallpaper, Desktop, Bar,
 Dock, Launcher, Search, Notifications, Lock Screen, Greeter, Power, Display,
-Connections, Phone, Capture, System.
+Connections, Phone, Capture, Downloads, System.
 .TP
 .B setup
 The first-time setup guide.
@@ -360,6 +360,78 @@ deletes all cached masks.
 .TP
 .B index \fR[\fBstatus\fR|\fBrebuild\fR]
 The file index used by search.
+.SH DOWNLOADS
+Prism's download manager. A download starts on one connection and adds more
+while they help (up to the Connections per Download setting), and continues
+after a pause or a restart when the server allows it. Files go to the Download
+Folder setting (Settings, Downloads), are written as
+.I name.prismdl
+until complete, and a notification offers Open and Show in Folder when one is
+done. The Prism Downloads Firefox extension uses the same commands.
+.B downloads
+is a synonym.
+.TP
+.B download toggle\fR|\fBopen\fR|\fBclose
+The Downloads card: the list with Pause, Resume, Cancel, Open, Show in Folder
+and Remove, and a field to paste a link into. A click on the downloads pill
+opens it too.
+.TP
+.B download \fR[\fBlist\fR]
+Print every download with its id, state, size and speed.
+.TP
+.BI "download add " url " \fR[\fB\-\-name \fIfile\fR] [\fB\-\-dir \fIfolder\fR] [\fB\-\-referer \fIurl\fR] [\fB\-\-cookie \fIheader\fR] [\fB\-\-user\-agent \fIstring\fR] [\fB\-\-ask\fR] [\fB\-\-hls \fR[\fB\-\-variant \fIurl\fR]]"
+Queue a download and print its id. With
+.B \-\-ask
+it waits in the confirmation card first (when Confirm Browser Downloads is on).
+.B \-\-hls
+(assumed for links ending in
+.IR .m3u8 )
+downloads an HLS video stream (AES-128 encrypted ones too; live streams and DRM
+are refused) as one MP4, joined with
+.BR ffmpeg (1);
+.B \-\-variant
+picks a quality from a master playlist (default: the best).
+.B \-o
+and
+.B \-d
+are short for
+.B \-\-name
+and
+.BR \-\-dir .
+.TP
+.BI "download start " id " \fR[\fB\-\-name \fIfile\fR] [\fB\-\-dir \fIfolder\fR]"
+Start a download that waits for confirmation (added with
+.BR \-\-ask ,
+as the Firefox extension does when Confirm Browser Downloads is on), optionally
+under another name or in another folder. This is the confirmation card's
+Download button.
+.TP
+.BI "download decline " id
+Forget a download still waiting for confirmation (the card's Cancel).
+.TP
+.BI "download pause " id
+.TQ
+.BI "download resume " id
+Pause, or continue a paused or failed download.
+.B retry
+is a synonym of
+.BR resume .
+.TP
+.BI "download cancel " id
+Stop and delete what was fetched; the entry stays as cancelled.
+.TP
+.BI "download remove " id
+Forget an entry (cancelling it when it runs). A finished file stays.
+.B rm
+is a synonym.
+.TP
+.BI "download open " id
+.TQ
+.BI "download show " id
+Open a finished download, or show it in the file manager.
+.TP
+.B download clear
+Forget finished, failed and cancelled entries.
 .SH CLIPBOARD AND EMOJI
 .TP
 .B clipboard list
@@ -466,6 +538,9 @@ Notes.
 .TP
 .I ~/.config/prism/dock.json
 Dock pins.
+.TP
+.I ~/.local/share/prism/downloads.json
+The download list, with what is left of each download.
 .SH EXAMPLES
 Keybinds for MangoWM:
 .PP

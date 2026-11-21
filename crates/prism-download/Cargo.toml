@@ -1,0 +1,12 @@
+[package]
+name = "prism-download"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+libc.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }

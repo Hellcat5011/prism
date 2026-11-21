@@ -14,6 +14,7 @@ mod bluelight;
 mod calendar;
 mod config_watch;
 mod depth;
+mod dl;
 mod displays;
 mod downloads;
 mod drives;
@@ -246,7 +247,7 @@ fn set_caffeinate(on: bool) -> Result<(), String> {
     send_ui(&prism_common::UiCommand::Caffeinate(on)).map(|_| ())
 }
 
-fn resolve_sibling_bin(bin_name: &str) -> std::path::PathBuf {
+pub(crate) fn resolve_sibling_bin(bin_name: &str) -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             let sibling = parent.join(bin_name);
@@ -849,6 +850,43 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
             Ok(IpcCommand::Timer(action)) => {
                 let t = timer_action(action);
                 IpcResponse::Ok(serde_json::to_string(&t).ok())
+            }
+            Ok(IpcCommand::Download(action)) => {
+                use prism_common::ipc::DownloadAction as D;
+                let ok = |r: Result<(), String>| match r {
+                    Ok(()) => IpcResponse::Ok(None),
+                    Err(e) => IpcResponse::Error(e),
+                };
+                match action {
+                    D::Add(req) => match dl::add(req) {
+                        Ok(id) => IpcResponse::Ok(Some(id.to_string())),
+                        Err(e) => IpcResponse::Error(e),
+                    },
+                    D::Start { id, name, dir } => ok(dl::start(id, name, dir)),
+                    D::Decline(id) => ok(dl::decline(id)),
+                    D::Pause(id) => ok(dl::pause(id)),
+                    D::Open(id) => ok(dl::open(id, false)),
+                    D::Card(how) => {
+                        let cmd = match how.as_str() {
+                            "open" => prism_common::UiCommand::Open("downloads".into()),
+                            "close" => prism_common::UiCommand::Close,
+                            _ => prism_common::UiCommand::Toggle("downloads".into()),
+                        };
+                        match send_ui(&cmd) {
+                            Ok(_) => IpcResponse::Ok(None),
+                            Err(e) => IpcResponse::Error(e),
+                        }
+                    }
+                    D::Show(id) => ok(dl::open(id, true)),
+                    D::Resume(id) => ok(dl::resume(id)),
+                    D::Cancel(id) => ok(dl::cancel(id, false)),
+                    D::Remove(id) => ok(dl::cancel(id, true)),
+                    D::Clear => {
+                        dl::clear();
+                        IpcResponse::Ok(None)
+                    }
+                    D::List => IpcResponse::Ok(serde_json::to_string(&dl::list()).ok()),
+                }
             }
             Ok(IpcCommand::Setup) => match open_popup("setup") {
                 Ok(msg) => IpcResponse::Ok(Some(msg)),
@@ -1756,6 +1794,7 @@ fn main() {
     battery::apply(&cfg);
     drives::apply(&cfg);
     downloads::apply(&cfg);
+    dl::init();
     calendar::apply(&cfg);
     recording::apply_replay(&cfg);
     displays::apply(&cfg);

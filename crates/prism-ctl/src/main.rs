@@ -46,6 +46,9 @@ Targets & Commands:
   bluelight [toggle|manual_toggle|dump]
   depth [status|generate|clear]
   index [rebuild|status]
+  download [toggle|open|close|list|add <url> [--name <file>] [--dir <folder>] [--referer <url>] [--ask] [--hls [--variant <url>]]
+           |start <id> [--name <file>] [--dir <folder>]
+           |pause <id>|resume <id>|cancel <id>|remove <id>|open <id>|show <id>|clear]
   ping
 
 See man prism-ctl for every command.
@@ -192,6 +195,7 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
             }))
         }
         "setup" | "guide" => Ok(IpcCommand::Setup),
+        "download" | "downloads" => parse_download(&args[1..]),
         "notes" => Ok(IpcCommand::Notes(args.get(1).cloned().unwrap_or_else(|| "toggle".into()))),
         "switcher" => Ok(IpcCommand::Switcher(args.get(1).cloned().unwrap_or_else(|| "next".into()))),
         "gamemode" | "game-mode" => Ok(IpcCommand::GameMode(on_off(args.get(1)))),
@@ -487,7 +491,11 @@ fn main() {
     match serde_json::from_str::<IpcResponse>(&response_line) {
         Ok(IpcResponse::Ok(data)) => {
             if let Some(msg) = data {
-                println!("{}", msg);
+                if cmd == IpcCommand::Download(prism_common::ipc::DownloadAction::List) {
+                    print_downloads(&msg);
+                } else {
+                    println!("{}", msg);
+                }
             }
         }
         Ok(IpcResponse::Error(err)) => {
@@ -547,6 +555,107 @@ fn parse_phone(args: &[String]) -> Result<IpcCommand, String> {
         other => return Err(format!("unknown phone command '{other}'")),
     };
     Ok(IpcCommand::Phone(cmd))
+}
+
+/// `prism-ctl download ...`
+fn parse_download(args: &[String]) -> Result<IpcCommand, String> {
+    use prism_common::ipc::{DownloadAction as D, DownloadRequest};
+    let id = || -> Result<u64, String> { args.get(1).and_then(|s| s.parse().ok()).ok_or_else(|| format!("usage: prism-ctl download {} <id>", args[0])) };
+    let act = match args.first().map(String::as_str).unwrap_or("list") {
+        "list" | "ls" => D::List,
+        "add" => {
+            let mut req = DownloadRequest::default();
+            let mut i = 1;
+            while i < args.len() {
+                let val = || args.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value", args[i]));
+                match args[i].as_str() {
+                    "--name" | "-o" => req.name = Some(val()?),
+                    "--dir" | "-d" => {
+                        let d = val()?;
+                        req.dir = Some(std::fs::canonicalize(&d).map(|p| p.to_string_lossy().into_owned()).unwrap_or(d));
+                    }
+                    "--referer" => req.referer = Some(val()?),
+                    "--cookie" => req.cookie = Some(val()?),
+                    "--user-agent" => req.user_agent = Some(val()?),
+                    "--ask" => {
+                        req.ask = true;
+                        i += 1;
+                        continue;
+                    }
+                    "--hls" => {
+                        req.kind = "hls".into();
+                        i += 1;
+                        continue;
+                    }
+                    "--variant" => req.variant = Some(val()?),
+                    url if req.url.is_empty() && !url.starts_with('-') => {
+                        req.url = url.to_string();
+                        i += 1;
+                        continue;
+                    }
+                    other => return Err(format!("unexpected '{other}'")),
+                }
+                i += 2;
+            }
+            if req.url.is_empty() {
+                return Err("usage: prism-ctl download add <url> [--name <file>] [--dir <folder>]".into());
+            }
+            // HLS playlists become one MP4.
+            if req.url.split(['?', '#']).next().is_some_and(|p| p.ends_with(".m3u8")) {
+                req.kind = "hls".into();
+            }
+            D::Add(req)
+        }
+        "start" => {
+            let (mut name, mut dir) = (None, None);
+            let mut i = 2;
+            while i + 1 < args.len() {
+                match args[i].as_str() {
+                    "--name" | "-o" => name = Some(args[i + 1].clone()),
+                    "--dir" | "-d" => dir = Some(args[i + 1].clone()),
+                    other => return Err(format!("unexpected '{other}'")),
+                }
+                i += 2;
+            }
+            D::Start { id: id()?, name, dir }
+        }
+        "decline" => D::Decline(id()?),
+        "pause" => D::Pause(id()?),
+        "resume" | "retry" => D::Resume(id()?),
+        "cancel" => D::Cancel(id()?),
+        "remove" | "rm" => D::Remove(id()?),
+        "clear" => D::Clear,
+        // Without an id: the Downloads card.
+        "open" if args.len() < 2 => D::Card("open".into()),
+        "toggle" => D::Card("toggle".into()),
+        "close" => D::Card("close".into()),
+        "open" => D::Open(id()?),
+        "show" => D::Show(id()?),
+        other => return Err(format!("unknown download action '{other}'")),
+    };
+    Ok(IpcCommand::Download(act))
+}
+
+/// `download list` as a table.
+fn print_downloads(json: &str) {
+    let Ok(list) = serde_json::from_str::<Vec<prism_common::ipc::DownloadInfo>>(json) else {
+        println!("{json}");
+        return;
+    };
+    if list.is_empty() {
+        println!("No downloads");
+        return;
+    }
+    let mb = |b: u64| format!("{:.1} MB", b as f64 / 1e6);
+    for d in list {
+        let size = match d.size {
+            Some(s) if s > 0 => format!("{} of {} ({:.0}%)", mb(d.done), mb(s), d.done as f64 * 100.0 / s as f64),
+            _ => mb(d.done),
+        };
+        let rate = if d.rate > 0 { format!("  {}/s, {} conn", mb(d.rate), d.connections) } else { String::new() };
+        let err = d.error.map(|e| format!("  ({e})")).unwrap_or_default();
+        println!("{:>4}  {:<9} {}  {}{}{}", d.id, d.state, d.name, size, rate, err);
+    }
 }
 
 /// "on" / "off" to Some(bool); anything else (or nothing) means toggle.

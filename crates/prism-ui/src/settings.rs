@@ -26,7 +26,7 @@ use crate::ui::Style;
 use crate::uikit::{self, ButtonKind, Dropdown, Palette};
 use crate::waker::Waker;
 
-pub const TABS: [&str; 16] = prism_common::ipc::SETTINGS_TABS;
+pub const TABS: [&str; 17] = prism_common::ipc::SETTINGS_TABS;
 /// Undo steps kept per Settings session.
 const UNDO_LIMIT: usize = 100;
 
@@ -899,71 +899,82 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.replay_enabled, |c, v| c.replay_enabled = v) },
         Row { tab: 14, title: "Replay Length", subtitle: "How much a saved replay holds.", visible: |c| c.replay_enabled,
             control: Combo { options: |_| opts(&[("15 seconds", "15"), ("30 seconds", "30"), ("1 minute", "60"), ("2 minutes", "120"), ("5 minutes", "300")]), get: |c| c.replay_seconds.to_string(), set: |c, v| c.replay_seconds = v.parse().unwrap_or(30), fonts: false } },
-        heading(15, "Authentication"),
-        Row { tab: 15, title: "Polkit Agent", subtitle: "Ask for your password when an app needs administrator rights. Replaces polkit-gnome (stop it first: only one agent per session).", visible: always,
+        heading(15, "Prism Downloads"),
+        Row { tab: 15, title: "Download Folder", subtitle: "Where Prism's own downloads go (prism-ctl download and the Prism Downloads Firefox extension). Empty: your Downloads folder.", visible: always,
+            control: Text { get: |c| c.download_dir.clone(), set: |c, v| { c.download_dir = v.trim().to_string(); true }, placeholder: "~/Downloads", browse: true } },
+        Row { tab: 15, title: "Confirm Browser Downloads", subtitle: "A download Firefox hands to Prism opens a card first: change its name or folder, then Download (or Cancel).", visible: always,
+            control: Switch(|c| c.download_confirm, |c, v| c.download_confirm = v) },
+        Row { tab: 15, title: "Connections per Download", subtitle: "A download starts on one connection and adds more while they help, up to this many. Servers that allow fewer get fewer.", visible: always,
+            control: Slider { min: 1.0, max: 16.0, step: 1.0, get: |c| c.download_connections as f64, set: |c, v| c.download_connections = v.round() as u32, fmt: |v| format!("{v:.0}") } },
+        Row { tab: 15, title: "Downloads at Once", subtitle: "More wait in the queue and start as others finish.", visible: always,
+            control: Slider { min: 1.0, max: 8.0, step: 1.0, get: |c| c.download_max_active as f64, set: |c, v| c.download_max_active = v.round() as u32, fmt: |v| format!("{v:.0}") } },
+        Row { tab: 15, title: "Speed Limit", subtitle: "Shared by all running downloads.", visible: always,
+            control: Slider { min: 0.0, max: 100.0, step: 1.0, get: |c| (c.download_speed_limit_kb / 1024) as f64, set: |c, v| c.download_speed_limit_kb = v.round() as u32 * 1024, fmt: |v| if v < 0.5 { "No limit".into() } else { format!("{v:.0} MB/s") } } },
+        heading(15, "Browser Downloads"),
+        Row { tab: 15, title: "Download Progress", subtitle: "A pill at the top of the screen while browsers or brisk download into your Downloads folder, and a notification with Open and Show in Folder when a download finishes.", visible: always,
+            control: Switch(|c| c.downloads_watch, |c, v| c.downloads_watch = v) },
+        Row { tab: 15, title: "More Download Folders", subtitle: "Prism follows your Downloads folder and the folders Firefox, Chromium-based browsers and brisk save to. Add other folders here, separated by spaces.", visible: |c| c.downloads_watch,
+            control: Text { get: |c| c.downloads_extra_dirs.join(" "), set: |c, v| { c.downloads_extra_dirs = v.split_whitespace().map(str::to_string).collect(); true }, placeholder: "~/Videos/Incoming", browse: false } },
+        heading(16, "Authentication"),
+        Row { tab: 16, title: "Polkit Agent", subtitle: "Ask for your password when an app needs administrator rights. Replaces polkit-gnome (stop it first: only one agent per session).", visible: always,
             control: Switch(|c| c.polkit_agent_enabled, |c, v| c.polkit_agent_enabled = v) },
-        Row { tab: 15, title: "Keyring Prompts", subtitle: "Ask for the keyring password (gnome-keyring) in a Prism card. Replaces gcr-prompter; restart Prism after turning it off.", visible: always,
+        Row { tab: 16, title: "Keyring Prompts", subtitle: "Ask for the keyring password (gnome-keyring) in a Prism card. Replaces gcr-prompter; restart Prism after turning it off.", visible: always,
             control: Switch(|c| c.keyring_prompter_enabled, |c, v| c.keyring_prompter_enabled = v) },
-        heading(15, "Updates"),
-        Row { tab: 15, title: "Update Notifications", subtitle: "Checks for package updates when Prism starts (checkupdates, and yay or paru for the AUR). Without updates it keeps checking now and then; once it has told you, it waits until the updates are installed or Prism restarts. The bar's Updates module shows the count.", visible: always,
+        heading(16, "Updates"),
+        Row { tab: 16, title: "Update Notifications", subtitle: "Checks for package updates when Prism starts (checkupdates, and yay or paru for the AUR). Without updates it keeps checking now and then; once it has told you, it waits until the updates are installed or Prism restarts. The bar's Updates module shows the count.", visible: always,
             control: Switch(|c| c.update_notifications, |c, v| c.update_notifications = v) },
-        Row { tab: 15, title: "Updates Tray Icon", subtitle: "A tray icon while updates are available: Update Now and Check Again.", visible: always,
+        Row { tab: 16, title: "Updates Tray Icon", subtitle: "A tray icon while updates are available: Update Now and Check Again.", visible: always,
             control: Switch(|c| c.updates_tray, |c, v| c.updates_tray = v) },
-        Row { tab: 15, title: "Check Every", subtitle: "Hours between checks while no updates are waiting.", visible: always,
+        Row { tab: 16, title: "Check Every", subtitle: "Hours between checks while no updates are waiting.", visible: always,
             control: Combo { options: |_| opts(&[("Hour", "1"), ("3 hours", "3"), ("6 hours", "6"), ("12 hours", "12"), ("Day", "24")]), get: |c| c.bar.updates_interval_hours.to_string(), set: |c, v| c.bar.updates_interval_hours = v.parse().unwrap_or(3), fonts: false } },
-        Row { tab: 15, title: "Update Command", subtitle: "Run in a terminal by Update (empty: yay, paru or sudo pacman -Syu).", visible: always,
+        Row { tab: 16, title: "Update Command", subtitle: "Run in a terminal by Update (empty: yay, paru or sudo pacman -Syu).", visible: always,
             control: Text { get: |c| c.bar.updates_command.clone(), set: |c, v| { c.bar.updates_command = v.trim().to_string(); true }, placeholder: "yay", browse: false } },
-        heading(15, "Window Switcher"),
-        Row { tab: 15, title: "Window Switcher", subtitle: "Alt+Tab shows your windows with previews, most recent first; let go of Alt to switch. Turning it on checks whether your compositor already uses Alt+Tab.", visible: always,
+        heading(16, "Window Switcher"),
+        Row { tab: 16, title: "Window Switcher", subtitle: "Alt+Tab shows your windows with previews, most recent first; let go of Alt to switch. Turning it on checks whether your compositor already uses Alt+Tab.", visible: always,
             control: Switch(|c| c.window_switcher, |c, v| { c.window_switcher = v; switcher_check(v); }) },
-        Row { tab: 15, title: SWITCHER_ROW, subtitle: "", visible: |c| c.window_switcher && !SWITCHER_STATUS.lock().unwrap().is_empty(),
+        Row { tab: 16, title: SWITCHER_ROW, subtitle: "", visible: |c| c.window_switcher && !SWITCHER_STATUS.lock().unwrap().is_empty(),
             control: Note },
-        heading(15, "Battery"),
-        Row { tab: 15, title: "Low Battery Warnings", subtitle: "On a laptop: a notification at 20 %, 10 % and 5 % while running on battery.", visible: always,
+        heading(16, "Battery"),
+        Row { tab: 16, title: "Low Battery Warnings", subtitle: "On a laptop: a notification at 20 %, 10 % and 5 % while running on battery.", visible: always,
             control: Switch(|c| c.battery_warnings, |c, v| c.battery_warnings = v) },
-        Row { tab: 15, title: "Power Saver When Low", subtitle: "Switch to the power-saver profile at the first warning; the previous profile comes back when you plug in.", visible: |c| c.battery_warnings,
+        Row { tab: 16, title: "Power Saver When Low", subtitle: "Switch to the power-saver profile at the first warning; the previous profile comes back when you plug in.", visible: |c| c.battery_warnings,
             control: Switch(|c| c.battery_auto_saver, |c, v| c.battery_auto_saver = v) },
-        Row { tab: 15, title: "Charge Limit", subtitle: "Stop charging before the battery is full, so it wears out more slowly when the laptop stays plugged in. Changing it may ask for your password.", visible: |_| *CHARGE_LIMIT,
+        Row { tab: 16, title: "Charge Limit", subtitle: "Stop charging before the battery is full, so it wears out more slowly when the laptop stays plugged in. Changing it may ask for your password.", visible: |_| *CHARGE_LIMIT,
             control: Combo { options: |_| opts(&[("Off", "0"), ("60 %", "60"), ("70 %", "70"), ("80 %", "80"), ("90 %", "90")]), get: |c| c.battery_charge_limit.to_string(), set: |c, v| c.battery_charge_limit = v.parse().unwrap_or(0), fonts: false } },
-        heading(15, "Setup Guide"),
-        Row { tab: 15, title: "Setup Guide", subtitle: "The tour shown after installing: the main features with an option to turn each on.", visible: always,
+        heading(16, "Setup Guide"),
+        Row { tab: 16, title: "Setup Guide", subtitle: "The tour shown after installing: the main features with an option to turn each on.", visible: always,
             control: Buttons(&[("Open Setup Guide", Action::RunGuide, ButtonKind::Outline)]) },
-        heading(15, "Compositor"),
-        Row { tab: 15, title: "Shortcuts and Window Rules", subtitle: "Change your compositor's key bindings and window rules (MangoWM, niri or Hyprland). Prism edits the config files in place and keeps a .prism-bak copy of each.", visible: always,
+        heading(16, "Compositor"),
+        Row { tab: 16, title: "Shortcuts and Window Rules", subtitle: "Change your compositor's key bindings and window rules (MangoWM, niri or Hyprland). Prism edits the config files in place and keeps a .prism-bak copy of each.", visible: always,
             control: Buttons(&[("Shortcuts\u{2026}", Action::EditShortcuts, ButtonKind::Outline), ("Window Rules\u{2026}", Action::EditRules, ButtonKind::Outline)]) },
-        heading(15, "Backup"),
-        Row { tab: 15, title: "Earlier Settings", subtitle: "Before the first change each time Settings is used, Prism keeps a copy of your settings (the last 20). Pick one to go back to it; Undo brings the present ones back.", visible: always,
+        heading(16, "Backup"),
+        Row { tab: 16, title: "Earlier Settings", subtitle: "Before the first change each time Settings is used, Prism keeps a copy of your settings (the last 20). Pick one to go back to it; Undo brings the present ones back.", visible: always,
             control: Combo { options: |_| history_options(), get: |_| String::new(), set: |c, v| {
                 if let Some(old) = (!v.is_empty()).then(|| prism_common::config_history::load(std::path::Path::new(v))).flatten() {
                     *c = old;
                 }
             }, fonts: false } },
-        Row { tab: 15, title: "Backup File", subtitle: "Export saves all of ~/.config/prism (settings, dock, notes, colours) as one file; Import puts such a file back.", visible: always,
+        Row { tab: 16, title: "Backup File", subtitle: "Export saves all of ~/.config/prism (settings, dock, notes, colours) as one file; Import puts such a file back.", visible: always,
             control: Buttons(&[("Export\u{2026}", Action::ExportConfig, ButtonKind::Outline), ("Import\u{2026}", Action::ImportConfig, ButtonKind::Outline)]) },
-        heading(15, "Downloads"),
-        Row { tab: 15, title: "Download Progress", subtitle: "A pill at the top of the screen while browsers or brisk download into your Downloads folder, and a notification with Open and Show in Folder when a download finishes.", visible: always,
-            control: Switch(|c| c.downloads_watch, |c, v| c.downloads_watch = v) },
-        Row { tab: 15, title: "More Download Folders", subtitle: "Prism follows your Downloads folder and the folders Firefox, Chromium-based browsers and brisk save to. Add other folders here, separated by spaces.", visible: |c| c.downloads_watch,
-            control: Text { get: |c| c.downloads_extra_dirs.join(" "), set: |c, v| { c.downloads_extra_dirs = v.split_whitespace().map(str::to_string).collect(); true }, placeholder: "~/Videos/Incoming", browse: false } },
-        heading(15, "Removable Drives"),
-        Row { tab: 15, title: "Drive Notifications", subtitle: "Announce USB drives and SD cards as they are plugged in, with Open and Eject. Replaces udiskie.", visible: always,
+        heading(16, "Removable Drives"),
+        Row { tab: 16, title: "Drive Notifications", subtitle: "Announce USB drives and SD cards as they are plugged in, with Open and Eject. Replaces udiskie.", visible: always,
             control: Switch(|c| c.drives_enabled, |c, v| c.drives_enabled = v) },
-        Row { tab: 15, title: "Drives Tray Icon", subtitle: "A tray icon while a removable drive is plugged in: open or eject each one.", visible: always,
+        Row { tab: 16, title: "Drives Tray Icon", subtitle: "A tray icon while a removable drive is plugged in: open or eject each one.", visible: always,
             control: Switch(|c| c.drives_tray, |c, v| c.drives_tray = v) },
-        Row { tab: 15, title: "Mount Automatically", subtitle: "Mount a plugged-in drive right away (under /run/media).", visible: |c| c.drives_enabled,
+        Row { tab: 16, title: "Mount Automatically", subtitle: "Mount a plugged-in drive right away (under /run/media).", visible: |c| c.drives_enabled,
             control: Switch(|c| c.drives_automount, |c, v| c.drives_automount = v) },
-        heading(15, "Privacy"),
-        Row { tab: 15, title: "Privacy Indicator", subtitle: "A pill in the top-right corner while an app uses the microphone or camera, or your screen is shared. Hover to see which apps; Stop ends screen sharing.", visible: always,
+        heading(16, "Privacy"),
+        Row { tab: 16, title: "Privacy Indicator", subtitle: "A pill in the top-right corner while an app uses the microphone or camera, or your screen is shared. Hover to see which apps; Stop ends screen sharing.", visible: always,
             control: Switch(|c| c.privacy_indicator, |c, v| c.privacy_indicator = v) },
-        heading(15, "Desktop Portal"),
-        Row { tab: 15, title: "Screenshots and Screen Sharing", subtitle: "Apps take screenshots, pick colours and share your screen through Prism (xdg-desktop-portal). Replaces xdg-desktop-portal-wlr; restart Prism after turning it off.", visible: always,
+        heading(16, "Desktop Portal"),
+        Row { tab: 16, title: "Screenshots and Screen Sharing", subtitle: "Apps take screenshots, pick colours and share your screen through Prism (xdg-desktop-portal). Replaces xdg-desktop-portal-wlr; restart Prism after turning it off.", visible: always,
             control: Switch(|c| c.portal_enabled, |c, v| c.portal_enabled = v) },
-        heading(15, "Music Player Daemon"),
-        Row { tab: 15, title: "MPD Media Controls", subtitle: "Show MPD as a media player (MPRIS) for media keys, the media widget and the phone. Replaces mpd-mpris.", visible: always,
+        heading(16, "Music Player Daemon"),
+        Row { tab: 16, title: "MPD Media Controls", subtitle: "Show MPD as a media player (MPRIS) for media keys, the media widget and the phone. Replaces mpd-mpris.", visible: always,
             control: Switch(|c| c.mpd_mpris_enabled, |c, v| c.mpd_mpris_enabled = v) },
-        Row { tab: 15, title: "MPD Host", subtitle: "Host name, or the path of MPD's socket.", visible: |c| c.mpd_mpris_enabled,
+        Row { tab: 16, title: "MPD Host", subtitle: "Host name, or the path of MPD's socket.", visible: |c| c.mpd_mpris_enabled,
             control: Text { get: |c| c.mpd_host.clone(), set: |c, v| { let v = v.trim(); if v.is_empty() { return false; } c.mpd_host = v.to_string(); true }, placeholder: "127.0.0.1", browse: false } },
-        Row { tab: 15, title: "MPD Port", subtitle: "TCP port (not used with a socket path).", visible: |c| c.mpd_mpris_enabled && !c.mpd_host.starts_with('/'),
+        Row { tab: 16, title: "MPD Port", subtitle: "TCP port (not used with a socket path).", visible: |c| c.mpd_mpris_enabled && !c.mpd_host.starts_with('/'),
             control: Text { get: |c| c.mpd_port.to_string(), set: |c, v| match v.trim().parse::<u16>() { Ok(n) if n > 0 => { c.mpd_port = n; true } _ => false }, placeholder: "6600", browse: false } },
     ]
 }
@@ -1146,6 +1157,11 @@ pub struct SettingsView {
     hover_fade: crate::ui::Fades<Hit>,
     knobs: crate::ui::Fades<usize>,
     tab_glide: crate::ui::Glide,
+    /// The tab list scrolls when the tabs do not fit; the area it has, and the tab it last
+    /// scrolled into view.
+    tab_scroll: crate::ui::Scroller,
+    tab_area: Rect,
+    tab_shown: usize,
     focus_glide: (crate::ui::Glide, crate::ui::Glide),
     tab_in: crate::ui::SpringValue,
     time_scale: Option<f64>,
@@ -1213,6 +1229,9 @@ impl SettingsView {
             hover_fade: crate::ui::Fades::default(),
             knobs: crate::ui::Fades::default(),
             tab_glide: crate::ui::Glide::default(),
+            tab_scroll: crate::ui::Scroller::default(),
+            tab_area: Rect::default(),
+            tab_shown: usize::MAX,
             focus_glide: Default::default(),
             tab_in: crate::ui::SpringValue::new(1.0),
             time_scale: Some(1.0),
@@ -1421,7 +1440,24 @@ impl SettingsView {
         self.search_rect = search;
         self.hits.push((Hit::Search, search));
 
-        let mut ty = sy + 36.0 + 16.0;
+        let area = Rect { x: sx, y: sy + 36.0 + 16.0, w: SIDEBAR_W, h: card.y + card.h - MARGIN - (sy + 36.0 + 16.0) };
+        self.tab_area = area;
+        let shown: Vec<usize> = (0..TABS.len()).filter(|&i| self.tab_matches(i)).collect();
+        let tabs_h = shown.len() as f64 * TAB_H;
+        self.tab_scroll.set_max(tabs_h - area.h, style);
+        if self.tab != self.tab_shown {
+            self.tab_shown = self.tab;
+            if let Some(k) = shown.iter().position(|&i| i == self.tab) {
+                self.tab_scroll.ensure_visible(k as f64 * TAB_H, TAB_H, area.h);
+            }
+        }
+        let tab_off = self.tab_scroll.pos();
+        unsafe {
+            cairo_save(cr);
+            cairo_rectangle(cr, area.x, area.y, area.w, area.h);
+            cairo_clip(cr);
+        }
+        let mut ty = area.y - tab_off;
         // The selected tab's pill glides between tabs (drawn first, under the labels). Its
         // target is where the selected tab was last frame (the tab list rarely changes).
         let mut tab_rect = None;
@@ -1451,8 +1487,19 @@ impl SettingsView {
             let color = crate::ui::mix(p.fg, hex_to_rgba(&theme.inverse_primary, 1.0), on);
             let fam = if sel { format!("{} Semi-Bold", p.family) } else { p.family.clone() };
             draw_in_box(cr, name, &TextStyle { family: &fam, px: 14.0, bold: false, color }, r.x + 12.0, r.y, r.w - 24.0, r.h, Align::Start);
-            self.hits.push((Hit::Tab(i), r));
+            // Only the visible part of a tab takes clicks.
+            let top = r.y.max(area.y);
+            let bottom = (r.y + r.h).min(area.y + area.h);
+            if bottom > top {
+                self.hits.push((Hit::Tab(i), Rect { y: top, h: bottom - top, ..r }));
+            }
             ty += TAB_H;
+        }
+        unsafe { cairo_restore(cr) };
+        if tabs_h > area.h {
+            let thumb_h = (area.h * area.h / tabs_h).max(30.0);
+            let thumb_y = area.y + (area.h - thumb_h) * (tab_off / (tabs_h - area.h)).clamp(0.0, 1.0);
+            fill_rounded_rect(cr, area.x + area.w - 2.0, thumb_y, 3.0, thumb_h, 1.5, (p.fg.0, p.fg.1, p.fg.2, 0.3));
         }
         if tab_rect != self.last_tab_rect {
             self.last_tab_rect = tab_rect;
@@ -1895,6 +1942,9 @@ impl SettingsView {
         if self.pane.contains(x, y) {
             self.combo = None;
             return self.scroll.by(delta);
+        }
+        if self.tab_area.contains(x, y) {
+            return self.tab_scroll.by(delta);
         }
         false
     }
