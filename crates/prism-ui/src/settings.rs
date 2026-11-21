@@ -158,7 +158,10 @@ enum Control {
     Heading,
 }
 
-const LOCK_THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Stencil", "stencil"), ("Horizon", "horizon"), ("Sentence", "sentence"), ("Aperture", "aperture"), ("Tide", "tide")];
+/// Lock screen designs that rework the wallpaper picture; with a video wallpaper Classic is shown instead.
+const PICTURE_THEMES: &[&str] = &["tide", "ink", "frost", "fireflies", "halftone"];
+
+const LOCK_THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Stencil", "stencil"), ("Sentence", "sentence"), ("Aperture", "aperture"), ("Tide", "tide"), ("Ink", "ink"), ("Frost", "frost"), ("Fireflies", "fireflies"), ("Halftone", "halftone")];
 const THEME_FILTER_NOTE: &str = "Every theme shows your current wallpaper, including any wallpaper filter applied to it.";
 struct Row {
     tab: usize,
@@ -704,8 +707,8 @@ fn rows() -> Vec<Row> {
         heading(8, "Design"),
         Row { tab: 8, title: "Lock Screen Theme", subtitle: "The design of the lock screen.", visible: always,
             control: Combo { options: || opts(LOCK_THEMES), get: |c| c.lockscreen_theme.clone(), set: |c, v| c.lockscreen_theme = v.to_string(), fonts: false } },
-        Row { tab: 8, title: "", subtitle: "The Tide design is not available with a video wallpaper. The Classic design is shown instead.", control: Control::Note,
-            visible: |c| c.wallpaper_daemon == "prism-video" && c.lockscreen_theme == "tide" },
+        Row { tab: 8, title: "", subtitle: "This design is not available with a video wallpaper. The Classic design is shown instead.", control: Control::Note,
+            visible: |c| c.wallpaper_daemon == "prism-video" && PICTURE_THEMES.contains(&c.lockscreen_theme.as_str()) },
         Row { tab: 8, title: "Alignment", subtitle: "Align the lock screen elements to the left or right edge (Classic theme).", visible: |c| c.lockscreen_theme == "classic" || c.greeter_theme == "classic",
             control: Combo { options: || opts(&[("Left", "left"), ("Right", "right")]), get: |c| c.lockscreen_alignment.clone(), set: |c, v| c.lockscreen_alignment = v.to_string(), fonts: false } },
         Row { tab: 8, title: "Power Menu", subtitle: "Allow Suspend, Reboot and Shutdown directly from the lock screen.", visible: always,
@@ -719,8 +722,8 @@ fn rows() -> Vec<Row> {
         // ── Greeter ──
         Row { tab: 9, title: "Greeter Theme", subtitle: "The design of the login screen.", visible: always,
             control: Combo { options: || { let mut o = opts(&[("Mirror the Lock Screen", "mirror")]); o.extend(opts(LOCK_THEMES)); o }, get: |c| c.greeter_theme.clone(), set: |c, v| c.greeter_theme = v.to_string(), fonts: false } },
-        Row { tab: 9, title: "", subtitle: "The Tide design is not available with a video wallpaper. The Classic design is shown instead.", control: Control::Note,
-            visible: |c| c.wallpaper_daemon == "prism-video" && (c.greeter_theme == "tide" || (c.greeter_theme == "mirror" && c.lockscreen_theme == "tide")) },
+        Row { tab: 9, title: "", subtitle: "This design is not available with a video wallpaper. The Classic design is shown instead.", control: Control::Note,
+            visible: |c| c.wallpaper_daemon == "prism-video" && (PICTURE_THEMES.contains(&c.greeter_theme.as_str()) || (c.greeter_theme == "mirror" && PICTURE_THEMES.contains(&c.lockscreen_theme.as_str()))) },
         Row { tab: 9, title: "Remember Last User", subtitle: "Pre-select the last user and session on the next boot (applies after logout).", visible: always,
             control: Switch(|c| c.remember_last_user, |c, v| c.remember_last_user = v) },
         note(9, THEME_FILTER_NOTE),

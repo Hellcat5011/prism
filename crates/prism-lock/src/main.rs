@@ -68,8 +68,6 @@ const HOVER_MS: f64 = 150.0;
 const USER_HOVER_SCALE: f64 = 1.04;
 const SESSION_HOVER_SCALE: f64 = 1.08;
 const INACTIVITY: Duration = Duration::from_secs(15);
-/// Horizon: the part of each second (s) in which the marker steps along the line.
-const HORIZON_TICK: f64 = 0.4;
 /// Notifications waiting, for the Sentence design on the lock screen.
 static NOTIFICATIONS: AtomicUsize = AtomicUsize::new(0);
 const MASK_FONT: &str = "CaskaydiaCove Nerd Font";
@@ -161,9 +159,9 @@ impl Look {
             Mode::Greeter => greetd::load_greeter_config().wallpaper_video.then(|| greetd::get_state_dir().join(prism_common::wallpaper::GREETER_VIDEO)),
         });
         let video = video.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned());
-        // Tide recolours the wallpaper itself, which a video does not allow.
+        // Tide, Ink, Frost, Fireflies and Halftone rework the wallpaper picture, which a video does not allow.
         let design = match LockTheme::from_id(&theme_id) {
-            LockTheme::Tide if video.is_some() => LockTheme::Classic,
+            design if design.needs_picture() && video.is_some() => LockTheme::Classic,
             design => design,
         };
         Look {
@@ -352,7 +350,6 @@ impl App {
             || ms_since(self.user_grow.2) < HOVER_MS
             || ms_since(self.session_grow.2) < HOVER_MS
             || (self.look.theme != LockTheme::Classic && self.fx.animating(Instant::now()))
-            || (self.look.theme == LockTheme::Horizon && second_of_minute().1 < HORIZON_TICK)
     }
 
     /// What the designs in themes.rs show this frame.
@@ -367,7 +364,6 @@ impl App {
             clock: format!("{hour:02}:{minute:02}"),
             date: date_label(),
             weekday: weekday_name(),
-            second: second_of_minute(),
             user: self.shown_user(),
             entering_user: self.entering_user,
             typed_name: if self.entering_user { self.text.clone() } else { String::new() },
@@ -787,6 +783,17 @@ impl App {
         next
     }
 
+    /// A design failed to draw (a bug in themes.rs): carry on with Classic, so the session can
+    /// still be unlocked instead of the lock client dying and being restarted into the same bug.
+    fn fall_back_to_classic(&mut self, i: usize, qh: &QueueHandle<Self>) {
+        eprintln!("[prism-lock] the {:?} design failed to draw; falling back to Classic", self.look.theme);
+        self.look.theme = LockTheme::Classic;
+        for s in &mut self.surfaces {
+            s.layers = None;
+        }
+        self.draw(i, qh);
+    }
+
     fn draw(&mut self, i: usize, qh: &QueueHandle<Self>) {
         let Some(shm) = self.shm.clone() else { return };
         let (w, h) = self.surfaces[i].size;
@@ -814,7 +821,11 @@ impl App {
             s.background = Some((render_background(&self.look, w, h), w, h));
         }
         if !classic && s.layers.as_ref().is_none_or(|l| l.size != (w, h)) {
-            s.layers = Some(Layers::render(&self.look, w, h));
+            let look = &self.look;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Layers::render(look, w, h))) {
+                Ok(layers) => s.layers = Some(layers),
+                Err(_) => return self.fall_back_to_classic(i, qh),
+            }
         }
         let bg = s.background.map(|b| b.0);
         let ptr = s.bufs[idx].ptr;
@@ -823,13 +834,21 @@ impl App {
             let surf = cb::cairo_image_surface_create_for_data(ptr, cb::CAIRO_FORMAT_ARGB32, w, h, w * 4);
             let cr = cb::cairo_create(surf);
             let hits = match (bg, self.surfaces[i].layers.as_ref()) {
-                (Some(bg), _) if classic => self.paint(cr, bg, w, h),
-                (_, Some(layers)) => themes::paint(cr, &self.look, &self.scene(), &self.fx, layers, w, h),
-                _ => Vec::new(),
+                (Some(bg), _) if classic => Some(self.paint(cr, bg, w, h)),
+                (_, Some(layers)) => {
+                    let scene = self.scene();
+                    let (look, fx) = (&self.look, &self.fx);
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| themes::paint(cr, look, &scene, fx, layers, w, h))).ok()
+                }
+                _ => Some(Vec::new()),
             };
             cb::cairo_destroy(cr);
             cb::cairo_surface_destroy(surf);
             hits
+        };
+        let Some(hits) = hits else {
+            self.surfaces[i].bufs[idx].busy = false;
+            return self.fall_back_to_classic(i, qh);
         };
         let s = &mut self.surfaces[i];
         s.hits = hits;
@@ -1175,18 +1194,12 @@ fn local_now() -> (i32, i32) {
     (tm.tm_hour, tm.tm_min)
 }
 
-/// QML "dddd / MMMM d" in upper case.
-/// Second of the minute and the fraction of the current second.
-fn second_of_minute() -> (u32, f64) {
-    let frac = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as f64 / 1e9).unwrap_or(0.0);
-    (local_tm().tm_sec.clamp(0, 59) as u32, frac)
-}
-
 fn weekday_name() -> String {
     const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     DAYS[local_tm().tm_wday.clamp(0, 6) as usize].to_string()
 }
 
+/// QML "dddd / MMMM d" in upper case.
 fn date_label() -> String {
     let tm = local_tm();
     const DAYS: [&str; 7] = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
@@ -1731,10 +1744,6 @@ fn run(mode: Mode) -> Result<(), (i32, String)> {
 
         queue.flush().map_err(|e| (1, format!("flush: {e}")))?;
         let mut timeout = if app.any_animating() { 8 } else { 1000 };
-        if app.look.theme == LockTheme::Horizon {
-            // Wake for the next step of the marker.
-            timeout = timeout.min(((1.0 - second_of_minute().1) * 1000.0) as i32 + 1);
-        }
         if let Some((_, at)) = app.repeat {
             timeout = timeout.min(at.saturating_duration_since(Instant::now()).as_millis() as i32 + 1);
         }

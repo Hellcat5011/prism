@@ -65,10 +65,12 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   arranged in an on-screen edit mode. Widgets can be "sent to the background" so the wallpaper's foreground
   (a neural depth mask) passes in front of them.
 - **System tray**: StatusNotifierItem host with tooltips and dbusmenu context menus (scrollable when long).
-- **Lock screen and greeter**: `ext-session-lock-v1` lock with PAM, and a greetd greeter under `cage`. Six designs:
-  **Classic**, **Stencil** (the wallpaper seen through a giant clock), **Horizon** (one line across the screen),
-  **Sentence** (the time and your notifications as a sentence), **Aperture** (a circular window that opens as you
-  type) and **Tide** (colour splashes that fill the greyscale wallpaper on unlock). The greeter mirrors the lock
+- **Lock screen and greeter**: `ext-session-lock-v1` lock with PAM, and a greetd greeter under `cage`. Nine designs:
+  **Classic**, **Stencil** (the wallpaper seen through a giant clock), **Sentence** (the time and your
+  notifications as a sentence), **Aperture** (a circular window that opens as you type), **Tide** (colour splashes
+  that fill the greyscale wallpaper on unlock), **Ink** (ink blots bleeding into a paper-white wallpaper), **Frost**
+  (iced glass that thaws from the middle as you type and melts away on unlock), **Fireflies** (a night-time wallpaper
+  lit by a firefly per key) and **Halftone** (a dot screen whose dots merge into the picture as you type and on unlock). The greeter mirrors the lock
   screen or uses its own design, and clicking the user or session cycles through them.
 - **Power menu**: five large designs (**Glide Bar**, **Split Panel**, **Shutters**, **Orbit** and **Floating
   Cards**). Choose which actions appear: Lock, Logout, Suspend, Sleep, Hibernate, Reboot and Shutdown (Sleep and
@@ -132,12 +134,19 @@ Choose a design in Settings > Lock Screen. The greeter can mirror it or use its 
     <td width="50%" align="center"><img src="assets/screenshots/lockscreen-stencil.png" alt="Stencil lock screen"><br><b>Stencil</b></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-horizon.png" alt="Horizon lock screen"><br><b>Horizon</b></td>
     <td width="50%" align="center"><img src="assets/screenshots/lockscreen-sentence.png" alt="Sentence lock screen"><br><b>Sentence</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-aperture.png" alt="Aperture lock screen"><br><b>Aperture</b></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-aperture.png" alt="Aperture lock screen"><br><b>Aperture</b></td>
     <td width="50%" align="center"><img src="assets/screenshots/lockscreen-tide.png" alt="Tide lock screen"><br><b>Tide</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-ink.png" alt="Ink lock screen"><br><b>Ink</b></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-frost.png" alt="Frost lock screen"><br><b>Frost</b></td>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-fireflies.png" alt="Fireflies lock screen"><br><b>Fireflies</b></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="assets/screenshots/lockscreen-halftone.png" alt="Halftone lock screen"><br><b>Halftone</b></td>
   </tr>
 </table>
 

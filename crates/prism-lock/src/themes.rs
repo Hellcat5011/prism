@@ -1,10 +1,13 @@
 //! The lockscreen and greeter designs other than Classic (which is `App::paint` in main.rs).
 //!
 //! * Stencil: solid colour with the time cut out of it; unlocking flies through a digit.
-//! * Horizon: one hairline with the time resting on it; unlocking splits the screen along it.
 //! * Sentence: the state of the machine as one line of text; words leave one by one.
 //! * Aperture: a round window onto the wallpaper that opens as you type.
 //! * Tide: a grey wallpaper that keys splash colour onto; unlocking spreads it over everything.
+//! * Ink: a paper-white wallpaper that keys drop bleeding ink blots onto; unlocking floods it.
+//! * Frost: the wallpaper behind iced glass that each key thaws further from the middle; unlocking melts it.
+//! * Fireflies: the wallpaper at night, lit by a firefly per key; unlocking swarms into daylight.
+//! * Halftone: the wallpaper as a dot screen whose dots swell and merge as you type; unlocking merges them into it.
 //!
 //! Everything is drawn with cairo into wl_shm buffers, so the designs behave the same on any
 //! compositor (cage included). Expensive pictures are baked once per size in `Layers`; frames
@@ -20,20 +23,26 @@ use super::{draw_spaced, spaced_width, text_size, Hit, Look, Mode, Rgba};
 pub enum LockTheme {
     Classic,
     Stencil,
-    Horizon,
     Sentence,
     Aperture,
     Tide,
+    Ink,
+    Frost,
+    Fireflies,
+    Halftone,
 }
 
 impl LockTheme {
     pub fn from_id(id: &str) -> LockTheme {
         match id {
             "stencil" => LockTheme::Stencil,
-            "horizon" => LockTheme::Horizon,
             "sentence" => LockTheme::Sentence,
             "aperture" => LockTheme::Aperture,
             "tide" => LockTheme::Tide,
+            "ink" => LockTheme::Ink,
+            "frost" => LockTheme::Frost,
+            "fireflies" => LockTheme::Fireflies,
+            "halftone" => LockTheme::Halftone,
             _ => LockTheme::Classic,
         }
     }
@@ -43,11 +52,24 @@ impl LockTheme {
         match self {
             LockTheme::Classic => super::FADE_OUT_MS,
             LockTheme::Stencil => 850.0,
-            LockTheme::Horizon => 750.0,
             LockTheme::Sentence => 950.0,
             LockTheme::Aperture => 800.0,
             LockTheme::Tide => 1200.0,
+            LockTheme::Ink => 1300.0,
+            LockTheme::Frost => 1100.0,
+            LockTheme::Fireflies => 1300.0,
+            LockTheme::Halftone => 1000.0,
         }
+    }
+
+    /// The design reworks the wallpaper picture itself, which a video wallpaper does not allow.
+    pub fn needs_picture(self) -> bool {
+        matches!(self, LockTheme::Tide | LockTheme::Ink | LockTheme::Frost | LockTheme::Fireflies | LockTheme::Halftone)
+    }
+
+    /// Each key adds a mark (a splash, blot or firefly) to `Fx::splashes`.
+    fn marks(self) -> bool {
+        matches!(self, LockTheme::Tide | LockTheme::Ink | LockTheme::Fireflies)
     }
 }
 
@@ -59,7 +81,13 @@ const SPRING_LEVEL: Params = (0.34, 0.72);
 const SPRING_SPLASH: Params = (0.42, 0.68);
 const SPRING_SHUT: Params = (0.12, 1.0);
 const SPRING_REOPEN: Params = (0.55, 0.8);
-const SPRING_TICK: Params = (0.24, 0.62);
+const SPRING_FIREFLY: Params = (0.7, 0.75);
+/// Ink: how long a blot keeps bleeding outward (s).
+const BLEED_S: f64 = 4.0;
+/// Halftone: how long a failure shakes the dots (s).
+const SHUDDER_S: f64 = 0.6;
+/// Fireflies: at most this many are drawn.
+const MAX_FIREFLIES: usize = 24;
 
 /// Position and velocity after `t` seconds, starting at `x0` with `v0` and heading for `to`.
 fn spring_at((response, zeta): Params, x0: f64, v0: f64, to: f64, t: f64) -> (f64, f64) {
@@ -115,7 +143,8 @@ impl Spring {
 
 // ── Animation state ──────────────────────────────────────────────────────
 
-/// A splash of colour (Tide). Position in 0..1 screen fractions.
+/// A mark made by a key: a splash of colour (Tide), an ink blot, a wipe through the frost, a
+/// firefly or a ripple (Halftone). Position in 0..1 screen fractions.
 struct Splash {
     x: f64,
     y: f64,
@@ -123,6 +152,13 @@ struct Splash {
     seed: u64,
     grow: Spring,
     dying: bool,
+    born: Instant,
+}
+
+impl Splash {
+    fn age(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.born).as_secs_f64()
+    }
 }
 
 /// What the designs animate between frames, driven by the App's state (`sync`).
@@ -133,6 +169,8 @@ pub struct Fx {
     shut: Spring,
     splashes: Vec<Splash>,
     rng: u64,
+    /// Fixed for the whole lock: shapes that must not change between frames (Frost's drips).
+    seed: u64,
     failed_at: Option<Instant>,
     closing: bool,
     /// Stencil: the point inside a digit that the unlock flies through.
@@ -183,6 +221,7 @@ impl Fx {
             shut: Spring::new(1.0, now, SPRING_REOPEN),
             splashes: Vec::new(),
             rng,
+            seed: rng,
             idle_line: idle_line(rng),
             failed_at: None,
             closing: false,
@@ -208,9 +247,10 @@ impl Fx {
         }
         let radius = 0.09 + 0.11 * self.next();
         let seed = (self.next() * 1e15) as u64;
-        let mut grow = Spring::new(0.0, now, SPRING_SPLASH);
-        grow.set(1.0, now, SPRING_SPLASH);
-        self.splashes.push(Splash { x: best.0, y: best.1, radius, seed, grow, dying: false });
+        let params = if self.theme == LockTheme::Fireflies { SPRING_FIREFLY } else { SPRING_SPLASH };
+        let mut grow = Spring::new(0.0, now, params);
+        grow.set(1.0, now, params);
+        self.splashes.push(Splash { x: best.0, y: best.1, radius, seed, grow, dying: false, born: now });
     }
 
     fn drop_splashes(&mut self, keep: usize, now: Instant) {
@@ -228,11 +268,14 @@ impl Fx {
     pub fn sync(&mut self, typed: usize, checking: bool, failed_at: Option<Instant>, closing: bool, now: Instant) {
         if closing && !self.closing {
             self.closing = true;
-            if self.theme == LockTheme::Tide {
-                // Enough colour to spread from, however short the password was.
-                while self.splashes.iter().filter(|s| !s.dying).count() < 6 {
-                    self.add_splash(now);
-                }
+            // Enough to spread from (colour, ink, a swarm), however short the password was.
+            let least = match self.theme {
+                LockTheme::Tide | LockTheme::Ink => 6,
+                LockTheme::Fireflies => 5,
+                _ => 0,
+            };
+            while self.splashes.iter().filter(|s| !s.dying).count() < least {
+                self.add_splash(now);
             }
         }
         if failed_at != self.failed_at {
@@ -247,7 +290,7 @@ impl Fx {
             self.shut.set(1.0, now, SPRING_REOPEN);
         }
         if typed != self.typed && !checking && !self.closing {
-            if self.theme == LockTheme::Tide {
+            if self.theme.marks() {
                 for _ in self.typed..typed {
                     self.add_splash(now);
                 }
@@ -260,7 +303,22 @@ impl Fx {
     }
 
     pub fn animating(&self, now: Instant) -> bool {
-        !self.level.settled(now) || !self.shut.settled(now) || self.splashes.iter().any(|s| !s.grow.settled(now))
+        let moving = match self.theme {
+            LockTheme::Ink => self.splashes.iter().any(|s| s.age(now) < BLEED_S),
+            // Fireflies never stop wandering.
+            LockTheme::Fireflies => !self.splashes.is_empty(),
+            LockTheme::Halftone => self.shudder(now) > 0.0,
+            _ => false,
+        };
+        moving || !self.level.settled(now) || !self.shut.settled(now) || self.splashes.iter().any(|s| !s.grow.settled(now))
+    }
+
+    /// Halftone: how far into the shake after a failure (0 when not shaking).
+    fn shudder(&self, now: Instant) -> f64 {
+        self.failed_at.map_or(0.0, |t| {
+            let a = now.saturating_duration_since(t).as_secs_f64();
+            if a < SHUDDER_S { a.max(1e-6) } else { 0.0 }
+        })
     }
 
     fn level(&self, now: Instant) -> f64 {
@@ -276,15 +334,34 @@ pub struct Layers {
     wall: *mut CairoSurface,
     /// The dimmed or greyed wallpaper the design sits on.
     base: Option<*mut CairoSurface>,
-    /// Tide: the wallpaper with stronger colour, what the splashes are made of.
+    /// Tide: the wallpaper with stronger colour, what the splashes are made of. Ink: the ink.
     vivid: Option<*mut CairoSurface>,
+    /// Halftone: the dot screen it was drawn from, and the dots as last swollen (`merged_at`).
+    dots: Option<Dots>,
+    merged: Option<*mut CairoSurface>,
+    merged_at: Cell<f64>,
+    /// Fireflies: the soft round light one firefly casts, and its radius. Frost: the feather
+    /// mask along the thaw edge (radius `THAW_REACH` times the patch's).
+    light: Option<(*mut CairoSurface, f64)>,
 }
+
+/// Halftone: one dot per cell, coloured from the wallpaper.
+struct Dots {
+    cell: f64,
+    cols: usize,
+    rows: usize,
+    /// Colour and radius per cell, row by row.
+    dot: Vec<(Rgba, f64)>,
+}
+
+/// Halftone: the colour behind the dots.
+const DOT_BG: Rgba = (0.035, 0.035, 0.045, 1.0);
 
 impl Drop for Layers {
     fn drop(&mut self) {
         unsafe {
             cb::cairo_surface_destroy(self.wall);
-            for s in [self.base, self.vivid].into_iter().flatten() {
+            for s in [self.base, self.vivid, self.light.map(|l| l.0), self.merged].into_iter().flatten() {
                 cb::cairo_surface_destroy(s);
             }
         }
@@ -307,14 +384,34 @@ impl Layers {
             }
             cb::cairo_destroy(cr);
             cb::cairo_surface_flush(wall);
+            let dots = (look.theme == LockTheme::Halftone).then(|| dot_screen(wall, w, h));
             let base = match look.theme {
-                LockTheme::Horizon => Some(veiled(wall, w, h, 0.42)),
                 LockTheme::Sentence => Some(veiled(wall, w, h, 0.62)),
                 LockTheme::Tide => Some(greyed(wall, w, h)),
+                LockTheme::Ink => Some(recoloured(wall, w, h, PAPER_DARK, PAPER)),
+                LockTheme::Frost => Some(frosted(wall, w, h)),
+                LockTheme::Fireflies => Some(veiled(wall, w, h, 0.86)),
+                LockTheme::Halftone => dots.as_ref().map(|d| draw_dots(d, w, h)),
                 _ => None,
             };
-            let vivid = (look.theme == LockTheme::Tide).then(|| saturated(wall, w, h));
-            Layers { size: (w, h), wall, base, vivid }
+            let vivid = match look.theme {
+                LockTheme::Tide => Some(saturated(wall, w, h)),
+                LockTheme::Ink => {
+                    let c = look.container;
+                    let dark = (c.0 * 0.25, c.1 * 0.25, c.2 * 0.25, 1.0);
+                    let light = (c.0 + (1.0 - c.0) * 0.45, c.1 + (1.0 - c.1) * 0.45, c.2 + (1.0 - c.2) * 0.45, 1.0);
+                    Some(recoloured(wall, w, h, dark, light))
+                }
+                LockTheme::Fireflies => Some(warmed(wall, w, h)),
+                _ => None,
+            };
+            let light = match look.theme {
+                LockTheme::Fireflies => Some(light_sprite(w.min(h) as f64 * FIREFLY_LIGHT)),
+                LockTheme::Frost => Some(feather_sprite()),
+                _ => None,
+            };
+            let merged = dots.is_some().then(|| cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h));
+            Layers { size: (w, h), wall, base, vivid, dots, merged, merged_at: Cell::new(f64::NAN), light }
         }
     }
 }
@@ -351,6 +448,240 @@ unsafe fn greyed(wall: *mut CairoSurface, w: i32, h: i32) -> *mut CairoSurface {
     }
 }
 
+/// Ink: the paper, and the darkest the paper gets where the wallpaper is black.
+const PAPER: Rgba = (0.965, 0.95, 0.915, 1.0);
+const PAPER_DARK: Rgba = (0.80, 0.78, 0.74, 1.0);
+
+/// The wallpaper's brightness mapped from `dark` (black) to `light` (white).
+unsafe fn recoloured(wall: *mut CairoSurface, w: i32, h: i32, dark: Rgba, light: Rgba) -> *mut CairoSurface {
+    unsafe {
+        let s = veiled(wall, w, h, 0.0);
+        cb::cairo_surface_flush(s);
+        let ramp: Vec<u32> = (0..256u32)
+            .map(|l| {
+                let t = l as f64 / 255.0;
+                let ch = |a: f64, b: f64| ((a + (b - a) * t) * 255.0).round().clamp(0.0, 255.0) as u32;
+                0xFF00_0000 | ch(dark.0, light.0) << 16 | ch(dark.1, light.1) << 8 | ch(dark.2, light.2)
+            })
+            .collect();
+        let (data, stride) = (cb::cairo_image_surface_get_data(s), cb::cairo_image_surface_get_stride(s) as usize);
+        for y in 0..h as usize {
+            let row = std::slice::from_raw_parts_mut(data.add(y * stride) as *mut u32, w as usize);
+            for p in row {
+                let v = *p;
+                *p = ramp[((54 * ((v >> 16) & 255) + 183 * ((v >> 8) & 255) + 19 * (v & 255)) >> 8) as usize];
+            }
+        }
+        cb::cairo_surface_mark_dirty(s);
+        s
+    }
+}
+
+/// `src` drawn at `factor` of its size into a new surface (bilinear when growing).
+unsafe fn rescaled(src: *mut CairoSurface, w: i32, h: i32, factor: f64) -> *mut CairoSurface {
+    unsafe {
+        let s = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h);
+        let cr = cb::cairo_create(s);
+        cb::cairo_scale(cr, factor, factor);
+        cb::cairo_set_source_surface(cr, src, 0.0, 0.0);
+        cb::cairo_pattern_set_filter(cb::cairo_get_source(cr), cb::CAIRO_FILTER_BILINEAR);
+        cb::cairo_paint(cr);
+        cb::cairo_destroy(cr);
+        s
+    }
+}
+
+/// Frost: the wallpaper blurred (shrunk and grown back in steps) under a pale haze.
+unsafe fn frosted(wall: *mut CairoSurface, w: i32, h: i32) -> *mut CairoSurface {
+    unsafe {
+        let size = |f: i32| ((w / f).max(1), (h / f).max(1));
+        let ((w4, h4), (w16, h16), (w48, h48)) = (size(4), size(16), size(48));
+        let a = rescaled(wall, w4, h4, w4 as f64 / w as f64);
+        let b = rescaled(a, w16, h16, w16 as f64 / w4 as f64);
+        let c = rescaled(b, w48, h48, w48 as f64 / w16 as f64);
+        let d = rescaled(c, w16, h16, w16 as f64 / w48 as f64);
+        let e = rescaled(d, w4, h4, w4 as f64 / w16 as f64);
+        let s = rescaled(e, w, h, w as f64 / w4 as f64);
+        for t in [a, b, c, d, e] {
+            cb::cairo_surface_destroy(t);
+        }
+        let cr = cb::cairo_create(s);
+        cb::cairo_set_source_rgba(cr, 0.92, 0.95, 1.0, 0.3);
+        cb::cairo_paint(cr);
+        rime(cr, w as f64, h as f64);
+        cb::cairo_destroy(cr);
+        s
+    }
+}
+
+/// Frost: ice thickening towards the edges of the screen, a white glaze and feathery crystals
+/// growing in from the borders.
+unsafe fn rime(cr: *mut Cairo, w: f64, h: f64) {
+    let unit = w.min(h);
+    let sc = (h / super::DESIGN_H).max(0.1);
+    unsafe {
+        // The glaze: clear in the middle, thick ice at the borders.
+        cb::cairo_save(cr);
+        cb::cairo_translate(cr, w / 2.0, h / 2.0);
+        cb::cairo_scale(cr, w / 2.0, h / 2.0);
+        let g = cb::cairo_pattern_create_radial(0.0, 0.0, 0.55, 0.0, 0.0, 1.45);
+        cb::cairo_pattern_add_color_stop_rgba(g, 0.0, 0.9, 0.95, 1.0, 0.0);
+        cb::cairo_pattern_add_color_stop_rgba(g, 0.6, 0.9, 0.95, 1.0, 0.38);
+        cb::cairo_pattern_add_color_stop_rgba(g, 1.0, 0.95, 0.98, 1.0, 0.75);
+        cb::cairo_set_source(cr, g);
+        cb::cairo_paint(cr);
+        cb::cairo_pattern_destroy(g);
+        cb::cairo_restore(cr);
+
+        // Crystals: many near the borders, a few further in, each a fern of branching needles.
+        let seed = 0x1CE_u64 ^ (w as u64) << 20 ^ h as u64;
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        cb::cairo_new_path(cr);
+        let mut n = 0u64;
+        let mut placed = 0;
+        let want = (1400.0 * (w * h) / (2560.0 * 1440.0)).max(200.0) as usize;
+        while placed < want && n < 40 * want as u64 {
+            n += 1;
+            let (x, y) = (noise(seed, 3 * n) * w, noise(seed, 3 * n + 1) * h);
+            let edge = x.min(w - x).min(y).min(h - y) / unit;
+            if noise(seed, 3 * n + 2) > (-edge / 0.07).exp() {
+                continue;
+            }
+            placed += 1;
+            let inward = (cy - y).atan2(cx - x);
+            let angle = inward + (noise(seed, 5 * n) - 0.5) * 2.2;
+            let len = unit * (0.015 + 0.05 * noise(seed, 5 * n + 1)) * (1.0 - edge * 3.0).max(0.35);
+            fern(cr, x, y, angle, len, 2, seed ^ n);
+        }
+        cb::cairo_set_line_cap(cr, 1);
+        cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.16);
+        cb::cairo_set_line_width(cr, (2.2 * sc).max(1.0));
+        cb::cairo_stroke_preserve(cr);
+        cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.32);
+        cb::cairo_set_line_width(cr, (0.9 * sc).max(0.6));
+        cb::cairo_stroke(cr);
+        cb::cairo_set_line_cap(cr, 0);
+    }
+}
+
+/// One ice crystal: a needle with side needles at an angle, `depth` levels deep.
+unsafe fn fern(cr: *mut Cairo, x: f64, y: f64, angle: f64, len: f64, depth: u32, seed: u64) {
+    let (dx, dy) = (angle.cos(), angle.sin());
+    unsafe {
+        cb::cairo_move_to(cr, x, y);
+        cb::cairo_line_to(cr, x + dx * len, y + dy * len);
+    }
+    if depth == 0 {
+        return;
+    }
+    for (k, at) in [0.3, 0.5, 0.7, 0.88].into_iter().enumerate() {
+        let (bx, by) = (x + dx * len * at, y + dy * len * at);
+        let spread = 0.95 + 0.25 * noise(seed, 10 + k as u64);
+        let side = len * (1.0 - at) * (0.45 + 0.25 * noise(seed, 20 + k as u64));
+        for sign in [-1.0, 1.0] {
+            unsafe { fern(cr, bx, by, angle + sign * spread, side, depth - 1, seed.wrapping_mul(31).wrapping_add(k as u64 * 2 + (sign > 0.0) as u64)) };
+        }
+    }
+}
+
+/// Halftone: the cells and their dots, sampled from the wallpaper shrunk to one pixel per cell.
+unsafe fn dot_screen(wall: *mut CairoSurface, w: i32, h: i32) -> Dots {
+    let cell = (18.0 * h as f64 / super::DESIGN_H).round().max(6.0);
+    let (cols, rows) = ((w as f64 / cell).ceil() as usize, (h as f64 / cell).ceil() as usize);
+    let mut dot = Vec::with_capacity(cols * rows);
+    unsafe {
+        let small = rescaled(wall, cols as i32, rows as i32, 1.0 / cell);
+        cb::cairo_surface_flush(small);
+        let (data, stride) = (cb::cairo_image_surface_get_data(small), cb::cairo_image_surface_get_stride(small) as usize);
+        for y in 0..rows {
+            let row = std::slice::from_raw_parts(data.add(y * stride) as *const u32, cols);
+            for &v in row {
+                let (r, g, b) = (((v >> 16) & 255) as f64 / 255.0, ((v >> 8) & 255) as f64 / 255.0, (v & 255) as f64 / 255.0);
+                let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                // Colour pushed from grey and lifted, so even dark parts read as dots.
+                let push = |c: f64| (l + (c - l) * 1.6).clamp(0.0, 1.0);
+                let lift = |c: f64| 0.18 + 0.82 * c;
+                dot.push(((lift(push(r)), lift(push(g)), lift(push(b)), 1.0), cell * 0.5 * (0.22 + 0.78 * l.sqrt())));
+            }
+        }
+        cb::cairo_surface_destroy(small);
+    }
+    Dots { cell, cols, rows, dot }
+}
+
+unsafe fn draw_dots(d: &Dots, w: i32, h: i32) -> *mut CairoSurface {
+    unsafe {
+        let s = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h);
+        let cr = cb::cairo_create(s);
+        cb::cairo_set_source_rgba(cr, DOT_BG.0, DOT_BG.1, DOT_BG.2, 1.0);
+        cb::cairo_paint(cr);
+        for (i, (c, r)) in d.dot.iter().enumerate() {
+            let (x, y) = ((i % d.cols) as f64 + 0.5, (i / d.cols) as f64 + 0.5);
+            cb::fill_circle(cr, x * d.cell, y * d.cell, *r, *c);
+        }
+        cb::cairo_destroy(cr);
+        s
+    }
+}
+
+/// Fireflies: the radius of a firefly's light, as a fraction of the shorter screen side.
+const FIREFLY_LIGHT: f64 = 0.24;
+
+/// Fireflies: the wallpaper as a firefly lights it, brighter and a little warm.
+unsafe fn warmed(wall: *mut CairoSurface, w: i32, h: i32) -> *mut CairoSurface {
+    unsafe {
+        let s = veiled(wall, w, h, 0.0);
+        let cr = cb::cairo_create(s);
+        cb::cairo_set_source_rgba(cr, 1.0, 0.86, 0.45, 0.16);
+        cb::cairo_paint(cr);
+        cb::cairo_destroy(cr);
+        s
+    }
+}
+
+/// Frost: how far past the thaw radius the feather mask reaches (the edge wobbles out to ~1.12).
+const THAW_REACH: f64 = 1.2;
+
+/// Frost: the ice coming back towards the edge of the thawed patch, as a mask: clear inside
+/// 0.72 of the patch radius, nearly opaque from 1.1 on.
+unsafe fn feather_sprite() -> (*mut CairoSurface, f64) {
+    let r = 256.0;
+    unsafe {
+        let size = (2.0 * r) as i32;
+        let s = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, size, size);
+        let cr = cb::cairo_create(s);
+        let p = cb::cairo_pattern_create_radial(r, r, 0.0, r, r, r);
+        for (at, a) in [(0.72, 0.0), (0.986, 0.55), (1.1, 0.9), (THAW_REACH, 0.9)] {
+            cb::cairo_pattern_add_color_stop_rgba(p, at / THAW_REACH, 0.0, 0.0, 0.0, a);
+        }
+        cb::cairo_set_source(cr, p);
+        cb::cairo_paint(cr);
+        cb::cairo_pattern_destroy(p);
+        cb::cairo_destroy(cr);
+        (s, r)
+    }
+}
+
+/// Fireflies: a soft disc of light (alpha only) with radius `r`, used as a mask.
+unsafe fn light_sprite(r: f64) -> (*mut CairoSurface, f64) {
+    let r = r.max(4.0).round();
+    unsafe {
+        let size = (2.0 * r) as i32;
+        let s = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, size, size);
+        let cr = cb::cairo_create(s);
+        let p = cb::cairo_pattern_create_radial(r, r, 0.0, r, r, r);
+        cb::cairo_pattern_add_color_stop_rgba(p, 0.0, 0.0, 0.0, 0.0, 1.0);
+        cb::cairo_pattern_add_color_stop_rgba(p, 0.3, 0.0, 0.0, 0.0, 0.75);
+        cb::cairo_pattern_add_color_stop_rgba(p, 0.65, 0.0, 0.0, 0.0, 0.25);
+        cb::cairo_pattern_add_color_stop_rgba(p, 1.0, 0.0, 0.0, 0.0, 0.0);
+        cb::cairo_set_source(cr, p);
+        cb::cairo_paint(cr);
+        cb::cairo_pattern_destroy(p);
+        cb::cairo_destroy(cr);
+        (s, r)
+    }
+}
+
 /// The wallpaper with its colours pushed away from grey.
 unsafe fn saturated(wall: *mut CairoSurface, w: i32, h: i32) -> *mut CairoSurface {
     unsafe {
@@ -383,8 +714,6 @@ pub struct Scene {
     pub clock: String,
     pub date: String,
     pub weekday: String,
-    /// Second of the minute and the fraction of the current second.
-    pub second: (u32, f64),
     pub user: String,
     pub entering_user: bool,
     /// The name being typed (greeter user entry).
@@ -578,10 +907,13 @@ pub unsafe fn paint(cr: *mut Cairo, look: &Look, scene: &Scene, fx: &Fx, layers:
         }
         match look.theme {
             LockTheme::Stencil => stencil(&mut c, layers),
-            LockTheme::Horizon => horizon(&mut c, layers),
             LockTheme::Sentence => sentence(&mut c, layers),
             LockTheme::Aperture => aperture(&mut c, layers),
             LockTheme::Tide => tide(&mut c, layers),
+            LockTheme::Ink => ink(&mut c, layers),
+            LockTheme::Frost => frost(&mut c, layers),
+            LockTheme::Fireflies => fireflies(&mut c, layers),
+            LockTheme::Halftone => halftone(&mut c, layers),
             LockTheme::Classic => {}
         }
         let fade = progress((0.5, 1.0), scene.now.saturating_duration_since(scene.opened).as_secs_f64());
@@ -686,88 +1018,6 @@ unsafe fn stencil(c: &mut Ctx, layers: &Layers) {
             c.reveal_wallpaper(layers, ((fly - 0.8) / 0.18).clamp(0.0, 1.0));
         }
     }
-}
-
-// ── Horizon ──────────────────────────────────────────────────────────────
-
-/// Everything above and below the line; drawn once per half while the screen splits.
-unsafe fn horizon_scene(c: &mut Ctx, layers: &Layers, line_y: f64, ink: Rgba) {
-    let (cr, s, l) = (c.cr, c.s, c.l);
-    let (w, margin) = (c.w, c.px(110.0));
-    unsafe {
-        if let Some(b) = layers.base {
-            c.paint_surface(b, 1.0);
-        }
-        let thick = c.px(1.5).max(1.0);
-        cb::cairo_set_source_rgba(cr, ink.0, ink.1, ink.2, 0.6);
-        cb::cairo_rectangle(cr, 0.0, line_y - thick / 2.0, w, thick);
-        cb::cairo_fill(cr);
-    }
-    // The time rests on the line, the date at the other end.
-    let cf = l.f("Light", c.px(104.0));
-    let (_, ch) = text_size(cr, &s.clock, &cf);
-    c.text(margin, line_y - ch - c.px(4.0), &s.clock, &cf, ink, true);
-    let df = l.f("Bold", c.px(13.0));
-    let spacing = c.px(5.0);
-    let (_, dh) = text_size(cr, "A", &df);
-    let dw = spaced_width(cr, &s.date, &df, spacing);
-    c.spaced(w - margin - dw, line_y - dh - c.px(16.0), &s.date, &df, alpha(ink, 0.85), spacing, true);
-
-    // A marker steps along the line once a second.
-    let tick = progress(SPRING_TICK, s.second.1);
-    let along = (s.second.0 as f64 - 1.0 + tick).rem_euclid(60.0) / 60.0;
-    cb::fill_circle(cr, along * w, line_y, c.px(5.0), bright(l.primary));
-
-    if s.typed > 0 && !s.entering_user {
-        let (r, step) = (c.px(5.5), c.px(26.0));
-        let n = s.typed.min(40);
-        let x0 = w / 2.0 - (n - 1) as f64 * step / 2.0;
-        for i in 0..n {
-            cb::fill_circle(cr, x0 + i as f64 * step, line_y, r, ink);
-        }
-        horizon_status(c, line_y, ink);
-    } else {
-        c.prompt(w / 2.0, line_y + c.px(34.0), Align::Center, ink, true);
-    }
-    c.footer(ink, true);
-    c.preview_banner(ink);
-}
-
-/// The status line while the dots sit on the line itself.
-fn horizon_status(c: &Ctx, line_y: f64, ink: Rgba) {
-    let s = c.s;
-    let y = line_y + c.px(24.0);
-    if !s.status.is_empty() {
-        let font = c.l.f("Medium", c.px(14.0));
-        let (tw, _) = text_size(c.cr, &s.status, &font);
-        let col = if s.status_error { bright(c.l.error) } else { alpha(ink, 0.75) };
-        c.text((c.w - tw) / 2.0, y, &s.status, &font, col, true);
-    } else if s.caps_lock {
-        let font = c.l.f("Bold", c.px(11.0));
-        c.spaced_at(c.w / 2.0, y, Align::Center, "CAPS LOCK IS ON", &font, bright(c.l.primary), c.px(3.0), true);
-    }
-}
-
-unsafe fn horizon(c: &mut Ctx, layers: &Layers) {
-    let (cr, w, h) = (c.cr, c.w, c.h);
-    let line_y = (h * 0.62).round();
-    let Some(t) = c.closing_t() else {
-        unsafe { horizon_scene(c, layers, line_y, WHITE) };
-        return;
-    };
-    let open = progress((0.6, 0.92), t);
-    unsafe {
-        c.paint_surface(layers.wall, 1.0);
-        for (top, height, shift) in [(0.0, line_y, -line_y * open), (line_y, h - line_y, (h - line_y) * open)] {
-            cb::cairo_save(cr);
-            cb::cairo_rectangle(cr, 0.0, top + shift, w, height);
-            cb::cairo_clip(cr);
-            cb::cairo_translate(cr, 0.0, shift);
-            horizon_scene(c, layers, line_y, WHITE);
-            cb::cairo_restore(cr);
-        }
-    }
-    c.hits.clear();
 }
 
 // ── Sentence ─────────────────────────────────────────────────────────────
@@ -955,7 +1205,7 @@ unsafe fn splash_path(cr: *mut Cairo, x: f64, y: f64, r: f64, seed: u64) {
 }
 
 unsafe fn tide(c: &mut Ctx, layers: &Layers) {
-    let (cr, s, l) = (c.cr, c.s, c.l);
+    let (cr, s) = (c.cr, c.s);
     let (w, h) = (c.w, c.h);
     let closing = c.closing_t();
     let far = (w * w + h * h).sqrt();
@@ -987,16 +1237,445 @@ unsafe fn tide(c: &mut Ctx, layers: &Layers) {
     }
     let ink = alpha(WHITE, closing.map_or(1.0, |t| (1.0 - t * 5.0).clamp(0.0, 1.0)));
     if ink.3 > 0.0 {
-        let (x, mut y) = (c.px(96.0), h - c.px(300.0));
-        let cf = l.f("Bold", c.px(72.0));
-        let (_, th) = text_size(cr, &s.clock, &cf);
-        c.text(x, y, &s.clock, &cf, ink, true);
-        y += th + c.px(2.0);
-        let df = l.f("Bold", c.px(12.0));
-        c.spaced(x, y, &s.date, &df, alpha(ink, 0.85), c.px(4.0), true);
-        c.prompt(x, y + c.px(52.0), Align::Left, ink, true);
-        c.footer(ink, true);
-        c.preview_banner(ink);
+        corner_block(c, ink, true);
+    }
+}
+
+/// Time, date and prompt in the bottom-left corner (Tide, Frost), then the footer.
+fn corner_block(c: &mut Ctx, ink: Rgba, shadow: bool) {
+    let (s, l) = (c.s, c.l);
+    let (x, mut y) = (c.px(96.0), c.h - c.px(300.0));
+    let cf = l.f("Bold", c.px(72.0));
+    let (_, th) = text_size(c.cr, &s.clock, &cf);
+    c.text(x, y, &s.clock, &cf, ink, shadow);
+    y += th + c.px(2.0);
+    let df = l.f("Bold", c.px(12.0));
+    c.spaced(x, y, &s.date, &df, alpha(ink, 0.85), c.px(4.0), shadow);
+    c.prompt(x, y + c.px(52.0), Align::Left, ink, shadow);
+    c.footer(ink, shadow);
+    c.preview_banner(ink);
+}
+
+/// A large light time centred at `y`, the date and prompt under it, then the footer.
+fn center_block(c: &mut Ctx, y: f64, ink: Rgba, shadow: bool) {
+    let (s, l) = (c.s, c.l);
+    let cf = l.f("Light", c.px(112.0));
+    let (tw, th) = text_size(c.cr, &s.clock, &cf);
+    c.text((c.w - tw) / 2.0, y - th / 2.0, &s.clock, &cf, ink, shadow);
+    let df = l.f("Bold", c.px(13.0));
+    let dy = y + th / 2.0 + c.px(2.0);
+    c.spaced_at(c.w / 2.0, dy, Align::Center, &s.date, &df, alpha(ink, 0.85), c.px(5.0), shadow);
+    c.prompt(c.w / 2.0, dy + c.px(70.0), Align::Center, ink, shadow);
+    c.footer(ink, shadow);
+    c.preview_banner(ink);
+}
+
+/// Text fades out over the first fifth of a second of the unlock.
+fn text_fade(closing: Option<f64>) -> f64 {
+    closing.map_or(1.0, |t| (1.0 - t * 5.0).clamp(0.0, 1.0))
+}
+
+// ── Ink ──────────────────────────────────────────────────────────────────
+
+/// The blots as one path: each grows with its spring, keeps bleeding for a few seconds, and
+/// on the unlock floods outward a moment after the one before.
+unsafe fn ink_path(c: &Ctx) {
+    let (s, w, h) = (c.s, c.w, c.h);
+    let unit = w.min(h);
+    let far = (w * w + h * h).sqrt();
+    unsafe {
+        cb::cairo_new_path(c.cr);
+        for (i, sp) in c.fx.splashes.iter().enumerate() {
+            let bleed = 1.0 + 0.4 * (1.0 - (-sp.age(s.now) / 1.6).exp());
+            let mut r = sp.radius * 0.7 * unit * sp.grow.value(s.now).max(0.0) * bleed;
+            if let Some(t) = c.closing_t() {
+                r += far * 1.3 * progress((0.95, 1.0), t - (i % 12) as f64 * 0.05).powi(2);
+            }
+            if r > 0.5 {
+                splash_path(c.cr, sp.x * w, sp.y * h, r, sp.seed);
+            }
+        }
+    }
+}
+
+unsafe fn ink(c: &mut Ctx, layers: &Layers) {
+    let cr = c.cr;
+    let closing = c.closing_t();
+    unsafe {
+        if let Some(b) = layers.base {
+            c.paint_surface(b, 1.0);
+        }
+        ink_path(c);
+        cb::cairo_set_source_surface(cr, layers.vivid.unwrap_or(layers.wall), 0.0, 0.0);
+        cb::cairo_fill(cr);
+        let fade = text_fade(closing);
+        if fade > 0.0 {
+            // Dark ink on the paper, paper colour where a blot runs under the text.
+            let y = c.h * 0.36;
+            let dark = (0.10, 0.10, 0.14, fade);
+            center_block(c, y, dark, false);
+            let kept = c.hits.len();
+            cb::cairo_save(cr);
+            ink_path(c);
+            cb::cairo_clip(cr);
+            center_block(c, y, alpha(PAPER, fade), false);
+            cb::cairo_restore(cr);
+            c.hits.truncate(kept);
+        }
+        if let Some(t) = closing {
+            let whole = ((t - 0.95) / 0.3).clamp(0.0, 1.0);
+            if whole > 0.0 {
+                c.paint_surface(layers.wall, whole);
+            }
+        }
+    }
+}
+
+// ── Frost ────────────────────────────────────────────────────────────────
+
+/// The edge of the frost melting down the screen: a wavy line `melt` px down with drips.
+unsafe fn melt_path(cr: *mut Cairo, w: f64, h: f64, melt: f64, seed: u64) {
+    const COLS: usize = 14;
+    let col = w / COLS as f64;
+    let mut pts: Vec<(f64, f64)> = vec![(-col, melt)];
+    for i in 0..COLS {
+        let x = col * (i as f64 + 0.5 + 0.5 * (noise(seed, 40 + i as u64) - 0.5));
+        let drip = h * (0.04 + 0.2 * noise(seed, 60 + i as u64).powi(2));
+        let half = col * (0.1 + 0.08 * noise(seed, 80 + i as u64));
+        pts.extend([(x - 2.5 * half, melt), (x - half, melt + drip * 0.7), (x, melt + drip), (x + half, melt + drip * 0.7), (x + 2.5 * half, melt)]);
+    }
+    pts.push((w + col, melt));
+    let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+    unsafe {
+        cb::cairo_new_sub_path(cr);
+        cb::cairo_move_to(cr, -col, -1.0);
+        cb::cairo_line_to(cr, w + col, -1.0);
+        cb::cairo_line_to(cr, w + col, melt);
+        // Smoothed through the midpoints, right to left.
+        let rev: Vec<(f64, f64)> = pts.into_iter().rev().collect();
+        for k in 1..rev.len() - 1 {
+            let (from, p, to) = (mid(rev[k - 1], rev[k]), rev[k], mid(rev[k], rev[k + 1]));
+            let ctl = |a: f64, b: f64| a + (b - a) * 2.0 / 3.0;
+            cb::cairo_line_to(cr, from.0, from.1);
+            cb::cairo_curve_to(cr, ctl(from.0, p.0), ctl(from.1, p.1), ctl(to.0, p.0), ctl(to.1, p.1), to.0, to.1);
+        }
+        cb::cairo_line_to(cr, -col, melt);
+        cb::cairo_close_path(cr);
+    }
+}
+
+/// Frost: the edge of the thawed patch, an uneven circle of radius `r`, as points.
+fn thaw_points(x: f64, y: f64, r: f64, seed: u64) -> Vec<(f64, f64)> {
+    const POINTS: usize = 64;
+    let tau = std::f64::consts::TAU;
+    (0..POINTS)
+        .map(|i| {
+            let a = tau * i as f64 / POINTS as f64;
+            let wave = 0.06 * (a * 3.0 + tau * noise(seed, 1)).sin() + 0.035 * (a * 7.0 + tau * noise(seed, 2)).sin() + 0.02 * (a * 13.0 + tau * noise(seed, 3)).sin();
+            let k = r * (1.0 + wave);
+            (x + a.cos() * k, y + a.sin() * k)
+        })
+        .collect()
+}
+
+/// The closed smooth curve through `pts` (through their midpoints, like the Tide splashes).
+unsafe fn smooth_closed(cr: *mut Cairo, pts: &[(f64, f64)]) {
+    let n = pts.len();
+    let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+    let ctl = |a: f64, b: f64| a + (b - a) * 2.0 / 3.0;
+    unsafe {
+        cb::cairo_new_path(cr);
+        let start = mid(pts[n - 1], pts[0]);
+        cb::cairo_move_to(cr, start.0, start.1);
+        for i in 0..n {
+            let (p, end) = (pts[i], mid(pts[i], pts[(i + 1) % n]));
+            let from = mid(pts[(i + n - 1) % n], p);
+            cb::cairo_curve_to(cr, ctl(from.0, p.0), ctl(from.1, p.1), ctl(end.0, p.0), ctl(end.1, p.1), end.0, end.1);
+        }
+        cb::cairo_close_path(cr);
+    }
+}
+
+unsafe fn frost(c: &mut Ctx, layers: &Layers) {
+    let (cr, s) = (c.cr, c.s);
+    let (w, h) = (c.w, c.h);
+    let unit = w.min(h);
+    let far = (w * w + h * h).sqrt();
+    let closing = c.closing_t();
+    let ice = layers.base.unwrap_or(layers.wall);
+    unsafe {
+        c.paint_surface(ice, 1.0);
+        // Each key thaws the glass further out from the middle; the edges stay iced.
+        let mut r = unit * 0.62 * (1.0 - (-c.fx.level(s.now) / 5.0).exp());
+        if let Some(t) = closing {
+            r += far * progress((0.85, 1.0), t);
+        }
+        if r > 1.0 {
+            let (cx, cy) = (w / 2.0, h * 0.45);
+            let pts = thaw_points(cx, cy, r, c.fx.seed);
+            smooth_closed(cr, &pts);
+            cb::cairo_set_source_surface(cr, layers.wall, 0.0, 0.0);
+            cb::cairo_fill_preserve(cr);
+            // The ice fades in towards the edge instead of stopping hard (not while unlocking:
+            // the patch is then the size of the screen).
+            if let (Some((sprite, sr)), None) = (layers.light, closing) {
+                let reach = r * THAW_REACH;
+                cb::cairo_save(cr);
+                cb::cairo_clip(cr);
+                cb::cairo_set_source_surface(cr, ice, 0.0, 0.0);
+                cb::cairo_translate(cr, cx - reach, cy - reach);
+                cb::cairo_scale(cr, reach / sr, reach / sr);
+                cb::cairo_mask_surface(cr, sprite, 0.0, 0.0);
+                cb::cairo_restore(cr);
+            } else {
+                cb::cairo_new_path(cr);
+            }
+            // Needles of ice growing in from the rim, then a faint bright line along it.
+            if closing.is_none() {
+                cb::cairo_new_path(cr);
+                for (i, &(px, py)) in pts.iter().enumerate() {
+                    let k = c.fx.seed ^ (i as u64) << 8;
+                    if noise(k, 1) < 0.35 {
+                        continue;
+                    }
+                    let inward = (cy - py).atan2(cx - px) + (noise(k, 2) - 0.5) * 1.1;
+                    fern(cr, px, py, inward, c.px(26.0 + 40.0 * noise(k, 3)), 1, k);
+                }
+                cb::cairo_set_line_cap(cr, 1);
+                cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.2);
+                cb::cairo_set_line_width(cr, c.px(2.2).max(1.0));
+                cb::cairo_stroke_preserve(cr);
+                cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.45);
+                cb::cairo_set_line_width(cr, c.px(0.9).max(0.6));
+                cb::cairo_stroke(cr);
+                cb::cairo_set_line_cap(cr, 0);
+            }
+            smooth_closed(cr, &pts);
+            cb::cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.3);
+            cb::cairo_set_line_width(cr, c.px(1.5).max(1.0));
+            cb::cairo_stroke(cr);
+        }
+        if let Some(t) = closing {
+            let melt = progress((0.85, 1.0), t) * h * 1.3;
+            cb::cairo_new_path(cr);
+            melt_path(cr, w, h, melt, c.fx.seed);
+            cb::cairo_set_source_surface(cr, layers.wall, 0.0, 0.0);
+            cb::cairo_fill(cr);
+            let whole = ((t - 0.8) / 0.3).clamp(0.0, 1.0);
+            if whole > 0.0 {
+                c.paint_surface(layers.wall, whole);
+            }
+        }
+    }
+    let ink = alpha(WHITE, text_fade(closing));
+    if ink.3 > 0.0 {
+        corner_block(c, ink, true);
+    }
+}
+
+// ── Fireflies ────────────────────────────────────────────────────────────
+
+unsafe fn fireflies(c: &mut Ctx, layers: &Layers) {
+    let (cr, s) = (c.cr, c.s);
+    let (w, h) = (c.w, c.h);
+    let unit = w.min(h);
+    let tau = std::f64::consts::TAU;
+    let closing = c.closing_t();
+    let flies = c.fx.splashes.len().saturating_sub(MAX_FIREFLIES);
+    unsafe {
+        if let Some(b) = layers.base {
+            c.paint_surface(b, 1.0);
+        }
+        let mut glows = Vec::new();
+        for (i, sp) in c.fx.splashes.iter().enumerate().skip(flies) {
+            let (age, g) = (sp.age(s.now), sp.grow.value(s.now).clamp(0.0, 1.2));
+            // A slow wander around where it was born, rising in as it appears.
+            let f = |k: u64| 0.07 + 0.09 * noise(sp.seed, k);
+            let mut x = sp.x + 0.045 * (age * tau * f(1) + tau * noise(sp.seed, 2)).sin();
+            let mut y = sp.y + 0.035 * (age * tau * f(3) + tau * noise(sp.seed, 4)).sin() + 0.08 * (1.0 - g.min(1.0));
+            if sp.dying {
+                // Scattered away from the middle of the screen.
+                let (dx, dy) = (x - 0.5, y - 0.5);
+                let d = (dx * dx + dy * dy).sqrt().max(0.05);
+                x += dx / d * 0.25 * (1.0 - g);
+                y += dy / d * 0.25 * (1.0 - g);
+            }
+            let flicker = 0.78 + 0.22 * (age * tau * (0.5 + 0.6 * noise(sp.seed, 5))).sin();
+            let mut light = unit * FIREFLY_LIGHT * (0.8 + 0.2 * noise(sp.seed, 6));
+            let mut bright = g.min(1.0) * flicker;
+            if let Some(t) = closing {
+                let gather = progress((0.7, 1.0), t);
+                x += (0.5 - x) * gather;
+                y += (0.45 - y) * gather;
+                light *= 1.0 + 0.8 * progress((0.8, 1.0), t - 0.2 - (i % 8) as f64 * 0.03);
+                bright = bright.max(gather);
+            }
+            if bright > 0.01 {
+                glows.push((x * w, y * h, light, bright));
+            }
+        }
+        // Daylight comes back once the swarm has gathered.
+        let day = closing.map_or(0.0, |t| ((t - 0.5) / 0.5).clamp(0.0, 1.0));
+        // Each firefly lights the wallpaper around it (a baked disc of light as the mask).
+        if let Some((sprite, sr)) = layers.light.filter(|_| day < 1.0) {
+            for &(x, y, r, b) in &glows {
+                cb::cairo_save(cr);
+                cb::cairo_rectangle(cr, x - r, y - r, 2.0 * r, 2.0 * r);
+                cb::cairo_clip(cr);
+                cb::cairo_push_group(cr);
+                cb::cairo_save(cr);
+                cb::cairo_set_source_surface(cr, layers.vivid.unwrap_or(layers.wall), 0.0, 0.0);
+                cb::cairo_translate(cr, x - r, y - r);
+                cb::cairo_scale(cr, r / sr, r / sr);
+                cb::cairo_mask_surface(cr, sprite, 0.0, 0.0);
+                cb::cairo_restore(cr);
+                cb::cairo_pop_group_to_source(cr);
+                cb::cairo_paint_with_alpha(cr, b.min(1.0));
+                cb::cairo_restore(cr);
+            }
+        }
+        if day > 0.0 {
+            c.paint_surface(layers.wall, day);
+        }
+        // And glows itself: a soft halo round a bright core.
+        let fly = (0.86, 1.0, 0.55);
+        for &(x, y, _, b) in &glows {
+            let b = b * (1.0 - day);
+            let halo = c.px(30.0);
+            let p = cb::cairo_pattern_create_radial(x, y, 0.0, x, y, halo);
+            cb::cairo_pattern_add_color_stop_rgba(p, 0.0, fly.0, fly.1, fly.2, 0.75 * b);
+            cb::cairo_pattern_add_color_stop_rgba(p, 1.0, fly.0, fly.1, fly.2, 0.0);
+            cb::cairo_new_path(cr);
+            cb::cairo_arc(cr, x, y, halo, 0.0, tau);
+            cb::cairo_set_source(cr, p);
+            cb::cairo_fill(cr);
+            cb::cairo_pattern_destroy(p);
+            cb::fill_circle(cr, x, y, c.px(3.0), (1.0, 1.0, 0.85, b));
+        }
+    }
+    let ink = alpha(WHITE, text_fade(closing));
+    if ink.3 > 0.0 {
+        center_block(c, h * 0.3, ink, true);
+    }
+}
+
+// ── Halftone ─────────────────────────────────────────────────────────────
+
+/// Halftone: every dot `merge` (0 to 1) of the way from its own size to one that overlaps its
+/// neighbours, rasterised straight into `s` (anti-aliased, in bands on several threads: thousands
+/// of cairo arcs per frame would be far too slow).
+unsafe fn raster_dots(s: *mut CairoSurface, d: &Dots, merge: f64) {
+    let (w, h) = unsafe { (cb::cairo_image_surface_get_width(s) as usize, cb::cairo_image_surface_get_height(s) as usize) };
+    let stride = unsafe { cb::cairo_image_surface_get_stride(s) as usize } / 4;
+    unsafe { cb::cairo_surface_flush(s) };
+    let data = unsafe { std::slice::from_raw_parts_mut(cb::cairo_image_surface_get_data(s) as *mut u32, stride * h) };
+    let full = d.cell * 0.75;
+    let bg = |c: f64| (c * 255.0).round() as u32;
+    let bg = 0xFF00_0000 | bg(DOT_BG.0) << 16 | bg(DOT_BG.1) << 8 | bg(DOT_BG.2);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let band = h.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (k, rows) in data.chunks_mut(band * stride).enumerate() {
+            scope.spawn(move || {
+                let (y0, y1) = (k * band, (k * band + rows.len() / stride).min(h));
+                rows.fill(bg);
+                let reach = full + 1.0;
+                let first = (((y0 as f64 - reach) / d.cell).floor().max(0.0)) as usize;
+                let last = ((((y1 as f64 + reach) / d.cell).ceil()) as usize).min(d.rows);
+                for row in first..last {
+                    let cy = (row as f64 + 0.5) * d.cell;
+                    for col in 0..d.cols {
+                        let (c, r0) = d.dot[row * d.cols + col];
+                        let r = r0 + (full - r0) * merge;
+                        let cx = (col as f64 + 0.5) * d.cell;
+                        let colour = [c.0, c.1, c.2].map(|v| v * 255.0);
+                        let solid = 0xFF00_0000 | (colour[0].round() as u32) << 16 | (colour[1].round() as u32) << 8 | colour[2].round() as u32;
+                        // Pixels this far in are fully covered; only the rim needs blending.
+                        let (inner, outer) = ((r - 0.5).max(0.0).powi(2), (r + 0.5).powi(2));
+                        let py0 = ((cy - r - 1.0).floor().max(y0 as f64)) as usize;
+                        let py1 = ((cy + r + 1.0).ceil() as usize).min(y1);
+                        let px0 = (cx - r - 1.0).floor().max(0.0) as usize;
+                        let px1 = ((cx + r + 1.0).ceil() as usize).min(w);
+                        // The last column of cells can lie (partly) past the right edge.
+                        if px0 >= px1 {
+                            continue;
+                        }
+                        for py in py0..py1 {
+                            let dy = py as f64 + 0.5 - cy;
+                            let line = &mut rows[(py - y0) * stride + px0..(py - y0) * stride + px1];
+                            for (px, p) in (px0..).zip(line.iter_mut()) {
+                                let dx = px as f64 + 0.5 - cx;
+                                let d2 = dx * dx + dy * dy;
+                                if d2 >= outer {
+                                    continue;
+                                }
+                                if d2 <= inner {
+                                    *p = solid;
+                                    continue;
+                                }
+                                let cover = (r - d2.sqrt() + 0.5).clamp(0.0, 1.0);
+                                let old = [(*p >> 16) & 255, (*p >> 8) & 255, *p & 255].map(|v| v as f64);
+                                let mix = |i: usize| (old[i] + (colour[i] - old[i]) * cover).round() as u32;
+                                *p = 0xFF00_0000 | mix(0) << 16 | mix(1) << 8 | mix(2);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    unsafe { cb::cairo_surface_mark_dirty(s) };
+}
+
+unsafe fn halftone(c: &mut Ctx, layers: &Layers) {
+    let (cr, s) = (c.cr, c.s);
+    let closing = c.closing_t();
+    let (Some(base), Some(d)) = (layers.base, layers.dots.as_ref()) else { return };
+    // Typing swells the dots until they merge into a mosaic, then the picture itself comes through.
+    let level = c.fx.level(s.now);
+    let ease = |x: f64| { let x = x.clamp(0.0, 1.0); x * x * (3.0 - 2.0 * x) };
+    let (mut merge, mut clear) = (ease(level / 8.0), 0.8 * ease((level - 3.0) / 9.0));
+    // Unlocking finishes the same motion: the dots swell until they merge, and the mosaic
+    // settles into the wallpaper.
+    if let Some(t) = closing {
+        merge += (1.0 - merge) * progress((0.45, 1.0), t);
+        clear += (1.0 - clear) * progress((0.55, 1.0), t - 0.15);
+    }
+    // After a failure the whole screen shudders sideways.
+    let a = c.fx.shudder(s.now);
+    let dx = if a > 0.0 { c.px(16.0) * (a * std::f64::consts::TAU * 7.0).sin() * (-a * 7.0).exp() } else { 0.0 };
+    unsafe {
+        let shown = match layers.merged {
+            Some(m) if merge >= 0.002 => {
+                if (layers.merged_at.get() - merge).abs() > 0.001 || layers.merged_at.get().is_nan() {
+                    raster_dots(m, d, merge);
+                    layers.merged_at.set(merge);
+                }
+                m
+            }
+            _ => base,
+        };
+        let dots = |dx: f64| {
+            cb::cairo_set_source_surface(cr, shown, dx, 0.0);
+            cb::cairo_paint(cr);
+        };
+        if clear >= 0.999 {
+            c.paint_surface(layers.wall, 1.0);
+        } else {
+            if dx != 0.0 {
+                cb::cairo_set_source_rgba(cr, DOT_BG.0, DOT_BG.1, DOT_BG.2, 1.0);
+                cb::cairo_paint(cr);
+            }
+            dots(dx);
+            if clear > 0.0 {
+                cb::cairo_set_source_surface(cr, layers.wall, dx, 0.0);
+                cb::cairo_paint_with_alpha(cr, clear);
+            }
+        }
+    }
+    let ink = alpha(WHITE, text_fade(closing));
+    if ink.3 > 0.0 {
+        corner_block(c, ink, true);
     }
 }
 
@@ -1005,12 +1684,15 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    const THEMES: [(LockTheme, &str); 5] = [
+    const THEMES: [(LockTheme, &str); 8] = [
         (LockTheme::Stencil, "stencil"),
-        (LockTheme::Horizon, "horizon"),
         (LockTheme::Sentence, "sentence"),
         (LockTheme::Aperture, "aperture"),
         (LockTheme::Tide, "tide"),
+        (LockTheme::Ink, "ink"),
+        (LockTheme::Frost, "frost"),
+        (LockTheme::Fireflies, "fireflies"),
+        (LockTheme::Halftone, "halftone"),
     ];
 
     fn look(theme: LockTheme) -> Look {
@@ -1039,7 +1721,6 @@ mod tests {
             clock: "11:42".into(),
             date: "WEDNESDAY / NOVEMBER 18".into(),
             weekday: "Wednesday".into(),
-            second: (24, 0.1),
             user: "operative".into(),
             entering_user: false,
             typed_name: String::new(),
@@ -1071,9 +1752,11 @@ mod tests {
                 fx.sync(n, false, None, false, t0 + Duration::from_millis(1000 + n as u64 * 200));
             }
             let close_at = settled + Duration::from_secs(1);
-            let frames: [(&str, Instant, Option<Instant>, usize); 5] = [
+            let frames: [(&str, Instant, Option<Instant>, usize); 6] = [
                 ("idle", settled, None, 0),
                 ("typing", settled, None, 7),
+                // A moment after the last key, while its mark is still moving.
+                ("typing-live", t0 + Duration::from_millis(1000 + 7 * 200 + 350), None, 7),
                 ("unlock-early", close_at + Duration::from_millis(180), Some(close_at), 7),
                 ("unlock-mid", close_at + Duration::from_millis(380), Some(close_at), 7),
                 ("unlock-end", close_at + Duration::from_millis(theme.closing_ms() as u64), Some(close_at), 7),
@@ -1107,6 +1790,20 @@ mod tests {
                 unsafe { cb::cairo_surface_destroy(img) };
             }
             drop(fx);
+        }
+    }
+
+    /// The swollen dots reach past the screen edges at any size (a dot off the right edge once
+    /// panicked the lock screen).
+    #[test]
+    fn halftone_merges_at_any_screen_size() {
+        let l = look(LockTheme::Halftone);
+        for (w, h) in [(3840, 2160), (1920, 1080), (2560, 1440), (1366, 768), (1707, 1067), (3440, 1440), (1001, 613), (64, 37)] {
+            let layers = Layers::render(&l, w, h);
+            let d = layers.dots.as_ref().unwrap();
+            for merge in [0.0, 0.3, 0.7, 1.0] {
+                unsafe { raster_dots(layers.merged.unwrap(), d, merge) };
+            }
         }
     }
 
