@@ -84,6 +84,8 @@ enum Kind {
 struct OutVideo {
     stream: VideoStream,
     buffers: Vec<wl_buffer::WlBuffer>,
+    /// A frame has been put on screen (until then the output shows black).
+    showing: bool,
 }
 
 impl Drop for OutVideo {
@@ -173,6 +175,11 @@ struct St {
     enabled: bool,
     /// The video to play instead of `path`.
     video: Option<PathBuf>,
+    /// Video at 60 frames a second with lanczos scaling (`wallpaper_video_smooth`).
+    smooth: bool,
+    /// Video held on its current frame (`wallpaper_video_pause`); the decoder rests once its
+    /// frames are all waiting.
+    paused: bool,
     transition: String,
     time_scale: Option<f64>,
     seed: u64,
@@ -195,6 +202,8 @@ impl Background {
             path: None,
             enabled: false,
             video: None,
+            smooth: false,
+            paused: false,
             transition: "random".into(),
             time_scale: Some(1.0),
             seed: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1,
@@ -221,8 +230,19 @@ impl Background {
         self.st.transition = cfg.wallpaper_transition.clone();
         self.st.time_scale = crate::ui::Style::new(cfg, &prism_common::Theme::load()).time_scale();
         if enabled == self.st.enabled && video == self.st.video {
+            // Same video in another quality: only the decoders start over.
+            if cfg.wallpaper_video_smooth != self.st.smooth {
+                self.st.smooth = cfg.wallpaper_video_smooth;
+                let qh = self.queue.handle();
+                for i in 0..self.st.outs.len() {
+                    if self.st.outs[i].video.take().is_some() {
+                        self.st.start_video(i, &qh);
+                    }
+                }
+            }
             return;
         }
+        self.st.smooth = cfg.wallpaper_video_smooth;
         // Switching between a picture and a video starts over with new surfaces.
         for o in self.st.outs.iter_mut() {
             o.destroy();
@@ -246,6 +266,11 @@ impl Background {
     /// What the event loop has to watch for the videos.
     pub fn video_fds(&self) -> Vec<i32> {
         self.st.outs.iter().filter_map(|o| o.video.as_ref()).map(|v| v.stream.fd()).collect()
+    }
+
+    /// Hold the video on its current frame (windows cover it) or let it play on.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.st.paused = paused;
     }
 
     /// Show the frames that are due; returns ms until the next one.
@@ -345,7 +370,7 @@ impl St {
             return;
         }
         let (w, h) = o.pixel_size(vp);
-        let Some(stream) = VideoStream::open(&file, w, h) else {
+        let Some(stream) = VideoStream::open(&file, w, h, self.smooth) else {
             eprintln!("[prism-ui] cannot start the video wallpaper");
             self.video = None;
             return self.request(i);
@@ -355,7 +380,7 @@ impl St {
             .map(|slot| pool.create_buffer(slot * stream.frame_size(), w, h, w * 4, wl_shm::Format::Argb8888, qh, o.name))
             .collect();
         pool.destroy();
-        o.video = Some(OutVideo { stream, buffers });
+        o.video = Some(OutVideo { stream, buffers, showing: false });
     }
 
     /// Put the frames that are due on screen; returns ms until the next one is due.
@@ -369,9 +394,10 @@ impl St {
                 failed = true;
                 continue;
             }
-            // The compositor stops asking for frames while the wallpaper is fully covered: the
-            // decoder then runs out of free frames and rests.
-            if o.frame.is_none() {
+            // The compositor stops asking for frames while the wallpaper is fully covered, and
+            // a pause shows none: the decoder then runs out of free frames and rests. Playing
+            // again carries on from there (`take_due` does not race to catch up).
+            if o.frame.is_none() && !(self.paused && v.showing) {
                 if let (Some(slot), Some(surface)) = (v.stream.take_due(now), o.surface.as_ref()) {
                     surface.attach(Some(&v.buffers[slot as usize]), 0, 0);
                     surface.damage_buffer(0, 0, v.stream.width, v.stream.height);
@@ -380,6 +406,7 @@ impl St {
                     }
                     o.frame = Some(surface.frame(qh, o.name));
                     surface.commit();
+                    v.showing = true;
                 }
                 if let Some(wait) = v.stream.due_in(now) {
                     let ms = wait.as_millis() as i32 + 1;
@@ -693,9 +720,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for St {
                     st.request(i);
                 }
                 // Something on screen at once (the old picture or black) until the decode lands.
+                // Mango configures every layer surface again whenever another one changes (a
+                // card opening): a playing video must not be covered with black each time.
+                let playing = st.outs[i].video.as_ref().is_some_and(|v| v.showing);
                 if st.outs[i].new.is_some() {
                     st.draw(i, qh);
-                } else if st.outs[i].shown.is_none() {
+                } else if st.outs[i].shown.is_none() && !playing {
                     st.blank(i, qh);
                 }
             }

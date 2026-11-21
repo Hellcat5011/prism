@@ -75,6 +75,8 @@ pub enum Hit {
     PhoneNext,
     /// The Notes widget: open the editor.
     NotesOpen,
+    /// The Notes widget's list: open this note.
+    NoteOpen(u64),
     /// The Weather widget: fetch again.
     WeatherRefresh,
     /// Timer widget buttons.
@@ -1097,17 +1099,43 @@ pub fn draw_weather(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &L
 }
 
 /// Notes widget: the note's text, as much as fits. Click to edit.
-pub fn draw_notes(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, text: &str) -> Hits {
+/// Notes widget: the one note's title and text, or with more than one a list of them (pinned
+/// first, each opening its note).
+pub fn draw_notes(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &Look, notes: &[crate::notes::Note]) -> Hits {
     const PAD: f64 = 16.0;
     draw_background(cr, w, h, look, p.transparent_bg);
     let family = look.family_for(&p.font_family);
     let muted = (look.fg.0, look.fg.1, look.fg.2, 0.6);
-    draw_in_box(cr, "Notes", &TextStyle { family: &family, px: 12.0, bold: true, color: muted }, PAD, PAD - 4.0, w - 2.0 * PAD, 18.0, Align::Start);
+    let mut hits = vec![(Hit::NotesOpen, Rect { x: 0.0, y: 0.0, w, h })];
+    if notes.len() > 1 {
+        draw_in_box(cr, &format!("Notes \u{b7} {}", notes.len()), &TextStyle { family: &family, px: 12.0, bold: true, color: muted }, PAD, PAD - 4.0, w - 2.0 * PAD, 18.0, Align::Start);
+        const ROW: f64 = 26.0;
+        let room = (((h - PAD - 22.0 - PAD) / ROW).floor() as usize).max(1);
+        let shown = if notes.len() > room { room.saturating_sub(1).max(1) } else { notes.len() };
+        for (k, n) in notes.iter().take(shown).enumerate() {
+            let y = PAD + 22.0 + k as f64 * ROW;
+            let mut x = PAD;
+            if n.pinned {
+                crate::svg::icon(cr, "pin", x, y + 3.0, 13.0, look.primary, false);
+                x += 18.0;
+            }
+            draw_pango_text(cr, x, y, &n.label(), &format!("{family} 14px"), look.fg, Some((w - PAD - x) as i32));
+            hits.push((Hit::NoteOpen(n.id), Rect { x: 0.0, y: y - 4.0, w, h: ROW }));
+        }
+        if shown < notes.len() {
+            let y = PAD + 22.0 + shown as f64 * ROW;
+            draw_pango_text(cr, PAD, y, &format!("+{} more", notes.len() - shown), &format!("{family} 13px"), muted, None);
+        }
+        return hits;
+    }
+    let note = notes.first();
+    draw_in_box(cr, note.map(|n| n.title.trim()).filter(|t| !t.is_empty()).unwrap_or("Notes"), &TextStyle { family: &family, px: 12.0, bold: true, color: muted }, PAD, PAD - 4.0, w - 2.0 * PAD, 18.0, Align::Start);
+    let text = note.map(|n| n.body.as_str()).unwrap_or("");
     let body = if text.trim().is_empty() { "Click to write a note." } else { text };
     let color = if text.trim().is_empty() { muted } else { look.fg };
     let lines = (((h - PAD - 22.0 - PAD) / 19.0).floor() as i32).max(1);
     draw_pango_text_wrapped(cr, PAD, PAD + 20.0, body, &format!("{family} 14px"), color, (w - 2.0 * PAD) as i32, Some(lines));
-    vec![(Hit::NotesOpen, Rect { x: 0.0, y: 0.0, w, h })]
+    hits
 }
 
 /// A button on the Timer widget.

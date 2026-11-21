@@ -60,8 +60,14 @@ pub enum UiCommand {
     Trim(String),
     /// Downloads in progress (the downloads pill); empty hides it.
     Downloads(Vec<DownloadProgress>),
+    /// A download finished and its file arrived (named): the pill says so before it goes.
+    DownloadDone(String),
     /// Show this wallpaper on the built-in background.
     Wallpaper(std::path::PathBuf),
+    /// Open search with this text typed in (replacing any text it has).
+    Search(String),
+    /// Open Settings on this tab (index into `SETTINGS_TABS`).
+    SettingsTab(usize),
 }
 
 /// Messages sent to the running notification popup overlay.
@@ -288,9 +294,10 @@ pub enum SearchAction {
     Toggle,
     Open,
     Close,
+    /// Open search with this text typed in.
     SetQuery(String),
-    GetQuery,
-    GetResults,
+    /// Print the apps and files matching this text, without opening search.
+    GetResults(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -495,6 +502,30 @@ pub enum SettingsAction {
     OpenTab(u32),
 }
 
+/// The Settings card's tabs, in order (prism-ui draws them; prism-ctl resolves names).
+pub const SETTINGS_TABS: [&str; 16] = ["Appearance", "Wallpaper", "Desktop", "Bar", "Dock", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "System"];
+
+/// A Settings tab by name (case, spaces and hyphens ignored; a unique prefix is enough) or by
+/// its number counted from 1.
+pub fn settings_tab(arg: &str) -> Option<usize> {
+    if let Ok(n) = arg.parse::<usize>() {
+        return (1..=SETTINGS_TABS.len()).contains(&n).then(|| n - 1);
+    }
+    let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let want = norm(arg);
+    if want.is_empty() {
+        return None;
+    }
+    if let Some(i) = SETTINGS_TABS.iter().position(|t| norm(t) == want) {
+        return Some(i);
+    }
+    let mut hits = SETTINGS_TABS.iter().enumerate().filter(|(_, t)| norm(t).starts_with(&want));
+    match (hits.next(), hits.next()) {
+        (Some((i, _)), None) => Some(i),
+        _ => None,
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopEditAction {
@@ -511,7 +542,6 @@ pub enum DesktopEditAction {
 #[serde(rename_all = "snake_case")]
 pub enum LockAction {
     Lock,
-    Unlock,
     Status,
 }
 
@@ -560,6 +590,22 @@ pub enum IpcResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_tab_names() {
+        assert_eq!(settings_tab("1"), Some(0));
+        assert_eq!(settings_tab("16"), Some(15));
+        assert_eq!(settings_tab("0"), None);
+        assert_eq!(settings_tab("17"), None);
+        assert_eq!(settings_tab("lock-screen"), Some(8));
+        assert_eq!(settings_tab("Lock Screen"), Some(8));
+        assert_eq!(settings_tab("wall"), Some(1));
+        assert_eq!(settings_tab("dis"), Some(11));
+        // "D" is Desktop, Dock or Display; "s" is Search or System.
+        assert_eq!(settings_tab("d"), None);
+        assert_eq!(settings_tab("s"), None);
+        assert_eq!(settings_tab(""), None);
+    }
 
     #[test]
     fn test_ipc_command_serialization() {
@@ -669,4 +715,7 @@ pub struct DownloadProgress {
     pub bytes: u64,
     /// Bytes per second over the last few seconds.
     pub rate: u64,
+    /// How far along (0 to 1) when the browser says (its dock progress), else unknown.
+    #[serde(default)]
+    pub progress: Option<f64>,
 }

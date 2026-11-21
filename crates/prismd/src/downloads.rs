@@ -8,6 +8,11 @@
 //! (renamed from the temporary name, or written by brisk), a notification offers Open and Show
 //! in Folder. Other files arriving in the folder (saved documents, unpacked archives) are left
 //! alone, and a download that ends with nothing arriving was cancelled.
+//!
+//! Temporary files do not say how big a download will be. Browsers do say how far along their
+//! downloads are, for docks, through `com.canonical.Unity.LauncherEntry` `Update` signals
+//! (Firefox and Chromium-based browsers): that becomes the pill's progress bar, matched by the
+//! temporary name (`.part` Firefox and its forks, `.crdownload` Chromium and the rest).
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
@@ -34,6 +39,63 @@ const PAIR_WINDOW: Duration = Duration::from_secs(5);
 const MAX_DEPTH: usize = 4;
 const MAX_WATCHES: usize = 512;
 
+/// Dock progress by application (the LauncherEntry `app_uri`): (0 to 1, when it came).
+static LAUNCHER: std::sync::Mutex<Vec<(String, f64, Instant)>> = std::sync::Mutex::new(Vec::new());
+/// Dock progress older than this is not trusted (the app may have quit mid-download).
+const LAUNCHER_STALE: Duration = Duration::from_secs(10);
+
+/// Follow the LauncherEntry `Update` signals on the session bus.
+fn watch_launchers() {
+    use zbus::message::Type as MsgType;
+    use zbus::zvariant::OwnedValue;
+    let run = || -> Result<(), String> {
+        let e = |e: zbus::Error| e.to_string();
+        let conn = zbus::blocking::Connection::session().map_err(e)?;
+        let rule = zbus::MatchRule::builder()
+            .msg_type(MsgType::Signal)
+            .interface("com.canonical.Unity.LauncherEntry")
+            .map_err(e)?
+            .member("Update")
+            .map_err(e)?
+            .build();
+        for msg in zbus::blocking::MessageIterator::for_match_rule(rule, &conn, Some(64)).map_err(e)? {
+            let Ok(msg) = msg else { continue };
+            let Ok((uri, props)) = msg.body().deserialize::<(String, HashMap<String, OwnedValue>)>() else { continue };
+            let progress = props.get("progress").and_then(|v| f64::try_from(v).ok());
+            let visible = props.get("progress-visible").and_then(|v| bool::try_from(v).ok());
+            let mut list = LAUNCHER.lock().unwrap();
+            match (visible, progress) {
+                (Some(false), _) => list.retain(|(u, _, _)| *u != uri),
+                (_, Some(p)) => {
+                    list.retain(|(u, _, _)| *u != uri);
+                    list.push((uri, p.clamp(0.0, 1.0), Instant::now()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    };
+    loop {
+        if let Err(e) = run() {
+            eprintln!("[prismd/downloads] dock progress: {e}");
+        }
+        std::thread::sleep(Duration::from_secs(10));
+    }
+}
+
+/// The dock progress that belongs to the download kept under `key`, if a browser gives one.
+fn dock_progress(key: &Path) -> Option<f64> {
+    let mut list = LAUNCHER.lock().unwrap();
+    list.retain(|(_, _, t)| t.elapsed() < LAUNCHER_STALE);
+    if list.len() == 1 {
+        return Some(list[0].1);
+    }
+    let firefox = |u: &str| ["firefox", "librewolf", "floorp", "zen", "waterfox"].iter().any(|n| u.to_lowercase().contains(n));
+    let ext = key.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let found: Vec<f64> = list.iter().filter(|(u, _, _)| if ext == "part" { firefox(u) } else { ext == "crdownload" && !firefox(u) }).map(|(_, p, _)| *p).collect();
+    (found.len() == 1).then(|| found[0])
+}
+
 pub fn apply(cfg: &Config) {
     ENABLED.store(cfg.downloads_watch, Ordering::SeqCst);
     *EXTRA.lock().unwrap() = cfg.downloads_extra_dirs.clone();
@@ -41,6 +103,7 @@ pub fn apply(cfg: &Config) {
     if cfg.downloads_watch {
         START.call_once(|| {
             std::thread::Builder::new().name("prism-downloads".into()).spawn(run).ok();
+            std::thread::Builder::new().name("prism-dock-progress".into()).spawn(watch_launchers).ok();
         });
     }
 }
@@ -216,7 +279,7 @@ impl Active {
             (Some(a), Some(b)) if b.0 > a.0 => ((b.1.saturating_sub(a.1)) as f64 / (b.0 - a.0).as_secs_f64()) as u64,
             _ => 0,
         };
-        DownloadProgress { name: self.name.clone(), bytes, rate }
+        DownloadProgress { name: self.name.clone(), bytes, rate, progress: None }
     }
 }
 
@@ -354,7 +417,7 @@ impl Watcher {
                 a.samples.pop_front();
             }
         }
-        let mut list: Vec<DownloadProgress> = self.active.values().map(Active::progress).collect();
+        let mut list: Vec<DownloadProgress> = self.active.iter().map(|(k, a)| DownloadProgress { progress: dock_progress(k), ..a.progress() }).collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
         if !ENABLED.load(Ordering::SeqCst) {
             list.clear();
@@ -412,6 +475,8 @@ fn finished(path: PathBuf) {
     if !ENABLED.load(Ordering::SeqCst) {
         return;
     }
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let _ = crate::send_ui(&UiCommand::DownloadDone(name));
     std::thread::spawn(move || {
         let Ok(session) = zbus::blocking::Connection::session() else { return };
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();

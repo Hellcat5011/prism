@@ -126,6 +126,7 @@ extern "C" {
     pub fn cairo_set_source_surface(cr: *mut Cairo, surface: *mut CairoSurface, x: f64, y: f64);
     pub fn cairo_image_surface_get_width(surface: *mut CairoSurface) -> i32;
     pub fn cairo_image_surface_get_height(surface: *mut CairoSurface) -> i32;
+    pub fn cairo_get_target(cr: *mut Cairo) -> *mut CairoSurface;
 }
 
 

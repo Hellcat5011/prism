@@ -360,7 +360,7 @@ impl Edit {
                     super::widgets::draw_weather(cr, r.w, r.h, &p, &look, &crate::weather::snapshot());
                 }
                 WidgetId::Notes => {
-                    super::widgets::draw_notes(cr, r.w, r.h, &p, &look, &crate::notes::text());
+                    super::widgets::draw_notes(cr, r.w, r.h, &p, &look, &crate::notes::notes());
                 }
                 WidgetId::Timer => {
                     super::widgets::draw_timer(cr, r.w, r.h, &p, &look, &crate::timer_client::snapshot(), None);

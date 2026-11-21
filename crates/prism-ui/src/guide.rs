@@ -45,7 +45,12 @@ struct Page {
 const PAGES: &[Page] = &[
     Page { art: Art::Welcome, title: "Welcome to Prism", text: "A short tour of what Prism can do. Turn on what you like; everything here is also in Settings, and you can run this guide again from there.", rows: &[] },
     Page { art: Art::Look, title: "Look and feel", text: "Colours come from your wallpaper. Cards can blur what is behind them, cast shadows and move with springy animations.", rows: &[(0, "Matugen Colour Mode"), (0, "Window Background Blur"), (0, "Window Shadows"), (0, "Animations"), (0, "Dim Background")] },
-    Page { art: Art::Wallpaper, title: "Wallpaper", text: "Pick wallpapers with Super+W (prism-ctl wallpaper toggle). Prism draws them itself, with smooth transitions, filters and video wallpapers.", rows: &[(1, "Transition"), (1, "Use Wallpaper Filters")] },
+    Page {
+        art: Art::Wallpaper,
+        title: "Wallpaper",
+        text: "Pick wallpapers with Super+W (prism-ctl wallpaper toggle). Prism draws them itself, with smooth transitions, filters and video wallpapers.",
+        rows: &[(1, "Wallpaper Daemon"), (1, "Wallpaper Directory"), (1, "Wallpaper Depth"), (1, "Transition"), (1, "Use Wallpaper Filters")],
+    },
     Page { art: Art::Desktop, title: "Desktop", text: "A bar, a dock and widgets on the desktop. Drag widgets around in edit mode later.", rows: &[(3, "Show Bar"), (4, "Show Dock"), (2, "Digital Clock"), (2, "Calendar"), (2, "Media Player"), (2, "Weather"), (2, "Cat")] },
     Page { art: Art::Lock, title: "Lock screen", text: "Several lock screen designs; the screen can lock by itself when you step away.", rows: &[(8, "Lock Screen Theme"), (8, "Lock When Idle")] },
     Page { art: Art::Notifications, title: "Notifications", text: "Popups where you want them, a notification centre with search and snooze, and quiet hours.", rows: &[(7, "Popup Position"), (7, "Silent on a Schedule"), (7, "Notification Centre Position")] },
@@ -59,6 +64,8 @@ const PAGES: &[Page] = &[
 enum Hit {
     Row(usize),
     Choice(usize, usize),
+    /// A folder row's Choose button.
+    Browse(usize),
     Back,
     Next,
     Skip,
@@ -76,6 +83,11 @@ pub struct GuideView {
     hovers: crate::ui::Fades<Hit>,
     page_spring: crate::ui::SpringValue,
     done: bool,
+    waker: crate::waker::Waker,
+    /// A folder dialog that is open: the row it is for, and where its answer comes.
+    picking: Option<(usize, std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>)>,
+    /// Lower the card while the dialog is up (true), raise it again (false).
+    layer_request: Option<bool>,
 }
 
 /// Marks the guide as seen.
@@ -88,7 +100,7 @@ fn mark_done() {
 }
 
 impl GuideView {
-    pub fn new() -> Self {
+    pub fn new(waker: crate::waker::Waker) -> Self {
         let mut v = GuideView {
             page: 0,
             shown_at: Instant::now(),
@@ -100,6 +112,9 @@ impl GuideView {
             hovers: crate::ui::Fades::default(),
             page_spring: crate::ui::SpringValue::new(0.0),
             done: false,
+            waker,
+            picking: None,
+            layer_request: None,
         };
         v.go(0);
         v
@@ -138,6 +153,26 @@ impl GuideView {
             error: cb::hex_to_rgba(&theme.error, 1.0),
             family: style.font_family.clone(),
         }
+    }
+
+    /// Ask for the folder of row `i` with the system dialog (the card steps below windows
+    /// meanwhile, so the dialog shows).
+    fn browse(&mut self, i: usize) {
+        if self.picking.is_some() {
+            return;
+        }
+        let Some(GuideControl::Folder(get, _)) = self.rows.get(i).map(|r| &r.control) else { return };
+        let start = prism_common::config::expand_home(get(&self.cfg).trim());
+        let start = if start.is_dir() { start } else { prism_common::config::expand_home("~") };
+        let title = format!("Choose {}", self.rows[i].title);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waker = self.waker.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::portal::pick_folder(&title, Some(&start)));
+            waker.wake();
+        });
+        self.picking = Some((i, rx));
+        self.layer_request = Some(true);
     }
 
     fn hover(&mut self, h: Hit, style: &Style) -> f64 {
@@ -446,7 +481,9 @@ impl CardView for GuideView {
         let (_, bh) = cb::draw_pango_text_wrapped(cr, x, y, page.text, &f(14.0, ""), with_a(fg, 0.75), w as i32, Some(5));
         y += bh as f64 + 20.0;
         let cfg = self.cfg.clone();
-        for (i, row) in self.rows.iter().enumerate() {
+        // Taken out while drawn: hover levels need `self`.
+        let rows = std::mem::take(&mut self.rows);
+        for (i, row) in rows.iter().enumerate() {
             if !(row.visible)(&cfg) {
                 continue;
             }
@@ -483,8 +520,23 @@ impl CardView for GuideView {
                     }
                     y = cy + 30.0 + 18.0;
                 }
+                GuideControl::Folder(get, _) => {
+                    cb::draw_pango_text(cr, x, ry, row.title, &f(15.0, "Medium"), with_a(fg, entrance), Some(w as i32));
+                    let b = Rect { x: x + w - 110.0, y: ry + 22.0, w: 110.0, h: 34.0 };
+                    let path = get(&cfg);
+                    let shown = if path.trim().is_empty() { "Not set".to_string() } else { path };
+                    let field = Rect { x, y: ry + 22.0, w: w - 122.0, h: 34.0 };
+                    cb::fill_rounded_rect(cr, field.x, field.y, field.w, field.h, 10.0, with_a(fg, 0.06));
+                    cb::draw_pango_text(cr, field.x + 12.0, field.y + 8.0, &shown, &f(13.0, ""), with_a(fg, 0.85 * entrance), Some((field.w - 24.0) as i32));
+                    let h = self.hover(Hit::Browse(i), style);
+                    let label = if self.picking.as_ref().is_some_and(|(r, _)| *r == i) { "Choosing\u{2026}" } else { "Choose\u{2026}" };
+                    uikit::button(cr, b, label, ButtonKind::Outline, h, true, &p);
+                    new_hits.push((Hit::Browse(i), b));
+                    y += 22.0 + 34.0 + 18.0;
+                }
             }
         }
+        self.rows = rows;
 
         // Bottom: page dots, Skip, Back, Next.
         let by = card.y + card.h - PAD - 42.0;
@@ -533,6 +585,7 @@ impl CardView for GuideView {
                     self.change(|c| set(c, on));
                 }
             }
+            Hit::Browse(i) => self.browse(i),
             Hit::Choice(i, k) => {
                 if let Some(GuideControl::Choice(options, _, set)) = self.rows.get(i).map(|r| &r.control) {
                     let set = *set;
@@ -558,6 +611,42 @@ impl CardView for GuideView {
 
     fn wants_close(&self) -> bool {
         self.done
+    }
+
+    fn poll(&mut self) -> bool {
+        let Some((i, rx)) = self.picking.as_ref() else { return false };
+        let answer = match rx.try_recv() {
+            Ok(a) => a,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),
+        };
+        let i = *i;
+        self.picking = None;
+        self.layer_request = Some(false);
+        match answer {
+            Ok(Some(path)) => {
+                if let Some(GuideControl::Folder(_, set)) = self.rows.get(i).map(|r| &r.control) {
+                    let set = *set;
+                    // Keep paths under $HOME portable, as "~/…".
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let text = path.to_string_lossy().into_owned();
+                    let text = match text.strip_prefix(&format!("{home}/")) {
+                        Some(rest) if !home.is_empty() => format!("~/{rest}"),
+                        _ => text,
+                    };
+                    self.change(|c| {
+                        set(c, &text);
+                    });
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[prism-ui] setup guide: file dialog failed: {e}"),
+        }
+        true
+    }
+
+    fn take_layer_request(&mut self) -> Option<bool> {
+        self.layer_request.take()
     }
 
     fn clickable(&self) -> bool {

@@ -1148,7 +1148,11 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 IpcResponse::Ok(Some(msg))
             }
 
-            Ok(IpcCommand::Search(SearchAction::SetQuery(query))) => {
+            Ok(IpcCommand::Search(SearchAction::SetQuery(query))) => match send_ui(&prism_common::UiCommand::Search(query)) {
+                Ok(_) => IpcResponse::Ok(Some("search_opened".into())),
+                Err(e) => IpcResponse::Error(e),
+            },
+            Ok(IpcCommand::Search(SearchAction::GetResults(query))) => {
                 let st = lock_state(&state);
                 let app_matches = search_apps(&st.apps, &query);
                 let file_matches = prism_common::search_files(&query, 10);
@@ -1450,7 +1454,11 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                     Err(e) => IpcResponse::Error(e),
                 }
             }
-            Ok(IpcCommand::Settings(SettingsAction::Open) | IpcCommand::Settings(SettingsAction::OpenTab(_))) => {
+            Ok(IpcCommand::Settings(SettingsAction::OpenTab(tab))) => match send_ui(&prism_common::UiCommand::SettingsTab(tab as usize)) {
+                Ok(_) => IpcResponse::Ok(Some("settings_opened".into())),
+                Err(e) => IpcResponse::Error(e),
+            },
+            Ok(IpcCommand::Settings(SettingsAction::Open)) => {
                 match open_popup("settings") {
                     Ok(msg) => IpcResponse::Ok(Some(msg)),
                     Err(e) => IpcResponse::Error(e),

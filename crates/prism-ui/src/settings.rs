@@ -26,7 +26,7 @@ use crate::ui::Style;
 use crate::uikit::{self, ButtonKind, Dropdown, Palette};
 use crate::waker::Waker;
 
-pub const TABS: [&str; 16] = ["Appearance", "Wallpaper", "Desktop", "Bar", "Dock", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "System"];
+pub const TABS: [&str; 16] = prism_common::ipc::SETTINGS_TABS;
 /// Undo steps kept per Settings session.
 const UNDO_LIMIT: usize = 100;
 
@@ -160,7 +160,7 @@ enum Control {
 
 /// Lock screen designs that rework the wallpaper picture; a video wallpaper does not allow them, so
 /// they are left out of the lists while one is set (prism-lock would show Classic instead).
-const PICTURE_THEMES: &[&str] = &["tide", "ink", "fireflies", "halftone", "rings"];
+const PICTURE_THEMES: &[&str] = &["tide", "ink", "halftone", "rings"];
 
 fn video_wallpaper(c: &Config) -> bool {
     c.wallpaper_daemon == "prism-video"
@@ -187,10 +187,12 @@ struct Row {
     visible: fn(&Config) -> bool,
 }
 
-/// A Settings option the setup guide shows (switches and choices).
+/// A Settings option the setup guide shows (switches, choices and folders).
 pub(crate) enum GuideControl {
     Switch(fn(&Config) -> bool, fn(&mut Config, bool)),
     Choice(fn(&Config) -> Vec<(String, String)>, fn(&Config) -> String, fn(&mut Config, &str)),
+    /// A path chosen with the system folder dialog.
+    Folder(fn(&Config) -> String, fn(&mut Config, &str) -> bool),
 }
 
 pub(crate) struct GuideRow {
@@ -199,8 +201,8 @@ pub(crate) struct GuideRow {
     pub visible: fn(&Config) -> bool,
 }
 
-/// The Settings rows (tab, title) as guide rows, in the order asked; rows that are neither a
-/// switch nor a choice are left out.
+/// The Settings rows (tab, title) as guide rows, in the order asked; rows that are not a switch,
+/// a choice or a folder to browse for are left out.
 pub(crate) fn guide_rows(want: &[(usize, &str)]) -> Vec<GuideRow> {
     let all = rows();
     want.iter()
@@ -210,6 +212,7 @@ pub(crate) fn guide_rows(want: &[(usize, &str)]) -> Vec<GuideRow> {
                 let control = match &r.control {
                     Control::Switch(g, s) => GuideControl::Switch(*g, *s),
                     Control::Combo { options, get, set, .. } => GuideControl::Choice(*options, *get, *set),
+                    Control::Text { get, set, browse: true, .. } => GuideControl::Folder(*get, *set),
                     _ => return None,
                 };
                 Some(GuideRow { title: r.title, control, visible: r.visible })
@@ -445,6 +448,13 @@ fn local_time_label(ts: u64) -> String {
 }
 
 /// An import replaced config.json: Settings reloads it.
+/// Tab from `prism-ctl settings tab`, shown by the next `poll` (usize::MAX: none).
+static PENDING_TAB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+pub fn open_on_tab(tab: usize) {
+    PENDING_TAB.store(tab, std::sync::atomic::Ordering::SeqCst);
+}
+
 static RELOAD_CONFIG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What a hot corner can do (`desktop/corners.rs`).
@@ -527,6 +537,11 @@ fn rows() -> Vec<Row> {
             control: Combo { options: |_| opts(&[("Built-in", "prism"), ("Built-in Video", "prism-video"), ("awww", "awww"), ("swww", "swww")]), get: |c| c.wallpaper_daemon.clone(), set: |c, v| c.wallpaper_daemon = v.to_string(), fonts: false } },
         Row { tab: 1, title: VIDEO_WALLPAPER_ROW, subtitle: "The video playing as your wallpaper. Wallpaper filters do not apply to it.", visible: |c| c.wallpaper_daemon == "prism-video",
             control: Buttons(&[("Choose Video\u{2026}", Action::ChooseVideoWallpaper, ButtonKind::Primary)]) },
+        Row { tab: 1, title: "Smooth Video", subtitle: "Plays the video at up to 60 frames a second with sharper (lanczos) scaling.", visible: |c| c.wallpaper_daemon == "prism-video",
+            control: Switch(|c| c.wallpaper_video_smooth, |c, v| c.wallpaper_video_smooth = v) },
+        Row { tab: 1, title: "", subtitle: "Smooth video takes noticeably more CPU, often about twice as much.", control: Control::Note, visible: |c| c.wallpaper_daemon == "prism-video" },
+        Row { tab: 1, title: "Pause Video", subtitle: "Hold the video on its current frame while windows cover the desktop.", visible: |c| c.wallpaper_daemon == "prism-video",
+            control: Combo { options: |_| opts(&[("Never", "never"), ("When Windows Are Open", "windows"), ("When Windows Cover the Desktop", "covered"), ("When a Fullscreen App Has Focus", "fullscreen")]), get: |c| c.wallpaper_video_pause.clone(), set: |c, v| c.wallpaper_video_pause = v.to_string(), fonts: false } },
         Row { tab: 1, title: "Transition", subtitle: "How a new wallpaper replaces the old one.", visible: |c| c.wallpaper_daemon == "prism",
             control: Combo { options: |_| opts(&[("Random", "random"), ("Fade", "fade"), ("Wipe", "wipe"), ("Grow", "grow"), ("None", "none")]), get: |c| c.wallpaper_transition.clone(), set: |c, v| c.wallpaper_transition = v.to_string(), fonts: false } },
         Row { tab: 1, title: "Use Wallpaper Filters", subtitle: "Choose a colour filter when applying a wallpaper.", visible: |c| c.wallpaper_daemon != "prism-video",
@@ -1242,6 +1257,19 @@ impl SettingsView {
     /// Results of background jobs; true if a redraw is needed.
     pub fn poll(&mut self) -> bool {
         let mut changed = DEPTH_STATUS_NEW.swap(false, std::sync::atomic::Ordering::SeqCst);
+        let tab = PENDING_TAB.swap(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        if tab < TABS.len() {
+            self.commit_edit();
+            self.combo = None;
+            self.search.clear();
+            if tab != self.tab {
+                self.tab_entrance();
+            }
+            self.tab = tab;
+            self.scroll.reset(0.0);
+            self.focus = None;
+            changed = true;
+        }
         for hide in self.hide_rx.try_iter() {
             if hide != self.hidden {
                 self.hidden = hide;
@@ -1300,7 +1328,10 @@ impl SettingsView {
                     }
                 }
                 (Ok(_), _) => {}
-                (Err(e), _) => self.message = Some((format!("File dialog unavailable: {e}"), false)),
+                (Err(e), _) => {
+                    eprintln!("[prism-ui/settings] file dialog failed: {e}");
+                    self.message = Some((format!("File dialog unavailable: {e}"), false));
+                }
             }
         }
         changed
@@ -2667,7 +2698,7 @@ mod tests {
         assert_eq!(shown_theme(&c, &c.lockscreen_theme), "rings");
         c.wallpaper_daemon = "prism-video".into();
         let ids: Vec<String> = lock_theme_options(&c).into_iter().map(|(_, v)| v).collect();
-        assert_eq!(ids, ["classic", "stencil", "sentence", "aperture"]);
+        assert_eq!(ids, ["classic", "stencil", "sentence", "aperture", "fireflies"]);
         assert_eq!(shown_theme(&c, &c.lockscreen_theme), "classic");
     }
 

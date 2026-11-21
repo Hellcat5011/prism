@@ -1010,10 +1010,11 @@ impl UiState {
         }
     }
 
-    /// Lower the Settings card and scrim below normal windows (and give up the keyboard)
-    /// while a system dialog is open, or bring them back.
+    /// Lower the Settings card (or another card that opened a system dialog) and scrim below
+    /// normal windows (and give up the keyboard) while the dialog is open, or bring them back.
     fn apply_settings_layer(&mut self, qh: &QueueHandle<Self>) {
-        let Some(lower) = self.settings.as_mut().and_then(|s| s.take_layer_request()) else { return };
+        let request = self.settings.as_mut().and_then(|s| s.take_layer_request()).or_else(|| self.view.as_mut().and_then(|v| v.take_layer_request()));
+        let Some(lower) = request else { return };
         use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity;
         if let Some(ls) = &self.layer_surface {
             ls.set_layer(if lower { Layer::Bottom } else { Layer::Overlay });
@@ -2066,7 +2067,7 @@ impl Overlay {
             UiMode::Phone => state.view = Some(Box::new(phone::PhoneView::new(waker.clone()))),
             UiMode::Trim => state.view = Some(Box::new(trim::TrimView::new(waker.clone()))),
             UiMode::CompEdit => state.view = Some(Box::new(compedit::CompEditView::new())),
-            UiMode::Guide => state.view = Some(Box::new(guide::GuideView::new())),
+            UiMode::Guide => state.view = Some(Box::new(guide::GuideView::new(waker.clone()))),
             UiMode::Prompt => match prompt::next_view() {
                 Some(v) => state.view = Some(Box::new(v)),
                 None => return Err("no prompt queued".into()),
@@ -2239,6 +2240,7 @@ impl Overlay {
         if state.view.as_mut().map(|v| v.poll()).unwrap_or(false) {
             state.render_and_commit(&qh);
         }
+        state.apply_settings_layer(&qh);
         if state.view.as_ref().is_some_and(|v| v.wants_close()) {
             state.exit_requested = true;
         }
@@ -2376,9 +2378,13 @@ impl Overlay {
 }
 
 fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    // The file dialog helper: no secrets, and it must stay dumpable for xdg-desktop-portal.
+    if args.first().map(String::as_str) == Some(portal::CHILD_ARG) {
+        portal::child_main(&args[1..]);
+    }
     // Polkit, keyring and Wi-Fi/VPN passwords pass through this process.
     prism_common::secret::harden_process();
-    let args: Vec<String> = env::args().skip(1).collect();
     if env::var("WAYLAND_DISPLAY").is_err() && env::var("WAYLAND_SOCKET").is_err() {
         eprintln!("Error: WAYLAND_DISPLAY is not set. prism-ui requires an active Wayland compositor.");
         exit(1);
@@ -2652,15 +2658,18 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 continue;
             }
             if let prism_common::UiCommand::Downloads(list) = &cmd {
+                // An empty list: the pill finishes (a tick if a file arrives) and goes by itself.
                 match (dl_pill.as_mut(), list.is_empty()) {
-                    (Some(p), false) => p.set(list.clone()),
-                    (Some(_), true) => {
-                        if let Some(p) = dl_pill.take() {
-                            p.teardown();
-                        }
-                    }
+                    (Some(p), _) => p.set(list.clone()),
                     (None, false) => dl_pill = downloads_pill::Pill::open(&conn, &globals, list.clone(), indicator.is_some()),
                     (None, true) => {}
+                }
+                continue;
+            }
+            if let prism_common::UiCommand::DownloadDone(name) = &cmd {
+                match dl_pill.as_mut() {
+                    Some(p) => p.done(name.clone()),
+                    None => dl_pill = downloads_pill::Pill::open_done(&conn, &globals, name.clone(), indicator.is_some()),
                 }
                 continue;
             }
@@ -2771,6 +2780,15 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 });
             }
         }
+        // A video wallpaper rests while windows cover it (Settings > Wallpaper > Pause Video).
+        if let (Some(b), Some(d)) = (background.as_mut(), desktop.as_ref()) {
+            b.set_paused(match d.config().wallpaper_video_pause.as_str() {
+                "windows" => d.windows_on_screen(),
+                "covered" => d.background_covered(),
+                "fullscreen" => tracker.as_ref().is_some_and(|t| t.focused_fullscreen()),
+                _ => false,
+            });
+        }
         if let Some(t) = background.as_mut().and_then(|b| b.tick()) {
             if timeout < 0 || t < timeout {
                 timeout = t;
@@ -2806,6 +2824,11 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
         }
         if let Some(p) = dl_pill.as_mut() {
             p.tick();
+        }
+        if dl_pill.as_ref().is_some_and(|p| p.finished()) {
+            if let Some(p) = dl_pill.take() {
+                p.teardown();
+            }
         }
         if let Some(s) = switcher.as_mut() {
             s.tick();
@@ -3046,6 +3069,16 @@ fn handle_command(
             trim::set_pending(path.into());
             UiCommand::Open("trim".into())
         }
+        UiCommand::Search(text) => {
+            spotlight::set_pending_query(text);
+            waker.wake();
+            UiCommand::Open("search".into())
+        }
+        UiCommand::SettingsTab(tab) => {
+            settings::open_on_tab(tab);
+            waker.wake();
+            UiCommand::Open("settings".into())
+        }
         UiCommand::Open(name) | UiCommand::Toggle(name) if name == "window-rules" || name == "shortcuts" => {
             compedit::open_on_rules(name == "window-rules");
             UiCommand::Open("shortcuts".into())
@@ -3091,7 +3124,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Downloads(_) | UiCommand::Trim(_) | UiCommand::Wallpaper(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Downloads(_) | UiCommand::DownloadDone(_) | UiCommand::Trim(_) | UiCommand::Wallpaper(_) | UiCommand::Search(_) | UiCommand::SettingsTab(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

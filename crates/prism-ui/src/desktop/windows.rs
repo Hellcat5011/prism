@@ -121,6 +121,15 @@ pub struct Client {
     pub is_visible: bool,
     #[serde(default)]
     pub is_minimized: bool,
+    /// Where the window is, in the layout's pixels.
+    #[serde(default)]
+    pub x: i32,
+    #[serde(default)]
+    pub y: i32,
+    #[serde(default)]
+    pub width: i32,
+    #[serde(default)]
+    pub height: i32,
 }
 
 #[derive(Deserialize)]
@@ -128,7 +137,65 @@ struct ClientList {
     clients: Vec<Client>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct Monitor {
+    name: String,
+    #[serde(default)]
+    active: bool,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Deserialize)]
+struct MonitorList {
+    monitors: Vec<Monitor>,
+}
+
 static CLIENTS: Mutex<(u64, Option<Vec<Client>>)> = Mutex::new((0, None));
+/// Mango's monitors, read when the window stream starts and when a window names an unknown one.
+static MONITORS: Mutex<Vec<Monitor>> = Mutex::new(Vec::new());
+
+fn read_monitors() {
+    let out = Command::new("mmsg").args(["get", "all-monitors"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    if let Some(list) = out.ok().and_then(|o| serde_json::from_slice::<MonitorList>(&o.stdout).ok()) {
+        *MONITORS.lock().unwrap() = list.monitors.into_iter().filter(|m| m.active && m.width > 0 && m.height > 0).collect();
+    }
+}
+
+/// Windows cover every screen, by Mango's account (see `cover::covered`). False where Mango's
+/// window list is not available.
+pub fn background_covered() -> bool {
+    // Worked out once per change of the window list (or of the monitors).
+    static LAST: Mutex<Option<(u64, usize, bool)>> = Mutex::new(None);
+    let generation = clients_generation();
+    let monitors = MONITORS.lock().unwrap().clone();
+    let mut last = LAST.lock().unwrap();
+    if let Some((g, n, v)) = *last {
+        if g == generation && n == monitors.len() {
+            return v;
+        }
+    }
+    let v = clients().is_some_and(|c| super::cover::all_covered(&screens(&monitors, &c)));
+    *last = Some((generation, monitors.len(), v));
+    v
+}
+
+fn screens(monitors: &[Monitor], clients: &[Client]) -> Vec<super::cover::Screen> {
+    monitors
+        .iter()
+        .map(|m| super::cover::Screen {
+            rect: (m.x as f64, m.y as f64, m.width as f64, m.height as f64),
+            windows: clients
+                .iter()
+                .filter(|c| c.is_visible && !c.is_minimized && c.monitor == m.name && c.width > 0 && c.height > 0)
+                .map(|c| (c.x as f64, c.y as f64, c.width as f64, c.height as f64))
+                .collect(),
+        })
+        .collect()
+}
+
 static WATCH: Once = Once::new();
 
 fn clients() -> Option<Vec<Client>> {
@@ -140,6 +207,13 @@ pub fn clients_generation() -> u64 {
 }
 
 fn publish(list: Option<Vec<Client>>, waker: &Waker) {
+    let unknown = list.as_ref().is_some_and(|l| {
+        let known = MONITORS.lock().unwrap();
+        l.iter().any(|c| !c.monitor.is_empty() && !known.iter().any(|m| m.name == c.monitor))
+    });
+    if unknown {
+        read_monitors();
+    }
     let mut st = CLIENTS.lock().unwrap();
     if st.1 != list {
         st.0 += 1;
@@ -153,6 +227,7 @@ fn publish(list: Option<Vec<Client>>, waker: &Waker) {
 pub fn watch_clients(waker: Waker) {
     WATCH.call_once(|| {
         std::thread::spawn(move || loop {
+            read_monitors();
             let mut cmd = Command::new("mmsg");
             cmd.args(["watch", "all-clients"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
             // The stream must end with this process, also when it is killed.
@@ -288,7 +363,7 @@ mod tests {
     use super::*;
 
     fn client(tags: &[u32], monitor: &str) -> Client {
-        Client { monitor: monitor.into(), tags: tags.to_vec(), is_visible: true, is_minimized: false }
+        Client { monitor: monitor.into(), tags: tags.to_vec(), is_visible: true, is_minimized: false, x: 0, y: 0, width: 0, height: 0 }
     }
 
     #[test]
@@ -304,6 +379,31 @@ mod tests {
     fn mango_client_lists_parse() {
         let line = r#"{"clients":[{"id":1,"appid":"x","monitor":"DP-2","tags":[1],"is_visible":true,"is_minimized":false,"x":1}]}"#;
         let list: ClientList = serde_json::from_str(line).unwrap();
-        assert_eq!(list.clients, vec![client(&[1], "DP-2")]);
+        let mut want = client(&[1], "DP-2");
+        want.x = 1;
+        assert_eq!(list.clients, vec![want]);
+    }
+
+
+    fn win(x: i32, y: i32, width: i32, height: i32) -> Client {
+        Client { monitor: "DP-2".into(), tags: vec![1], is_visible: true, is_minimized: false, x, y, width, height }
+    }
+
+    #[test]
+    fn tiled_windows_with_gaps_and_a_bar_cover_the_screen() {
+        let m = Monitor { name: "DP-2".into(), active: true, x: 0, y: 0, width: 2560, height: 1440 };
+        // Two tiles under a 40 px bar, 10 px gaps.
+        let covered = |m: &Monitor, c: &[Client]| super::super::cover::all_covered(&screens(std::slice::from_ref(m), c));
+        assert!(covered(&m, &[win(10, 50, 1265, 1380), win(1285, 50, 1265, 1380)]));
+        // One half-screen window leaves the other half open.
+        assert!(!covered(&m, &[win(641, 1, 1277, 1438)]));
+        // A minimised window covers nothing.
+        let mut hidden = win(0, 0, 2560, 1440);
+        hidden.is_minimized = true;
+        assert!(!covered(&m, &[hidden]));
+        // Another monitor's window does not count.
+        let mut elsewhere = win(0, 0, 2560, 1440);
+        elsewhere.monitor = "HDMI-A-1".into();
+        assert!(!covered(&m, &[elsewhere]));
     }
 }

@@ -8,6 +8,7 @@
 //! * Rings: the wallpaper cut into concentric rings turned out of line; each key turns them, and
 //!   unlocking turns every ring on until the picture lines up.
 //! * Fireflies: the wallpaper at night, lit by a firefly per key; unlocking swarms into daylight.
+//!   Over a video each firefly is a soft hole in the night.
 //! * Halftone: the wallpaper as a dot screen whose dots swell and merge as you type; unlocking merges them into it.
 //!
 //! Everything is drawn with cairo into wl_shm buffers, so the designs behave the same on any
@@ -65,8 +66,9 @@ impl LockTheme {
 
     /// The design reworks the wallpaper picture itself, which a video wallpaper does not allow.
     pub fn needs_picture(self) -> bool {
-        matches!(self, LockTheme::Tide | LockTheme::Ink | LockTheme::Fireflies | LockTheme::Halftone | LockTheme::Rings)
+        matches!(self, LockTheme::Tide | LockTheme::Ink | LockTheme::Halftone | LockTheme::Rings)
     }
+
 
     /// Each key adds a mark (a splash, blot or firefly) to `Fx::splashes`.
     fn marks(self) -> bool {
@@ -416,8 +418,6 @@ pub struct Layers {
     dots: Option<Dots>,
     merged: Option<*mut CairoSurface>,
     merged_at: Cell<f64>,
-    /// Fireflies: the soft round light one firefly casts, and its radius.
-    light: Option<(*mut CairoSurface, f64)>,
     /// Rings: which ring each pixel is in, and the scrambled picture as last drawn (`turned_at`).
     rings: Option<RingMap>,
     turned: Option<*mut CairoSurface>,
@@ -440,7 +440,7 @@ impl Drop for Layers {
     fn drop(&mut self) {
         unsafe {
             cb::cairo_surface_destroy(self.wall);
-            for s in [self.base, self.vivid, self.light.map(|l| l.0), self.merged, self.turned].into_iter().flatten() {
+            for s in [self.base, self.vivid, self.merged, self.turned].into_iter().flatten() {
                 cb::cairo_surface_destroy(s);
             }
         }
@@ -485,12 +485,8 @@ impl Layers {
             };
             let rings = (look.theme == LockTheme::Rings).then(|| RingMap::new(w as usize, h as usize));
             let turned = rings.is_some().then(|| cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h));
-            let light = match look.theme {
-                LockTheme::Fireflies => Some(light_sprite(w.min(h) as f64 * FIREFLY_LIGHT)),
-                _ => None,
-            };
             let merged = dots.is_some().then(|| cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h));
-            Layers { size: (w, h), wall, base, vivid, dots, merged, merged_at: Cell::new(f64::NAN), light, rings, turned, turned_at: Default::default() }
+            Layers { size: (w, h), wall, base, vivid, dots, merged, merged_at: Cell::new(f64::NAN), rings, turned, turned_at: Default::default() }
         }
     }
 }
@@ -612,6 +608,9 @@ unsafe fn draw_dots(d: &Dots, w: i32, h: i32) -> *mut CairoSurface {
     }
 }
 
+/// Fireflies: the lights are drawn at 1/this of the screen's size (they are soft anyway): many
+/// large lights at full size cost a frame its time, most of all as they grow on the unlock.
+const LIGHT_SCALE: f64 = 4.0;
 /// Fireflies: the radius of a firefly's light, as a fraction of the shorter screen side.
 const FIREFLY_LIGHT: f64 = 0.24;
 
@@ -624,26 +623,6 @@ unsafe fn warmed(wall: *mut CairoSurface, w: i32, h: i32) -> *mut CairoSurface {
         cb::cairo_paint(cr);
         cb::cairo_destroy(cr);
         s
-    }
-}
-
-/// Fireflies: a soft disc of light (alpha only) with radius `r`, used as a mask.
-unsafe fn light_sprite(r: f64) -> (*mut CairoSurface, f64) {
-    let r = r.max(4.0).round();
-    unsafe {
-        let size = (2.0 * r) as i32;
-        let s = cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, size, size);
-        let cr = cb::cairo_create(s);
-        let p = cb::cairo_pattern_create_radial(r, r, 0.0, r, r, r);
-        cb::cairo_pattern_add_color_stop_rgba(p, 0.0, 0.0, 0.0, 0.0, 1.0);
-        cb::cairo_pattern_add_color_stop_rgba(p, 0.3, 0.0, 0.0, 0.0, 0.75);
-        cb::cairo_pattern_add_color_stop_rgba(p, 0.65, 0.0, 0.0, 0.0, 0.25);
-        cb::cairo_pattern_add_color_stop_rgba(p, 1.0, 0.0, 0.0, 0.0, 0.0);
-        cb::cairo_set_source(cr, p);
-        cb::cairo_paint(cr);
-        cb::cairo_pattern_destroy(p);
-        cb::cairo_destroy(cr);
-        (s, r)
     }
 }
 
@@ -1430,6 +1409,130 @@ unsafe fn rings(c: &mut Ctx, layers: &Layers) {
 
 // ── Fireflies ────────────────────────────────────────────────────────────
 
+/// Fireflies: how lit each point is (0 to 255), at 1/`LIGHT_SCALE` of the screen's size.
+struct LightMap {
+    w: usize,
+    h: usize,
+    a: Vec<u8>,
+}
+
+/// The lights of `glows` (x, y, radius, brightness in screen pixels) on one small map: each a
+/// soft disc, brightest in the middle; where they overlap the light adds up toward full.
+fn light_map(sw: f64, sh: f64, glows: &[(f64, f64, f64, f64)]) -> LightMap {
+    let (w, h) = ((sw / LIGHT_SCALE).ceil() as usize, (sh / LIGHT_SCALE).ceil() as usize);
+    // The falloff by squared distance (0 to 1 in 1/1024 steps), so no square root per point.
+    let lut: Vec<f32> = (0..=1024).map(|i| falloff((i as f32 / 1024.0).sqrt())).collect();
+    let glows: Vec<(f32, f32, f32, f32)> = glows.iter().map(|&(x, y, r, b)| ((x / LIGHT_SCALE) as f32, (y / LIGHT_SCALE) as f32, (r / LIGHT_SCALE).max(1.0) as f32, b.min(1.0) as f32)).collect();
+    // How dark each point stays (1 - light), multiplied over the lights; rows in bands on threads.
+    let mut dark = vec![1.0f32; w * h];
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let band = h.div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (k, chunk) in dark.chunks_mut(band * w).enumerate() {
+            let (glows, lut) = (&glows, &lut);
+            scope.spawn(move || {
+                let (top, rows) = (k * band, chunk.len() / w);
+                for &(x, y, r, b) in glows {
+                    let (x0, x1) = (((x - r).floor().max(0.0)) as usize, ((x + r).ceil().max(0.0) as usize).min(w));
+                    let (y0, y1) = (((y - r).floor().max(top as f32)) as usize, ((y + r).ceil().max(0.0) as usize).min(top + rows));
+                    let inv = 1.0 / (r * r);
+                    for py in y0..y1 {
+                        let dy = py as f32 + 0.5 - y;
+                        let row = &mut chunk[(py - top) * w..(py - top + 1) * w];
+                        for (px, d) in (x0..x1).zip(row[x0..x1].iter_mut()) {
+                            let dx = px as f32 + 0.5 - x;
+                            let t2 = (dx * dx + dy * dy) * inv;
+                            if t2 < 1.0 {
+                                *d *= 1.0 - b * lut[(t2 * 1024.0) as usize];
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    LightMap { w, h, a: dark.into_iter().map(|d| ((1.0 - d) * 255.0 + 0.5) as u8).collect() }
+}
+
+/// A firefly's light from its middle (0) to its edge (1): full, 75% at 0.3, 25% at 0.65, none.
+fn falloff(t: f32) -> f32 {
+    const STOPS: [(f32, f32); 4] = [(0.0, 1.0), (0.3, 0.75), (0.65, 0.25), (1.0, 0.0)];
+    for k in 1..STOPS.len() {
+        let ((t0, a0), (t1, a1)) = (STOPS[k - 1], STOPS[k]);
+        if t <= t1 {
+            return a0 + (a1 - a0) * (t - t0) / (t1 - t0);
+        }
+    }
+    0.0
+}
+
+/// Fireflies: light `dst` through the light map `map`, enlarged bilinearly as it goes, in bands on several threads (cairo's enlarged mask
+/// costs far more than a frame). With `lit` (the wallpaper as the lights show it) each pixel moves
+/// toward it as far as the light reaches; without (a video plays underneath) the night opens
+/// there instead, a little warm.
+unsafe fn raster_lights(dst: *mut CairoSurface, map: &LightMap, lit: Option<*mut CairoSurface>) {
+    let size = |s: *mut CairoSurface| unsafe { (cb::cairo_image_surface_get_width(s) as usize, cb::cairo_image_surface_get_height(s) as usize, cb::cairo_image_surface_get_stride(s) as usize / 4) };
+    let (w, h, stride) = size(dst);
+    let (mw, mh, mstride, lights) = (map.w, map.h, map.w, &map.a);
+    unsafe { cb::cairo_surface_flush(dst) };
+    let out = unsafe { std::slice::from_raw_parts_mut(cb::cairo_image_surface_get_data(dst) as *mut u32, stride * h) };
+    let lit = lit.filter(|s| size(*s).0 == w && size(*s).1 == h).map(|s| unsafe {
+        cb::cairo_surface_flush(s);
+        (std::slice::from_raw_parts(cb::cairo_image_surface_get_data(s) as *const u32, size(s).2 * h), size(s).2)
+    });
+    // Where each column and row samples the map: the two neighbours and the weight (of 256).
+    let axis = |n: usize, m: usize| -> Vec<(usize, usize, u32)> {
+        (0..n)
+            .map(|i| {
+                let p = ((i as f64 + 0.5) / LIGHT_SCALE - 0.5).clamp(0.0, (m - 1) as f64);
+                let i0 = p.floor() as usize;
+                (i0, (i0 + 1).min(m - 1), ((p - i0 as f64) * 256.0) as u32)
+            })
+            .collect()
+    };
+    let (cols, rows) = (axis(w, mw), axis(h, mh));
+    // The warm tint over a video: (1, 0.86, 0.45) at 6% where fully lit, premultiplied.
+    let warm = [255.0 * 0.06, 219.0 * 0.06, 115.0 * 0.06];
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let band = h.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (k, chunk) in out.chunks_mut(band * stride).enumerate() {
+            let (cols, rows, lit) = (&cols, &rows, &lit);
+            scope.spawn(move || {
+                for (j, line) in chunk.chunks_mut(stride).enumerate() {
+                    let y = k * band + j;
+                    if y >= h {
+                        break;
+                    }
+                    let (y0, y1, fy) = rows[y];
+                    let (r0, r1) = (&lights[y0 * mstride..y0 * mstride + mw], &lights[y1 * mstride..y1 * mstride + mw]);
+                    for (x, p) in line[..w].iter_mut().enumerate() {
+                        let (x0, x1, fx) = cols[x];
+                        let top = r0[x0] as u32 * (256 - fx) + r0[x1] as u32 * fx;
+                        let bottom = r1[x0] as u32 * (256 - fx) + r1[x1] as u32 * fx;
+                        // 0..=255 (from 0..=255 * 65536).
+                        let a = (top * (256 - fy) + bottom * fy) >> 16;
+                        if a == 0 {
+                            continue;
+                        }
+                        match lit {
+                            Some((src, sstride)) => *p = 0xFF00_0000 | mix_argb(*p, src[y * sstride + x], a + (a >> 7)),
+                            None => {
+                                let keep = 255 - a;
+                                let t = a as f32 / 255.0;
+                                let ch = |v: u32, sh: u32, add: f32| ((((v >> sh) & 255) * keep / 255) as f32 + add * t).min(255.0) as u32;
+                                let alpha = ((*p >> 24) * keep / 255 + (255.0 * 0.06 * t) as u32).min(255);
+                                *p = alpha << 24 | ch(*p, 16, warm[0]) << 16 | ch(*p, 8, warm[1]) << 8 | ch(*p, 0, warm[2]);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    unsafe { cb::cairo_surface_mark_dirty(dst) };
+}
+
 unsafe fn fireflies(c: &mut Ctx, layers: &Layers) {
     let (cr, s) = (c.cr, c.s);
     let (w, h) = (c.w, c.h);
@@ -1471,26 +1574,16 @@ unsafe fn fireflies(c: &mut Ctx, layers: &Layers) {
         }
         // Daylight comes back once the swarm has gathered.
         let day = closing.map_or(0.0, |t| ((t - 0.5) / 0.5).clamp(0.0, 1.0));
-        // Each firefly lights the wallpaper around it (a baked disc of light as the mask).
-        if let Some((sprite, sr)) = layers.light.filter(|_| day < 1.0) {
-            for &(x, y, r, b) in &glows {
-                cb::cairo_save(cr);
-                cb::cairo_rectangle(cr, x - r, y - r, 2.0 * r, 2.0 * r);
-                cb::cairo_clip(cr);
-                cb::cairo_push_group(cr);
-                cb::cairo_save(cr);
-                cb::cairo_set_source_surface(cr, layers.vivid.unwrap_or(layers.wall), 0.0, 0.0);
-                cb::cairo_translate(cr, x - r, y - r);
-                cb::cairo_scale(cr, r / sr, r / sr);
-                cb::cairo_mask_surface(cr, sprite, 0.0, 0.0);
-                cb::cairo_restore(cr);
-                cb::cairo_pop_group_to_source(cr);
-                cb::cairo_paint_with_alpha(cr, b.min(1.0));
-                cb::cairo_restore(cr);
-            }
+        // Each firefly lights the wallpaper around it: every light (a soft disc) goes into one
+        // small light map, which then lights the wallpaper (or opens the night over a video) in a
+        // single pass.
+        if day < 1.0 && !glows.is_empty() {
+            let map = light_map(w, h, &glows);
+            let video = c.l.video.is_some();
+            raster_lights(cb::cairo_get_target(cr), &map, if video { None } else { Some(layers.vivid.unwrap_or(layers.wall)) });
         }
         if day > 0.0 {
-            c.paint_surface(layers.wall, day);
+            c.reveal_wallpaper(layers, day);
         }
         // And glows itself: a soft halo round a bright core.
         let fly = (0.86, 1.0, 0.55);
@@ -1663,6 +1756,7 @@ mod tests {
             font: "Inter".into(),
             wallpaper: std::env::var("PRISM_LOCK_RENDER_WALL").ok(),
             video: None,
+            video_smooth: false,
             theme,
         }
     }
@@ -1750,6 +1844,51 @@ mod tests {
 
     /// The swollen dots reach past the screen edges at any size (a dot off the right edge once
     /// panicked the lock screen).
+    /// Over a video only the design is drawn: it must leave see-through places while locked
+    /// and nothing at all once unlocked.
+    #[test]
+    fn video_designs_cut_holes_and_clear_on_unlock() {
+        let dir = std::env::var("PRISM_LOCK_RENDER_DIR").ok();
+        let (w, h) = (1280, 720);
+        for (theme, name) in [(LockTheme::Fireflies, "fireflies")] {
+            assert!(!theme.needs_picture(), "{name}");
+            let mut l = look(theme);
+            l.video = Some("video.mp4".into());
+            let layers = Layers::render(&l, w, h);
+            let t0 = Instant::now();
+            let close_at = t0 + Duration::from_secs(5);
+            for (state, now, closing) in [("typing", close_at, None), ("unlock-end", close_at + Duration::from_millis(theme.closing_ms() as u64), Some(close_at))] {
+                let mut f = Fx::new(theme, t0);
+                for n in 1..=6 {
+                    f.sync(n, false, None, false, t0 + Duration::from_millis(1000 + n as u64 * 200));
+                }
+                if closing.is_some() {
+                    f.sync(6, false, None, true, close_at);
+                }
+                let sc = scene(now, t0, closing, 6, Mode::Lock);
+                let img = unsafe { cb::cairo_image_surface_create(cb::CAIRO_FORMAT_ARGB32, w, h) };
+                let cr = unsafe { cb::cairo_create(img) };
+                unsafe { paint(cr, &l, &sc, &f, &layers, w, h) };
+                unsafe { cb::cairo_destroy(cr) };
+                unsafe { cb::cairo_surface_flush(img) };
+                let stride = unsafe { cb::cairo_image_surface_get_stride(img) } as usize / 4;
+                let px = unsafe { std::slice::from_raw_parts(cb::cairo_image_surface_get_data(img) as *const u32, stride * h as usize) };
+                let (clear, dark) = px.iter().fold((0usize, 0usize), |(c, d), p| (c + (p >> 24 < 128) as usize, d + (p >> 24 > 200) as usize));
+                if let Some(d) = &dir {
+                    let path = std::ffi::CString::new(format!("{d}/{name}-video-{state}.png")).unwrap();
+                    unsafe { cb::cairo_surface_write_to_png(img, path.as_ptr()) };
+                }
+                unsafe { cb::cairo_surface_destroy(img) };
+                let total = (w * h) as usize;
+                if closing.is_none() {
+                    assert!(clear > total / 100 && dark > total / 4, "{name} {state}: {clear} clear, {dark} dark");
+                } else {
+                    assert_eq!(clear, total, "{name} {state}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn halftone_merges_at_any_screen_size() {
         let l = look(LockTheme::Halftone);

@@ -122,6 +122,8 @@ struct Look {
     wallpaper: Option<String>,
     /// The video wallpaper, playing on a surface underneath this one.
     video: Option<String>,
+    /// Play it at up to 60 frames a second with lanczos scaling (`wallpaper_video_smooth`).
+    video_smooth: bool,
     theme: LockTheme,
 }
 
@@ -176,6 +178,7 @@ impl Look {
             font,
             wallpaper: candidates.into_iter().find(|p| std::path::Path::new(p).exists()),
             video,
+            video_smooth: mode == Mode::Lock && cfg.wallpaper_video_smooth,
             theme: design,
         }
     }
@@ -734,7 +737,7 @@ impl App {
         // Frames follow on their own, without redrawing the design.
         subsurface.set_desync();
         let file = self.look.video.clone().unwrap_or_default();
-        let stream = VideoStream::open(std::path::Path::new(&file), w, h);
+        let stream = VideoStream::open(std::path::Path::new(&file), w, h, self.look.video_smooth);
         let buffers = stream.as_ref().map_or_else(Vec::new, |st| {
             let pool = shm.create_pool(st.memory().as_fd(), st.pool_size(), qh, ());
             let list = (0..prism_common::video::SLOTS as i32).map(|slot| pool.create_buffer(slot * st.frame_size(), w, h, w * 4, wl_shm::Format::Argb8888, qh, ())).collect();

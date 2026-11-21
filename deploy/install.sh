@@ -176,6 +176,8 @@ for size in 16 24 32 48 64 128 256 512; do
 done
 gtk-update-icon-cache -q -t "$DATA_HOME/icons/hicolor" 2>/dev/null || true
 install -Dm644 "$SCRIPT_DIR/prism-settings.desktop" "$DATA_HOME/applications/prism-settings.desktop"
+# man finds ~/.local/share/man through ~/.local/bin on PATH.
+install -Dm644 "$REPO_DIR/man/prism-ctl.1" "$DATA_HOME/man/man1/prism-ctl.1"
 install -Dm644 "$SCRIPT_DIR/portal/prism.portal" "$DATA_HOME/xdg-desktop-portal/portals/prism.portal"
 install -Dm644 "$SCRIPT_DIR/portal/org.freedesktop.impl.portal.desktop.prism.service" "$DATA_HOME/dbus-1/services/org.freedesktop.impl.portal.desktop.prism.service"
 install -Dm644 "$SCRIPT_DIR/portal/xdg-desktop-portal-prism.conf" "$SYSTEMD_USER_DIR/xdg-desktop-portal.service.d/prism.conf"

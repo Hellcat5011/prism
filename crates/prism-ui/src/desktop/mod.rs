@@ -21,6 +21,7 @@
 pub mod bar;
 pub mod cat;
 pub mod corners;
+pub mod cover;
 pub mod dbus;
 pub mod dock;
 pub mod edit;
@@ -253,8 +254,12 @@ struct Desk {
     depth_fade: Option<Instant>,
 }
 
-/// The wallpaper foreground mask in use, if the depth effect is on.
+/// The wallpaper foreground mask in use, if the depth effect is on. A video wallpaper has none:
+/// the mask belongs to the last still picture, and a moving picture has no fixed foreground.
 fn active_depth_mask(config: &Config) -> Option<String> {
+    if config.video_wallpaper().is_some() {
+        return None;
+    }
     config.depth_enabled.then(prism_common::depth::current_mask).flatten().map(|p| p.display().to_string())
 }
 
@@ -410,6 +415,22 @@ impl Desktop {
     }
 
     /// Changes whenever the desktop has re-read the config.
+    /// Windows are showing on some screen (minimised ones do not count).
+    pub fn windows_on_screen(&self) -> bool {
+        self.state.windows.on_screen("")
+    }
+
+    /// Windows cover every screen (Mango, Hyprland and niri; see `cover`). Starts following the
+    /// compositor's window list if nothing has yet.
+    pub fn background_covered(&self) -> bool {
+        if prism_common::alt_tab::Compositor::current() == Some(prism_common::alt_tab::Compositor::Mango) {
+            windows::watch_clients(self.state.waker.clone());
+            windows::background_covered()
+        } else {
+            cover::desktop_covered(&self.state.waker)
+        }
+    }
+
     pub fn config_seq(&self) -> u64 {
         self.state.config_seq
     }
@@ -876,7 +897,7 @@ impl Desk {
                 Vec::new()
             }
             WidgetId::Weather => widgets::draw_weather(cr, w, h, &p, &self.look, &crate::weather::snapshot()),
-            WidgetId::Notes => widgets::draw_notes(cr, w, h, &p, &self.look, &crate::notes::text()),
+            WidgetId::Notes => widgets::draw_notes(cr, w, h, &p, &self.look, &crate::notes::notes()),
             WidgetId::Timer => {
                 let hovered = match self.ptr_on {
                     PointerOn::Widget(WidgetId::Timer) => self.hover_hit,
@@ -1112,6 +1133,12 @@ impl Desk {
                     }
                     Hit::NotesOpen => {
                         if let Ok(c) = std::process::Command::new("prism-ctl").args(["notes", "toggle"]).spawn() {
+                            crate::reap(c);
+                        }
+                    }
+                    Hit::NoteOpen(id) => {
+                        crate::notes::request_open(id);
+                        if let Ok(c) = std::process::Command::new("prism-ctl").args(["notes", "open"]).spawn() {
                             crate::reap(c);
                         }
                     }

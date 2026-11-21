@@ -358,6 +358,9 @@ fn icon_def(name: &str) -> (bool, &'static str) {
         "ethernet" => (false, "M7.77 6.76L6.23 5.48.82 12l5.41 6.52 1.54-1.28L3.42 12l4.35-5.24zM7 13h2v-2H7v2zm10-2h-2v2h2v-2zm-6 2h2v-2h-2v2zm6.77-7.52l-1.54 1.28L20.58 12l-4.35 5.24 1.54 1.28L23.18 12l-5.41-6.52z"),
         "close" => (true, "M18 6 6 18M6 6l12 12"),
         "check" => (true, "M20 6 9 17l-5-5"),
+        "plus" => (true, "M12 5v14M5 12h14"),
+        "menu" => (true, "M4 6h16M4 12h16M4 18h16"),
+        "checklist" => (true, "M11 6h10M11 12h10M11 18h10M3 6a2 2 0 1 0 4 0a2 2 0 1 0-4 0M3 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0M3 18a2 2 0 1 0 4 0a2 2 0 1 0-4 0"),
         "chevron-down" => (true, "m6 9 6 6 6-6"),
         "chevron-up" => (true, "m18 15-6-6-6 6"),
         "volume" => (true, "M11 5L6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"),
@@ -439,7 +442,7 @@ mod tests {
     #[test]
     fn every_icon_parses_fully() {
         for name in ["bell", "wifi", "bluetooth", "coffee", "lock", "refresh", "copy", "headset", "keyboard", "phone",
-            "monitor", "speaker", "ethernet", "close", "check", "chevron-down", "chevron-up", "volume", "sun", "gear", "dot"]
+            "monitor", "speaker", "ethernet", "close", "check", "chevron-down", "chevron-up", "volume", "sun", "gear", "dot", "plus", "menu", "checklist", "pin", "trash"]
         {
             let (_, d) = icon_def(name);
             let (segs, ok) = parse_full(d);

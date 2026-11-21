@@ -1,5 +1,10 @@
 //! xdg-desktop-portal FileChooser: the system file dialog, for "Browse…" buttons.
 //! Blocking; call from a worker thread.
+//!
+//! prism-ui is not dumpable (`secret::harden_process`: passwords pass through it), so
+//! xdg-desktop-portal cannot read its `/proc/<pid>/root` and refuses every request ("Portal
+//! operation not allowed"). The request is made by a short-lived `prism-ui portal-pick` child
+//! instead: a fresh exec is dumpable again and holds no secrets.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -39,8 +44,63 @@ pub fn save_file(title: &str, name: &str) -> Result<Option<PathBuf>, String> {
     Ok(open_file(title, None, false, false, None, Some(name))?.into_iter().next())
 }
 
-/// OpenFile, or SaveFile when `save_as` names the suggested file.
+/// Run the dialog in a `prism-ui portal-pick` child (see the module comment).
 fn open_file(title: &str, start: Option<&Path>, directory: bool, multiple: bool, filter: Option<(&str, &str)>, save_as: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    use std::os::unix::ffi::OsStringExt;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Replaced on disk since it started (an update): run the new file at the same path.
+    let exe = match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(p) => PathBuf::from(p),
+        None => exe,
+    };
+    let flag = |b: bool| if b { "1" } else { "0" };
+    let (fname, fmime) = filter.unwrap_or(("", ""));
+    let out = std::process::Command::new(exe)
+        .arg(CHILD_ARG)
+        .arg(title)
+        .arg(start.map(|p| p.as_os_str().to_owned()).unwrap_or_default())
+        .args([flag(directory), flag(multiple), fname, fmime, save_as.unwrap_or("")])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot start the file dialog: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() { format!("file dialog helper failed ({})", out.status) } else { err });
+    }
+    Ok(out.stdout.split(|&b| b == 0).filter(|p| !p.is_empty()).map(|p| PathBuf::from(std::ffi::OsString::from_vec(p.to_vec()))).collect())
+}
+
+/// The first argument that makes prism-ui run `child_main`.
+pub const CHILD_ARG: &str = "portal-pick";
+
+/// `prism-ui portal-pick <title> <start> <directory 0|1> <multiple 0|1> <filter name> <filter
+/// mime> <save as>` (empty = none): run the dialog, print the chosen paths NUL-separated, exit.
+pub fn child_main(args: &[String]) -> ! {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+    let start = (!arg(1).is_empty()).then(|| PathBuf::from(arg(1)));
+    let filter = (!arg(4).is_empty()).then(|| (arg(4), arg(5)));
+    let save_as = (!arg(6).is_empty()).then(|| arg(6));
+    match request(arg(0), start.as_deref(), arg(2) == "1", arg(3) == "1", filter, save_as) {
+        Ok(paths) => {
+            let mut out = std::io::stdout().lock();
+            for p in paths {
+                let _ = out.write_all(p.as_os_str().as_bytes());
+                let _ = out.write_all(b"\0");
+            }
+            let _ = out.flush();
+            std::process::exit(0)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1)
+        }
+    }
+}
+
+/// OpenFile, or SaveFile when `save_as` names the suggested file.
+fn request(title: &str, start: Option<&Path>, directory: bool, multiple: bool, filter: Option<(&str, &str)>, save_as: Option<&str>) -> Result<Vec<PathBuf>, String> {
     let e = |e: zbus::Error| e.to_string();
     let conn = Connection::session().map_err(e)?;
     let token = format!(

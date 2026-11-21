@@ -79,6 +79,14 @@ extern "C" {
     pub fn pango_cairo_show_layout(cr: *mut Cairo, layout: *mut PangoLayout);
     pub fn pango_layout_get_cursor_pos(layout: *mut PangoLayout, index: i32, strong: *mut PangoRectangle, weak: *mut PangoRectangle);
     pub fn pango_layout_xy_to_index(layout: *mut PangoLayout, x: i32, y: i32, index: *mut i32, trailing: *mut i32) -> i32;
+    pub fn pango_attr_list_new() -> *mut c_void;
+    pub fn pango_attr_list_unref(list: *mut c_void);
+    pub fn pango_attr_list_insert(list: *mut c_void, attr: *mut PangoAttribute);
+    pub fn pango_attr_background_new(red: u16, green: u16, blue: u16) -> *mut PangoAttribute;
+    pub fn pango_attr_background_alpha_new(alpha: u16) -> *mut PangoAttribute;
+    pub fn pango_attr_foreground_alpha_new(alpha: u16) -> *mut PangoAttribute;
+    pub fn pango_attr_strikethrough_new(strikethrough: i32) -> *mut PangoAttribute;
+    pub fn pango_layout_set_attributes(layout: *mut PangoLayout, attrs: *mut c_void);
 
     pub fn g_object_unref(object: *mut c_void);
     pub fn gdk_pixbuf_new_from_file_at_scale(
@@ -689,6 +697,14 @@ pub fn draw_pango_text(
 }
 
 /// pango's rectangle, in pango units (1024 per pixel).
+/// The start of every PangoAttribute: the byte range it applies to.
+#[repr(C)]
+pub struct PangoAttribute {
+    klass: *const c_void,
+    pub start_index: u32,
+    pub end_index: u32,
+}
+
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct PangoRectangle {
@@ -702,12 +718,84 @@ pub struct PangoRectangle {
 /// height, the caret rectangle (x, y, h) at byte `caret`, and the byte index under `point`.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_text(cr: *mut Cairo, x: f64, y: f64, text: &str, font_spec: &str, color: (f64, f64, f64, f64), width: f64, caret: usize, point: Option<(f64, f64)>, draw: bool) -> (f64, (f64, f64, f64), Option<usize>) {
+    edit_text_styled(cr, x, y, text, font_spec, color, width, caret, point, draw, &[])
+}
+
+/// How a byte range of an edited text is shown (`edit_text_styled`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Span {
+    /// Selected: this colour behind it.
+    Selected((f64, f64, f64, f64)),
+    /// Not drawn, though it keeps its place (a marker drawn over by the caller).
+    Hidden,
+    /// Done: faded to this alpha and struck through.
+    Done(f64),
+}
+
+/// `edit_text` with byte ranges styled (`Span`), and where the given byte `indices` are.
+fn styled_layout(cr: *mut Cairo, text: &str, font_spec: &str, width: f64, spans: &[(usize, usize, Span)]) -> *mut PangoLayout {
     unsafe {
         let layout = new_layout(cr, &apply_global_font(font_spec));
         let c_text = CString::new(text.replace('\0', "")).unwrap_or_default();
         pango_layout_set_text(layout, c_text.as_ptr(), -1);
         pango_layout_set_width(layout, (width * 1024.0) as i32);
         pango_layout_set_wrap(layout, 2); // PANGO_WRAP_WORD_CHAR
+        if !spans.is_empty() {
+            let list = pango_attr_list_new();
+            let ch = |v: f64| (v.clamp(0.0, 1.0) * 65535.0) as u16;
+            for &(start, end, span) in spans.iter().filter(|(a, b, _)| a < b) {
+                let attrs = match span {
+                    Span::Selected(bg) => vec![pango_attr_background_new(ch(bg.0), ch(bg.1), ch(bg.2)), pango_attr_background_alpha_new(ch(bg.3).max(1))],
+                    Span::Hidden => vec![pango_attr_foreground_alpha_new(1)],
+                    Span::Done(a) => vec![pango_attr_foreground_alpha_new(ch(a).max(1)), pango_attr_strikethrough_new(1)],
+                };
+                for attr in attrs {
+                    (*attr).start_index = start.min(text.len()) as u32;
+                    (*attr).end_index = end.min(text.len()) as u32;
+                    pango_attr_list_insert(list, attr);
+                }
+            }
+            pango_layout_set_attributes(layout, list);
+            pango_attr_list_unref(list);
+        }
+        layout
+    }
+}
+
+/// Where each byte index in `indices` is in the wrapped `text`: (x, y, line height).
+pub fn text_positions(cr: *mut Cairo, text: &str, font_spec: &str, width: f64, indices: &[usize]) -> Vec<(f64, f64, f64)> {
+    unsafe {
+        let layout = styled_layout(cr, text, font_spec, width, &[]);
+        let out = indices
+            .iter()
+            .map(|&i| {
+                let (mut strong, mut weak) = (PangoRectangle::default(), PangoRectangle::default());
+                pango_layout_get_cursor_pos(layout, i.min(text.len()) as i32, &mut strong, &mut weak);
+                (strong.x as f64 / 1024.0, strong.y as f64 / 1024.0, strong.height as f64 / 1024.0)
+            })
+            .collect();
+        g_object_unref(layout as *mut c_void);
+        out
+    }
+}
+
+/// `edit_text` with byte ranges styled (`Span`).
+#[allow(clippy::too_many_arguments)]
+pub fn edit_text_styled(
+    cr: *mut Cairo,
+    x: f64,
+    y: f64,
+    text: &str,
+    font_spec: &str,
+    color: (f64, f64, f64, f64),
+    width: f64,
+    caret: usize,
+    point: Option<(f64, f64)>,
+    draw: bool,
+    spans: &[(usize, usize, Span)],
+) -> (f64, (f64, f64, f64), Option<usize>) {
+    unsafe {
+        let layout = styled_layout(cr, text, font_spec, width, spans);
         let (mut pw, mut ph) = (0, 0);
         pango_layout_get_pixel_size(layout, &mut pw, &mut ph);
         let mut strong = PangoRectangle::default();

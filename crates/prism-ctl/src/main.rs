@@ -13,8 +13,8 @@ Usage: prism-ctl <target> [action] [args...]
 
 Targets & Commands:
   launcher [toggle|open|close]
-  settings [toggle|open|close]
-  search [toggle|open|close|query <text>]
+  settings [toggle|open|close|tab <name|number>]
+  search [toggle|open|close|query <text>|results <text>]
   wallpaper [set <path> [scheme] [mode]|get|toggle|open|close]
   media [status|play-pause|next|prev|stop]
   theme [reload|palette]
@@ -37,7 +37,7 @@ Targets & Commands:
   network [status|toggle-wifi]
   bluetooth [status|toggle]
   keybinds [list|toggle|open|close|edit|rules]   edit: Shortcuts editor, rules: Window Rules
-  lock [lock|unlock|status]
+  lock [lock|status]
   screenshot [toggle|region|window|text|screen [--no-save] [--no-clipboard]|open <mode>|close|record|stop|status
              |replay [save|on|off|toggle]]   replay buffer: save the last seconds
   phone [toggle|open|close|status|refresh|connect <ip>|pair|unpair|accept|reject [device]
@@ -47,6 +47,8 @@ Targets & Commands:
   depth [status|generate|clear]
   index [rebuild|status]
   ping
+
+See man prism-ctl for every command.
 "#
     );
 }
@@ -275,11 +277,9 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 Some("open") => SearchAction::Open,
                 Some("close") => SearchAction::Close,
                 Some("query") => {
-                    let q = args.get(2).cloned().unwrap_or_default();
-                    SearchAction::SetQuery(q)
+                    SearchAction::SetQuery(args[2..].join(" "))
                 }
-                Some("get_query") => SearchAction::GetQuery,
-                Some("results") => SearchAction::GetResults,
+                Some("results") => SearchAction::GetResults(args[2..].join(" ")),
                 _ => SearchAction::Toggle,
             };
             Ok(IpcCommand::Search(act))
@@ -332,8 +332,11 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
                 Some("open") => SettingsAction::Open,
                 Some("close") => SettingsAction::Close,
                 Some("tab") => {
-                    let idx = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-                    SettingsAction::OpenTab(idx)
+                    let name = args[2..].join(" ");
+                    let tab = prism_common::ipc::settings_tab(&name).ok_or_else(|| {
+                        format!("unknown settings tab '{name}'; tabs: {}", prism_common::ipc::SETTINGS_TABS.join(", "))
+                    })?;
+                    SettingsAction::OpenTab(tab as u32)
                 }
                 _ => SettingsAction::Toggle,
             };
@@ -369,9 +372,10 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
 
         "lock" => {
             let act = match action_str {
-                Some("unlock") => LockAction::Unlock,
                 Some("status") => LockAction::Status,
-                _ => LockAction::Lock,
+                None | Some("lock") => LockAction::Lock,
+                // Never lock on a mistyped action.
+                Some(other) => return Err(format!("unknown lock action '{other}'")),
             };
             Ok(IpcCommand::Lock(act))
         }

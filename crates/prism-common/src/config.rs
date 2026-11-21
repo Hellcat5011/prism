@@ -70,7 +70,8 @@ pub struct Config {
 
     #[serde(default = "default_true")]
     pub show_lockscreen_session_controls: bool,
-    /// Lock screen design: classic, stencil, sentence, aperture, tide, ink, fireflies, halftone or rings.
+    /// Lock screen design: classic, stencil, sentence, aperture, tide, ink, fireflies, halftone
+    /// or rings (with a video wallpaper only classic, stencil, sentence, aperture and fireflies).
     #[serde(default = "default_lockscreen_theme")]
     pub lockscreen_theme: String,
     /// Greeter design: one of the lock screen designs, or "mirror" to follow the lock screen.
@@ -108,6 +109,13 @@ pub struct Config {
     /// The video the "prism-video" daemon plays.
     #[serde(default)]
     pub wallpaper_video: String,
+    /// Video wallpaper: lanczos upscaling and up to 60 frames a second (else bilinear, 30).
+    #[serde(default)]
+    pub wallpaper_video_smooth: bool,
+    /// Video wallpaper pauses: "never", "windows" (any window on screen), "covered" (windows
+    /// cover every screen; Mango, Hyprland and niri) or "fullscreen" (a fullscreen window has focus).
+    #[serde(default = "default_video_pause")]
+    pub wallpaper_video_pause: String,
     /// The daemon in use before the video one: choosing a picture goes back to it.
     #[serde(default = "default_wallpaper_daemon")]
     pub wallpaper_still_daemon: String,
@@ -789,6 +797,10 @@ fn default_lockscreen_theme() -> String { "classic".to_string() }
 fn default_greeter_theme() -> String { "mirror".to_string() }
 fn default_launcher_theme() -> String { "classic".to_string() }
 fn default_power_theme() -> String { "glide".to_string() }
+fn default_video_pause() -> String {
+    "never".into()
+}
+
 fn default_wallpaper_daemon() -> String { "prism".to_string() }
 fn default_wallpaper_transition() -> String { "random".to_string() }
 fn default_wallpaper_dir() -> String { "~/Pictures/Wallpapers".to_string() }
@@ -1008,6 +1020,8 @@ impl Default for Config {
             power_shutdown: default_true(),
             wallpaper_daemon: default_wallpaper_daemon(),
             wallpaper_video: String::new(),
+            wallpaper_video_smooth: false,
+            wallpaper_video_pause: default_video_pause(),
             wallpaper_still_daemon: default_wallpaper_daemon(),
             wallpaper_transition: default_wallpaper_transition(),
             wallpaper_dir: default_wallpaper_dir(),

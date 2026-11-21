@@ -1,0 +1,495 @@
+.TH PRISM-CTL 1 "2026-11-22" "Prism" "User Commands"
+.SH NAME
+prism-ctl \- control the Prism desktop shell
+.SH SYNOPSIS
+.B prism-ctl
+.I target
+.RI [ action ]
+.RI [ args ...]
+.br
+.B prism-ctl
+.RB [ \-h | \-\-help ]
+.SH DESCRIPTION
+.B prism-ctl
+sends one command to
+.BR prismd ,
+the Prism daemon, over its socket
+.IR $XDG_RUNTIME_DIR/prism.sock ,
+and prints the answer.
+It is meant for compositor keybinds and scripts: every overlay, card and
+setting that has a keybind in Prism is reached through it.
+.PP
+Most targets that open a card take
+.BR toggle ,
+.B open
+and
+.BR close ;
+when the action is left out they toggle.
+Targets that switch something on or off take
+.B on
+or
+.B off
+(also
+.BR true / false ,
+.BR 1 / 0 );
+anything else, or nothing, toggles.
+.PP
+.B prismd
+runs as the systemd user unit
+.BR prismd.service ;
+.B prism-ctl
+does not start it.
+.SH OVERLAYS AND CARDS
+.TP
+.B launcher \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The app launcher.
+.TP
+.BI "launcher query " text
+Print the first 10 installed apps matching
+.I text
+and their desktop ids, without opening the launcher.
+.TP
+.B launcher list
+Print the number of installed apps and the first 15.
+.TP
+.BI "launcher run " id
+Launch the app whose desktop id is
+.I id
+(case does not matter), for example
+.BR "prism-ctl launcher run firefox" .
+.TP
+.B search \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The search card (apps, files, quick answers).
+.TP
+.BI "search query " text
+Open search with
+.I text
+typed in, replacing what it had.
+.TP
+.BI "search results " text
+Print the apps and files matching
+.IR text ,
+without opening search.
+.TP
+.B settings \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The Settings card.
+.TP
+.BI "settings tab " tab
+Open Settings on a tab, or switch the open card to it.
+.I tab
+is a name (case, spaces and hyphens do not matter, and a prefix that fits only
+one tab is enough, for example
+.BR lock\-screen ,
+.B wall
+or
+.BR dis )
+or a number from 1 to 16 in this order: Appearance, Wallpaper, Desktop, Bar,
+Dock, Launcher, Search, Notifications, Lock Screen, Greeter, Power, Display,
+Connections, Phone, Capture, System.
+.TP
+.B setup
+The first-time setup guide.
+.B guide
+is a synonym.
+.TP
+.B notes \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The Notes card.
+.TP
+.B clipboard \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The clipboard history card.
+.TP
+.B emoji \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The emoji picker.
+.TP
+.B keybinds \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR|\fBlist\fR|\fBedit\fR|\fBrules\fR]
+The keybind cheat sheet.
+.B list
+prints the binds,
+.B edit
+opens the Shortcuts editor and
+.B rules
+the Window Rules editor.
+.TP
+.B power \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The power menu.
+.TP
+.B notif \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The notification center.
+.TP
+.B phone \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The Phone card. See
+.B PHONE
+for the other phone commands.
+.TP
+.B wallpaper \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The wallpaper picker.
+.TP
+.B switcher \fR[\fBnext\fR|\fBprev\fR|\fBshow\fR|\fBclose\fR]
+The window switcher. Bind
+.B next
+to Alt+Tab and
+.B prev
+to Alt+Shift+Tab; releasing Alt picks the selected window.
+.B show
+opens it without moving the selection. Default:
+.BR next .
+.TP
+.B colorpicker \fR[\fBtoggle\fR|\fBpick\fR|\fBopen\fR|\fBclose\fR]
+The colour picker. The picked colour is copied to the clipboard.
+.TP
+.B desktop \fR[\fBedit\fR|\fBopen\fR|\fBclose\fR|\fBsave\fR|\fBdiscard\fR|\fBreset\fR|\fBstatus\fR]
+Desktop widget edit mode.
+.B edit
+toggles it,
+.B save
+and
+.B discard
+leave it keeping or dropping the changes,
+.B reset
+restores the default layout and
+.B status
+prints whether it is open.
+.B edit-mode
+is the same target without the
+.B edit
+action.
+.SH SCREENSHOTS AND RECORDING
+.B capture
+is a synonym of
+.BR screenshot .
+.TP
+.B screenshot \fR[\fBtoggle\fR]
+Open or close the capture overlay.
+.TP
+.B screenshot region\fR|\fBwindow\fR|\fBtext
+Open the overlay in that mode.
+.B text
+(also
+.BR ocr )
+copies the text in the chosen region; it needs
+.BR tesseract (1).
+.TP
+.BI "screenshot open " mode
+Open the overlay in
+.I mode
+.RB ( region ,
+.BR window ,
+.BR text ).
+.TP
+.B screenshot screen \fR[\fB\-\-no\-save\fR] [\fB\-\-no\-clipboard\fR]
+Take the whole screen at once, without the overlay. It is saved and copied
+unless told otherwise.
+.B output
+is a synonym.
+.TP
+.B screenshot close
+Close the overlay.
+.TP
+.B screenshot record
+Stop the running recording, or open the overlay in record mode.
+.TP
+.B screenshot stop
+Stop the running recording.
+.TP
+.B screenshot status
+Print the recording state as JSON.
+.TP
+.B screenshot replay \fR[\fBsave\fR|\fBon\fR|\fBoff\fR|\fBtoggle\fR]
+The replay buffer.
+.B save
+(the default) writes the last seconds to a file;
+.BR on ,
+.B off
+and
+.B toggle
+switch the buffer.
+.SH MEDIA, VOLUME AND BRIGHTNESS
+.TP
+.B media \fR[\fBstatus\fR|\fBplay\-pause\fR|\fBnext\fR|\fBprev\fR|\fBstop\fR]
+Control the current MPRIS player.
+.B status
+(the default) prints what is playing.
+.BR play ,
+.B pause
+and
+.B toggle
+are synonyms of
+.BR play\-pause ;
+.B previous
+of
+.BR prev .
+.TP
+.B osd volume \fR[\fB+\fIstep\fB%\fR|\fB\-\fIstep\fB%\fR|\fBmute\fR|\fIvalue\fR]
+Change the output volume by
+.I step
+percent, set it to
+.I value
+percent, or toggle mute, and show the OSD. A step without a number is 5.
+.TP
+.B osd brightness \fR[\fB+\fIstep\fB%\fR|\fB\-\fIstep\fB%\fR|\fIvalue\fR]
+The same for screen brightness.
+.SH NOTIFICATIONS
+.TP
+.B notif list
+Print the stored notifications.
+.TP
+.B notif clear
+Remove all notifications.
+.TP
+.BI "notif dismiss " id
+Remove one notification.
+.TP
+.B notif send \fR[\fB\-a\fR|\fB\-\-app \fIname\fR] [\fIsummary\fR [\fIbody\fR]]
+Post a notification. With three words and no
+.BR \-a ,
+the first is the app name.
+.TP
+.B notif silent \fR[\fBon\fR|\fBoff\fR]
+Do not disturb: notifications are stored without popups.
+.TP
+.B notif state
+Print silent mode, caffeinate, game mode and the timer as JSON.
+.SH TIMER
+.TP
+.BI "timer start " duration
+Start a timer.
+.I duration
+is like
+.BR 5m ,
+.BR 90s ,
+.B 1h30m
+or
+.BR 2:30 .
+.B prism-ctl timer
+.I duration
+does the same.
+.TP
+.BI "timer add " duration
+Add time to the running timer; a leading
+.B \-
+takes it away.
+.TP
+.B timer pause\fR|\fBresume\fR|\fBcancel
+Pause, resume or cancel the timer.
+.B stop
+is a synonym of
+.BR cancel .
+.TP
+.B timer \fR[\fBstatus\fR]
+Print the timer and stopwatch state as JSON.
+.TP
+.B stopwatch \fR[\fBtoggle\fR|\fBreset\fR]
+Start or pause the stopwatch, or reset it.
+.SH SYSTEM
+.TP
+.B lock \fR[\fBlock\fR]
+Lock the session with
+.BR prism-lock .
+.TP
+.B lock status
+Print whether the session is locked and idle.
+.TP
+.B power lock\fR|\fBlogout\fR|\fBsuspend\fR|\fBsleep\fR|\fBhibernate\fR|\fBreboot\fR|\fBshutdown
+Act at once, without the menu.
+.B exit
+is a synonym of
+.BR logout ,
+.B restart
+of
+.B reboot
+and
+.B poweroff
+of
+.BR shutdown .
+.TP
+.B caffeinate \fR[\fBon\fR|\fBoff\fR]
+Keep the screen awake (idle inhibitor).
+.TP
+.B gamemode \fR[\fBon\fR|\fBoff\fR]
+Game mode: silent notifications, the performance power profile, no
+animations or blur. Turning it off restores the earlier state.
+.B game\-mode
+is a synonym.
+.TP
+.B bluelight \fR[\fBtoggle\fR|\fBmanual_toggle\fR|\fBdump\fR]
+.B toggle
+switches the blue light filter's schedule,
+.B manual_toggle
+turns the filter on or off now and
+.B dump
+prints its state as JSON.
+.TP
+.B network \fR[\fBstatus\fR|\fBtoggle\-wifi\fR]
+Print the network state, or switch Wi-Fi.
+.TP
+.B bluetooth \fR[\fBstatus\fR|\fBtoggle\fR]
+Print the Bluetooth state, or switch Bluetooth.
+.SH THEME AND WALLPAPER
+.TP
+.BI "wallpaper set " path " \fR[\fIscheme\fR [\fImode\fR]]"
+Set the wallpaper with the configured wallpaper daemon and regenerate the
+colours with
+.BR matugen .
+.I scheme
+is a matugen scheme type (for example
+.BR scheme\-tonal\-spot )
+and
+.I mode
+is
+.B dark
+or
+.BR light .
+.TP
+.B wallpaper get
+Print the current wallpaper's path.
+.TP
+.B theme \fR[\fBreload\fR]
+Reload the colour palette.
+.TP
+.B theme palette
+Print the palette as JSON.
+.B get
+is a synonym.
+.TP
+.B depth \fR[\fBstatus\fR|\fBgenerate\fR|\fBclear\fR]
+The wallpaper depth mask (the clock drawn behind the foreground).
+.B generate
+makes it for the current wallpaper and
+.B clear
+deletes all cached masks.
+.TP
+.B index \fR[\fBstatus\fR|\fBrebuild\fR]
+The file index used by search.
+.SH CLIPBOARD AND EMOJI
+.TP
+.B clipboard list
+Print the 10 latest entries with their index.
+.TP
+.BI "clipboard get " index
+Print an entry.
+.TP
+.BI "clipboard copy " index
+Copy an entry back to the clipboard.
+.TP
+.BI "clipboard add " text
+Add text to the history.
+.TP
+.B clipboard clear
+Clear the history.
+.TP
+.BI "emoji search " query
+Print matching emoji.
+.TP
+.BI "emoji copy " glyph
+Add an emoji to the clipboard history.
+.TP
+.B emoji list
+Print the first 20 emoji with their names.
+.SH PHONE
+These need phone sync to be on in Settings
+.RB ( prism\-phoned ).
+Commands that take an optional
+.I device
+use the connected phone when it is left out.
+.TP
+.B phone status
+Print the known devices and their state.
+.TP
+.B phone refresh
+Look for devices again.
+.TP
+.BI "phone connect " ip\fR[\fB:\fIport\fR]
+Connect to a phone by address.
+.TP
+.B phone pair\fR|\fBunpair\fR|\fBaccept\fR|\fBreject \fR[\fIdevice\fR]
+Ask to pair, forget a pairing, or answer a pair request.
+.TP
+.B phone ping\fR|\fBring \fR[\fIdevice\fR]
+Send a ping, or make the phone ring.
+.TP
+.BI "phone clipboard " text
+Put
+.I text
+on the phone's clipboard.
+.TP
+.B phone media \fR[\fBplay\fR|\fBpause\fR|\fBnext\fR|\fBprevious\fR]
+Control the phone's media player. Without an action it toggles play and
+pause.
+.TP
+.BI "phone send " file ...
+Send files.
+.TP
+.BI "phone send \-\-text " text
+Send text.
+.TP
+.BI "phone send \-\-url " url
+Open a link on the phone.
+.SH OTHER
+.TP
+.B ping
+Check that prismd answers.
+.TP
+.B help
+Print prismd's greeting.
+.TP
+.BR \-h ", " \-\-help
+Print a short usage summary.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The command line could not be parsed.
+.TP
+.B 2
+prismd is not running (the socket could not be reached).
+.TP
+.BR 3 ", " 4 ", " 5
+The command could not be sent or the answer read.
+.TP
+.B 6
+prismd refused the command; the reason is printed.
+.SH FILES
+.TP
+.I $XDG_RUNTIME_DIR/prism.sock
+prismd's command socket.
+.TP
+.I ~/.config/prism/config.json
+Settings. Changed by Settings and by commands such as
+.B gamemode
+and
+.BR "screenshot replay on" .
+.TP
+.I ~/.config/prism/notes.json
+Notes.
+.TP
+.I ~/.config/prism/dock.json
+Dock pins.
+.SH EXAMPLES
+Keybinds for MangoWM:
+.PP
+.RS
+.nf
+bind=SUPER,space,spawn,prism-ctl launcher
+bind=ALT,Tab,spawn,prism-ctl switcher next
+bind=NONE,XF86AudioRaiseVolume,spawn,prism-ctl osd volume +5%
+bind=NONE,Print,spawn,prism-ctl screenshot region
+.fi
+.RE
+.PP
+A five-minute timer, and a notification when a script is done:
+.PP
+.RS
+.nf
+prism-ctl timer 5m
+make && prism-ctl notif send -a make "Build finished"
+.fi
+.RE
+.SH SEE ALSO
+.BR systemctl (1),
+.BR journalctl (1),
+.BR matugen (1)
+.PP
+Logs of prismd and prism-ui:
+.B journalctl \-\-user \-u prismd

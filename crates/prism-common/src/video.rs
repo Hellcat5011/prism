@@ -47,8 +47,9 @@ pub struct VideoStream {
 }
 
 impl VideoStream {
-    /// Start decoding `file` for a screen of `width` by `height` pixels.
-    pub fn open(file: &Path, width: i32, height: i32) -> Option<VideoStream> {
+    /// Start decoding `file` for a screen of `width` by `height` pixels; `smooth`: 60 frames a
+    /// second and lanczos scaling (more CPU) instead of 30 and bilinear.
+    pub fn open(file: &Path, width: i32, height: i32, smooth: bool) -> Option<VideoStream> {
         if width <= 0 || height <= 0 {
             return None;
         }
@@ -68,6 +69,9 @@ impl VideoStream {
         let shared = memory.as_raw_fd();
         let mut cmd = Command::new(helper());
         cmd.arg("play").arg(file).arg(width.to_string()).arg(height.to_string()).arg(CHILD_FD.to_string());
+        if smooth {
+            cmd.arg("smooth");
+        }
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         unsafe {
             cmd.pre_exec(move || {

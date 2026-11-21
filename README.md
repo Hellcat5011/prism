@@ -69,8 +69,8 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   **Classic**, **Stencil** (the wallpaper seen through a giant clock), **Sentence** (the time and your
   notifications as a sentence), **Aperture** (a circular window that opens as you type), **Tide** (colour splashes
   that fill the greyscale wallpaper on unlock), **Ink** (ink blots bleeding into a paper-white wallpaper),
-  **Fireflies** (a night-time wallpaper lit by a firefly per key), **Halftone** (a dot screen whose dots merge into
-  the picture as you type and on unlock) and **Rings** (the wallpaper cut into concentric rings that turn as you
+  **Fireflies** (a night-time wallpaper lit by a firefly per key; over a video each firefly opens a window onto it), **Halftone** (a dot screen whose dots merge into
+  the picture as you type and on unlock and **Rings** (the wallpaper cut into concentric rings that turn as you
   type and line up on unlock). The greeter mirrors the lock
   screen or uses its own design, and clicking the user or session cycles through them.
 - **Power menu**: five large designs (**Glide Bar**, **Split Panel**, **Shutters**, **Orbit** and **Floating
@@ -171,7 +171,7 @@ Choose a design in Settings > Lock Screen. The greeter can mirror it or use its 
 |---|---|
 | `prismd` | Background daemon (systemd user unit). IPC socket, notification server, idle monitor and dimming, blue light (gamma), clipboard watchers, depth mask worker, lock supervision. Starts and supervises one resident `prism-ui daemon`. |
 | `prism-ui` | All UI in one process: modal cards (launcher, search, settings, ...), notification popups, OSD, colour picker, capture overlay and desktop widgets. Draws with cairo/pango, paced by `wl_surface.frame` callbacks. |
-| `prism-ctl` | Command-line client; compositor keybinds call it. |
+| `prism-ctl` | Command-line client; compositor keybinds call it. Every command: `man prism-ctl`. |
 | `prism-lock` | Lock screen (`ext-session-lock-v1`) and greetd greeter (`--greeter`, under `cage`). |
 | `prism-phone` (`prism-phoned`) | Phone sync over the KDE Connect protocol (v8), run by `prismd` while phone sync is on. |
 | `prism-capture` | Screen capture core (`ext-image-copy-capture-v1`, screencopy fallback) shared by `prism-ui` and `prism-rec`. |
@@ -230,6 +230,7 @@ systemctl --user enable --now prismd
 The installer checks the build dependencies, builds the workspace and installs:
 - the binaries (`prismd`, `prism-ui`, `prism-ctl`, `prism-lock`, `prism-phoned`, `prism-rec`) to `~/.local/bin/`;
 - helper scripts to `~/.local/share/prism/scripts/`;
+- the `prism-ctl(1)` man page to `~/.local/share/man/man1/`;
 - `prismd.service` to `~/.config/systemd/user/`.
 
 Run from a terminal, it asks whether to add `~/.local/bin` to your shell's PATH when it is missing (so `prism-ctl`

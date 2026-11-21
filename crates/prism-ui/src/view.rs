@@ -52,6 +52,11 @@ pub trait CardView {
     fn clickable(&self) -> bool {
         false
     }
+    /// Lower the card below windows (true) while a system dialog it opened is up, or raise it
+    /// again (false); taken once.
+    fn take_layer_request(&mut self) -> Option<bool> {
+        None
+    }
     /// Time until `poll` wants to run again (periodic refresh).
     fn wake_in(&self) -> Option<std::time::Duration> {
         None

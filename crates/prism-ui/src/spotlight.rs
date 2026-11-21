@@ -100,6 +100,13 @@ pub struct SpotlightView {
     shift: bool,
 }
 
+/// Text from `prism-ctl search query`, typed in by the next `poll`.
+static PENDING_QUERY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_pending_query(text: String) {
+    *PENDING_QUERY.lock().unwrap() = Some(text);
+}
+
 impl SpotlightView {
     pub fn new(apps: Vec<DesktopApp>, config: Config, waker: Waker) -> Self {
         let (jobs, job_rx) = std::sync::mpsc::channel::<Job>();
@@ -155,6 +162,11 @@ impl SpotlightView {
     /// Take file-search results. True when something changed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
+        if let Some(text) = PENDING_QUERY.lock().unwrap().take() {
+            self.query = Query::with_text(&text);
+            self.apply_filter();
+            changed = true;
+        }
         while let Ok(f) = self.found.try_recv() {
             if f.generation != self.generation {
                 continue;

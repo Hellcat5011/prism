@@ -1,7 +1,8 @@
 //! Video wallpaper decoder. Runs as its own process, so a bad file can never take the desktop or
 //! the lock screen down with it, and fills frames straight into memory the display side shares.
 //!
-//! `prism-video play <file> <width> <height> <fd>`: loops `file`, cropped to cover the size.
+//! `prism-video play <file> <width> <height> <fd> [smooth]`: loops `file`, cropped to cover the
+//! size; up to 30 frames a second with bilinear scaling, or with `smooth` 60 and lanczos.
 //! `fd` is shared memory of `SLOTS` frames. Each finished frame is announced on stdout as
 //! (slot: u32, time in ms: u64), little endian; a slot may be written again once its number
 //! comes back on stdin. Exits when stdin closes.
@@ -16,8 +17,11 @@ use std::io::Write;
 
 /// Frames in the shared memory (`prism_common::video::SLOTS`).
 const SLOTS: u32 = 4;
-/// Wallpapers do not need more than this; the rest of a faster video is skipped.
+/// Wallpapers do not need more than 30 frames a second; the rest of a faster video is skipped.
 const MIN_FRAME_MS: u64 = 33;
+/// `smooth`: up to 60. 16 rather than 16.7 so a 60 fps video (frames 16 or 17 ms apart, in whole
+/// ms) keeps every frame.
+const SMOOTH_FRAME_MS: u64 = 16;
 
 type Res<T> = Result<T, String>;
 
@@ -99,7 +103,8 @@ fn announce(slot: u32, ms: u64) -> Option<()> {
     std::io::stdout().flush().ok()
 }
 
-fn play(file: &str, w: u32, h: u32, fd: i32) -> Res<()> {
+fn play(file: &str, w: u32, h: u32, fd: i32, smooth: bool) -> Res<()> {
+    let (min_frame, filter) = if smooth { (SMOOTH_FRAME_MS, scaling::Flags::LANCZOS) } else { (MIN_FRAME_MS, scaling::Flags::BILINEAR) };
     let size = SLOTS as usize * (w * h * 4) as usize;
     let map = unsafe { libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0) };
     if map == libc::MAP_FAILED {
@@ -148,11 +153,11 @@ fn play(file: &str, w: u32, h: u32, fd: i32) -> Res<()> {
             if ms < next {
                 continue;
             }
-            next = ms + MIN_FRAME_MS;
+            next = ms + min_frame;
             let (fmt, sw, sh) = (frame.format(), frame.width(), frame.height());
             if !matches!(&scaler, Some((_, f, a, b)) if *f == fmt && *a == sw && *b == sh) {
                 let (cw, ch) = cover(sw, sh, w, h);
-                let ctx = scaling::Context::get(fmt, sw, sh, Pixel::BGRA, cw, ch, scaling::Flags::BILINEAR).map_err(err("scaler"))?;
+                let ctx = scaling::Context::get(fmt, sw, sh, Pixel::BGRA, cw, ch, filter).map_err(err("scaler"))?;
                 scaler = Some((ctx, fmt, sw, sh));
             }
             scaler.as_mut().unwrap().0.run(&frame, &mut picture).map_err(err("scale"))?;
@@ -167,7 +172,7 @@ fn play(file: &str, w: u32, h: u32, fd: i32) -> Res<()> {
                 return Err("the file holds no frames".into());
             }
             // Around again, continuing the clock.
-            offset = last + MIN_FRAME_MS;
+            offset = last + min_frame;
             first = None;
             next = offset;
             input.seek(0, ..).map_err(err("seek"))?;
@@ -217,12 +222,12 @@ fn main() {
     }
     ff::util::log::set_level(ff::util::log::Level::Fatal);
     let result = match args.as_slice() {
-        ["play", file, w, h, fd] => match (w.parse(), h.parse(), fd.parse()) {
-            (Ok(w), Ok(h), Ok(fd)) => play(file, w, h, fd),
+        ["play", file, w, h, fd, rest @ ..] if rest.len() <= 1 => match (w.parse(), h.parse(), fd.parse()) {
+            (Ok(w), Ok(h), Ok(fd)) => play(file, w, h, fd, rest == ["smooth"]),
             _ => Err("bad arguments".into()),
         },
         ["still", file, out] => still(file, out),
-        _ => Err("usage: prism-video play <file> <w> <h> <fd> | still <file> <out.ppm>".into()),
+        _ => Err("usage: prism-video play <file> <w> <h> <fd> [smooth] | still <file> <out.ppm>".into()),
     };
     if let Err(e) = result {
         eprintln!("[prism-video] {e}");
