@@ -15,7 +15,7 @@ use prism_common::Theme;
 
 use crate::cairo_backend::{self as cb, Cairo};
 use crate::desktop::layout::Rect;
-use crate::launcher::{self, Effect, Query, DOWN, END, ENTER, ESC, HOME, LEFT, MOUSE_READY, PGDN, PGUP, RIGHT, UP};
+use crate::launcher::{self, Effect, Query, DOWN, END, ENTER, ESC, HOME, LEFT, MOUSE_READY, PGDN, PGUP, RIGHT, TAB, UP};
 use crate::ui::{self, Fades, Rgba, SpringValue, Style};
 use crate::view::CardView;
 
@@ -261,6 +261,17 @@ impl Picker {
     fn filter(&mut self) {
         self.results = crate::quick::launcher_results(&self.apps, &self.query.text);
         self.selected = 0;
+    }
+
+    /// An editing key for the field; Tab puts the selected app's name in it, which lists its
+    /// actions. Some(text_changed), as `Query::key`.
+    fn edit(&mut self, special: u32, typed: Option<char>, ctrl: bool) -> Option<bool> {
+        if special != TAB {
+            return self.query.key(special, typed, ctrl);
+        }
+        let text = self.results.get(self.selected).and_then(crate::quick::complete_actions)?;
+        self.query = Query::with_text(&text);
+        Some(true)
     }
 
     fn launch(&self, i: usize) -> Effect {
@@ -568,7 +579,7 @@ impl CardView for SlicesLauncher {
         if let Some(effect) = self.picker.line_key(special, ctrl, SLICES_SHOWN as i32) {
             return effect;
         }
-        match self.picker.query.key(special, typed, ctrl) {
+        match self.picker.edit(special, typed, ctrl) {
             Some(true) => {
                 self.picker.filter();
                 self.first = 0;
@@ -860,7 +871,7 @@ impl CardView for SpectrumLauncher {
             END if !ctrl => self.picker.select(self.picker.results.len().saturating_sub(1)),
             PGUP => self.step_column(-3),
             PGDN => self.step_column(3),
-            _ => match self.picker.query.key(special, typed, ctrl) {
+            _ => match self.picker.edit(special, typed, ctrl) {
                 Some(true) => {
                     self.picker.filter();
                     self.stale = true;
@@ -1241,7 +1252,7 @@ impl CardView for DeckLauncher {
         if let Some(effect) = self.picker.line_key(special, ctrl, DECK_PAGE) {
             return effect;
         }
-        match self.picker.query.key(special, typed, ctrl) {
+        match self.picker.edit(special, typed, ctrl) {
             Some(true) => {
                 self.picker.filter();
                 self.fan.snap(0.0);

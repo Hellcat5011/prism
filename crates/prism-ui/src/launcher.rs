@@ -36,6 +36,7 @@ pub const MOUSE_READY: Duration = Duration::from_millis(150);
 
 pub const ESC: u32 = 1;
 pub const BACKSPACE: u32 = 14;
+pub const TAB: u32 = 15;
 pub const ENTER: u32 = 28;
 pub const HOME: u32 = 102;
 pub const UP: u32 = 103;
@@ -311,6 +312,17 @@ impl LauncherView {
         self.glide.reset();
     }
 
+    /// Tab: the selected app's name in the field, which lists its actions.
+    fn complete(&mut self) -> bool {
+        match self.results.get(self.selected).and_then(crate::quick::complete_actions) {
+            Some(text) => {
+                self.query = Query::with_text(&text);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn launch(&self, i: usize) -> Effect {
         if let Some(app) = self.results.get(i) {
             if crate::quick::launch_entry(app, false) {
@@ -464,7 +476,7 @@ impl LauncherView {
             UP => self.move_selection(-1),
             PGDN => self.move_selection(((self.list.h / (ROW_H + ROW_GAP)) as i32).max(1)),
             PGUP => self.move_selection(-((self.list.h / (ROW_H + ROW_GAP)) as i32).max(1)),
-            _ => match self.query.key(special, typed, ctrl) {
+            _ => match if special == TAB { self.complete().then_some(true) } else { self.query.key(special, typed, ctrl) } {
                 Some(true) => self.apply_filter(),
                 Some(false) => {}
                 None => return Effect::None,

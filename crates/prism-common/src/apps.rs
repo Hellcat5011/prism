@@ -70,6 +70,22 @@ pub struct DesktopApp {
     /// StartupWMClass: the app id its windows report, when that differs from the file name.
     #[serde(default)]
     pub wm_class: Option<String>,
+    /// The file's `[Desktop Action ...]` entries (New Window, New Private Window, ...), in the
+    /// order its `Actions=` key lists them.
+    #[serde(default)]
+    pub actions: Vec<DesktopAction>,
+}
+
+/// An action section as read: id, Name, Exec, Icon.
+type RawAction = (String, Option<String>, Option<String>, Option<String>);
+
+/// One `[Desktop Action <id>]` of a desktop file.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DesktopAction {
+    pub id: String,
+    pub name: String,
+    pub exec: String,
+    pub icon: Option<String>,
 }
 
 impl DesktopApp {
@@ -93,6 +109,10 @@ impl DesktopApp {
         let mut wm_class: Option<String> = None;
         let mut no_display = false;
         let mut is_application = false;
+        let mut action_ids: Vec<String> = Vec::new();
+        // Sections read after [Desktop Entry]: (id, name, exec, icon) of each action.
+        let mut actions: Vec<RawAction> = Vec::new();
+        let mut in_action = false;
 
         for line in content.lines() {
             let trimmed = line.trim();
@@ -101,11 +121,27 @@ impl DesktopApp {
             }
 
             if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                in_action = false;
                 if trimmed == "[Desktop Entry]" {
                     in_desktop_entry = true;
-                } else if in_desktop_entry {
-                    // Left [Desktop Entry] section
-                    break;
+                } else if let Some(id) = trimmed.strip_prefix("[Desktop Action ").and_then(|t| t.strip_suffix(']')) {
+                    in_desktop_entry = false;
+                    in_action = true;
+                    actions.push((id.trim().to_string(), None, None, None));
+                } else {
+                    in_desktop_entry = false;
+                }
+                continue;
+            }
+
+            if in_action {
+                if let (Some((key, val)), Some(a)) = (trimmed.split_once('='), actions.last_mut()) {
+                    match key.trim() {
+                        "Name" if a.1.is_none() => a.1 = Some(val.trim().to_string()),
+                        "Exec" => a.2 = Some(val.trim().to_string()),
+                        "Icon" => a.3 = Some(val.trim().to_string()),
+                        _ => {}
+                    }
                 }
                 continue;
             }
@@ -128,6 +164,9 @@ impl DesktopApp {
                     "StartupWMClass" => wm_class = Some(val.to_string()),
                     "NoDisplay" => no_display = val.eq_ignore_ascii_case("true"),
                     "Type" => is_application = val.eq_ignore_ascii_case("Application"),
+                    "Actions" => {
+                        action_ids = val.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    }
                     "Keywords" => {
                         keywords = val.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                     }
@@ -159,6 +198,13 @@ impl DesktopApp {
             terminal,
             wm_class,
             no_display,
+            actions: action_ids
+                .iter()
+                .filter_map(|id| {
+                    let (_, name, exec, icon) = actions.iter().find(|a| &a.0 == id)?;
+                    Some(DesktopAction { id: id.clone(), name: name.clone()?, exec: exec.clone()?, icon: icon.clone() })
+                })
+                .collect(),
         })
     }
 
@@ -454,5 +500,16 @@ Type=Application
         let exact = search_apps(&apps, "alacritty");
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].name, "Alacritty");
+    }
+
+    #[test]
+    fn desktop_actions() {
+        let sample = "[Desktop Entry]\nName=Firefox\nExec=firefox %u\nType=Application\nActions=new-window;new-private-window;missing;\n\n[Desktop Action new-window]\nName=New Window\nExec=firefox --new-window %u\n\n[Desktop Action new-private-window]\nName=New Private Window\nName[de]=Neues privates Fenster\nExec=firefox --private-window %u\nIcon=firefox-private\n\n[Desktop Action unlisted]\nName=Unlisted\nExec=firefox --x\n";
+        let app = DesktopApp::parse_str(sample, Path::new("firefox.desktop")).unwrap();
+        assert_eq!(app.exec, "firefox %u");
+        let names: Vec<_> = app.actions.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["New Window", "New Private Window"]);
+        assert_eq!(app.actions[1].exec, "firefox --private-window %u");
+        assert_eq!(app.actions[1].icon.as_deref(), Some("firefox-private"));
     }
 }

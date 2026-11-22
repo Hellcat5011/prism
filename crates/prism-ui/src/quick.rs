@@ -74,7 +74,7 @@ const APP_PREFIX: &str = "prism-quick:";
 /// The launcher's results for `query`: quick answers (as entries every launcher design can
 /// draw) above the matching apps; the web search only when no app matches.
 pub fn launcher_results(apps: &[prism_common::apps::DesktopApp], query: &str) -> Vec<prism_common::apps::DesktopApp> {
-    let mut found = prism_common::apps::search_apps(apps, query);
+    let mut found = with_actions(apps, prism_common::apps::search_apps(apps, query), query);
     let cfg = prism_common::Config::load();
     if !cfg.quick_answers {
         return found;
@@ -94,14 +94,111 @@ pub fn launcher_results(apps: &[prism_common::apps::DesktopApp], query: &str) ->
             terminal: false,
             no_display: false,
             wm_class: None,
+            actions: Vec::new(),
         })
         .collect();
     out.append(&mut found);
     out
 }
 
-/// Run a launcher entry if it is a quick answer; false for a real app.
+/// Launcher entries for an app's desktop action: `prism-action:<app id>:<action id>`.
+const ACTION_PREFIX: &str = "prism-action:";
+
+/// Lower-case words of `s`.
+fn words(s: &str) -> Vec<String> {
+    s.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Every word of `want` starts a word of `have` (in any order).
+fn words_match(want: &[String], have: &[String]) -> bool {
+    want.iter().all(|w| have.iter().any(|h| h.starts_with(w.as_str())))
+}
+
+/// The app's actions matching `query`, as launcher entries. The query names the app first
+/// ("firefox private", "files new"), then words of the action; the app's name followed by a
+/// space (what Tab writes) lists all of them.
+fn actions_for(app: &prism_common::apps::DesktopApp, query: &str) -> Vec<prism_common::apps::DesktopApp> {
+    if app.actions.is_empty() {
+        return Vec::new();
+    }
+    let q = words(query);
+    let trailing = query.ends_with(char::is_whitespace);
+    let mut name = words(&app.name);
+    name.push(app.id.to_lowercase());
+    // Split the query into the app part and the action part; the longest app part wins.
+    let split = (1..=q.len()).rev().find(|&k| words_match(&q[..k], &name) && (k < q.len() || trailing) && q[..k].concat().chars().count() >= 2);
+    let Some(k) = split else { return Vec::new() };
+    let tail = &q[k..];
+    app.actions
+        .iter()
+        .filter(|a| words_match(tail, &words(&a.name)))
+        .map(|a| prism_common::apps::DesktopApp {
+            id: format!("{ACTION_PREFIX}{}:{}", app.id, a.id),
+            name: a.name.clone(),
+            generic_name: Some(app.name.clone()),
+            comment: Some(app.name.clone()),
+            exec: a.exec.clone(),
+            icon: a.icon.clone().or_else(|| app.icon.clone()),
+            categories: Vec::new(),
+            keywords: Vec::new(),
+            terminal: app.terminal,
+            no_display: false,
+            wm_class: app.wm_class.clone(),
+            actions: Vec::new(),
+        })
+        .collect()
+}
+
+/// `found` with the matching actions of every app: right under their app when it was found,
+/// else first (the query named an action, so it is what was asked for).
+fn with_actions(apps: &[prism_common::apps::DesktopApp], found: Vec<prism_common::apps::DesktopApp>, query: &str) -> Vec<prism_common::apps::DesktopApp> {
+    if query.trim().is_empty() {
+        return found;
+    }
+    let mut lead = Vec::new();
+    let mut under: Vec<(String, Vec<prism_common::apps::DesktopApp>)> = Vec::new();
+    for app in apps {
+        let acts = actions_for(app, query);
+        if acts.is_empty() {
+            continue;
+        }
+        if found.iter().any(|f| f.id == app.id) {
+            under.push((app.id.clone(), acts));
+        } else {
+            lead.extend(acts);
+        }
+    }
+    if lead.is_empty() && under.is_empty() {
+        return found;
+    }
+    let mut out = lead;
+    for f in found {
+        let id = f.id.clone();
+        out.push(f);
+        if let Some(i) = under.iter().position(|(a, _)| *a == id) {
+            out.append(&mut under.remove(i).1);
+        }
+    }
+    out
+}
+
+/// What Tab writes into the launcher's field for the entry `app`: its name and a space, which
+/// lists its actions. None when it has none.
+pub fn complete_actions(app: &prism_common::apps::DesktopApp) -> Option<String> {
+    (!app.actions.is_empty()).then(|| format!("{} ", app.name))
+}
+
+/// Run a launcher entry if it is a quick answer or an app action; false for a real app.
 pub fn launch_entry(app: &prism_common::apps::DesktopApp, shift: bool) -> bool {
+    if app.id.starts_with(ACTION_PREFIX) {
+        // Run the action's Exec itself (gtk-launch only starts the main entry).
+        let run = prism_common::apps::DesktopApp { id: String::new(), ..app.clone() };
+        match run.launch() {
+            Ok(child) => crate::reap(child),
+            Err(e) => eprintln!("[prism-ui] cannot launch {}: {}", app.name, e),
+        }
+        return true;
+    }
     if !app.id.starts_with(APP_PREFIX) {
         return false;
     }
@@ -506,5 +603,31 @@ mod tests {
         assert_eq!(a[0], Answer::Value { question: "2+2".into(), value: "4".into() });
         assert_eq!(a[1], Answer::Web("2+2".into()));
         assert_eq!(answers("firefox", false), Vec::new());
+    }
+
+    fn firefox() -> prism_common::apps::DesktopApp {
+        let sample = "[Desktop Entry]\nName=Firefox Web Browser\nExec=firefox %u\nIcon=firefox\nType=Application\nActions=new-window;new-private-window;\n\n[Desktop Action new-window]\nName=New Window\nExec=firefox --new-window %u\n\n[Desktop Action new-private-window]\nName=New Private Window\nExec=firefox --private-window %u\n";
+        prism_common::apps::DesktopApp::parse_str(sample, std::path::Path::new("firefox.desktop")).unwrap()
+    }
+
+    #[test]
+    fn app_actions() {
+        let app = firefox();
+        let names = |q: &str| actions_for(&app, q).into_iter().map(|a| a.name).collect::<Vec<_>>();
+        assert_eq!(names("firefox private"), ["New Private Window"]);
+        assert_eq!(names("fire new"), ["New Window", "New Private Window"]);
+        assert_eq!(names("firefox web browser "), ["New Window", "New Private Window"]);
+        assert!(names("firefox").is_empty());
+        assert!(names("f ").is_empty());
+        assert!(names("firefox zzz").is_empty());
+        let a = &actions_for(&app, "firefox private")[0];
+        assert!(a.id.starts_with(ACTION_PREFIX));
+        assert_eq!(a.icon.as_deref(), Some("firefox"));
+        assert_eq!(complete_actions(&app).as_deref(), Some("Firefox Web Browser "));
+        // Under their app when it was found too, else first.
+        let all = with_actions(std::slice::from_ref(&app), vec![app.clone()], "firefox ");
+        assert_eq!(all.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Firefox Web Browser", "New Window", "New Private Window"]);
+        let lead = with_actions(std::slice::from_ref(&app), Vec::new(), "firefox private");
+        assert_eq!(lead.len(), 1);
     }
 }

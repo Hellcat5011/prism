@@ -411,6 +411,7 @@ mod tests {
             terminal: false,
             no_display: false,
             wm_class: None,
+            actions: Vec::new(),
         }
     }
 
