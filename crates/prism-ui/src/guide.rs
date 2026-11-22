@@ -31,6 +31,7 @@ enum Art {
     Notifications,
     Night,
     Capture,
+    Downloads,
     Extras,
     Done,
 }
@@ -55,8 +56,14 @@ const PAGES: &[Page] = &[
     Page { art: Art::Lock, title: "Lock screen", text: "Several lock screen designs; the screen can lock by itself when you step away.", rows: &[(8, "Lock Screen Theme"), (8, "Lock When Idle")] },
     Page { art: Art::Notifications, title: "Notifications", text: "Popups where you want them, a notification centre with search and snooze, and quiet hours.", rows: &[(7, "Popup Position"), (7, "Silent on a Schedule"), (7, "Notification Centre Position")] },
     Page { art: Art::Night, title: "Night light", text: "Warmer colours in the evening, on a schedule or from sunset to sunrise.", rows: &[(11, "Blue Light Filter"), (11, "Mode")] },
-    Page { art: Art::Capture, title: "Screenshots and recording", text: "Print takes a screenshot of a region, window or screen; record with sound, trim, save GIFs, or keep a replay buffer.", rows: &[(14, "Copy to Clipboard"), (14, "Desktop Audio"), (14, "Replay Buffer"), (15, "Window Switcher")] },
-    Page { art: Art::Extras, title: "Extras", text: "Phone sync with the KDE Connect app, download progress, update checks and a privacy indicator for the microphone, camera and screen sharing.", rows: &[(13, "Phone Sync"), (15, "Download Progress"), (15, "Update Notifications"), (15, "Privacy Indicator")] },
+    Page { art: Art::Capture, title: "Screenshots and recording", text: "Print takes a screenshot of a region, window or screen; record with sound, trim, save GIFs, or keep a replay buffer.", rows: &[(14, "Copy to Clipboard"), (14, "Desktop Audio"), (14, "Replay Buffer"), (16, "Window Switcher")] },
+    Page {
+        art: Art::Downloads,
+        title: "Downloads",
+        text: "Prism has its own download manager: several connections per file, pause and resume, and videos from web pages. With the Prism Downloads extension for Firefox, browser downloads and the videos you play come to Prism. Click the pill (or run prism-ctl download toggle) to see them all.",
+        rows: &[(15, "Download Folder"), (15, "Confirm Browser Downloads"), (15, "Download Progress")],
+    },
+    Page { art: Art::Extras, title: "Extras", text: "Phone sync with the KDE Connect app, update checks and a privacy indicator for the microphone, camera and screen sharing.", rows: &[(13, "Phone Sync"), (16, "Update Notifications"), (16, "Privacy Indicator")] },
     Page { art: Art::Done, title: "All set", text: "Open Settings any time for everything else (Super+, or prism-ctl settings toggle).", rows: &[] },
 ];
 
@@ -424,8 +431,39 @@ fn draw_art(cr: *mut Cairo, art: Art, r: Rect, t: f64, cfg: &Config, style: &Sty
                 cb::fill_circle(cr, s.x + s.w - 16.0, s.y + 16.0, 6.0, (0.95, 0.3, 0.3, 0.5 + 0.5 * wave(t, 1.2)));
             }
         }
+        Art::Downloads => {
+            // A browser playing a video with the "Download video" button, its pieces coming in
+            // over several connections, and the pill filling.
+            let b = Rect { x: r.x + 26.0, y: r.y + 34.0, w: r.w - 52.0, h: (r.w - 52.0) * 0.6 };
+            cb::fill_rounded_rect(cr, b.x, b.y, b.w, b.h, 10.0, with_a(fg, 0.85));
+            cb::fill_rounded_rect(cr, b.x + 8.0, b.y + 7.0, b.w * 0.55, 10.0, 5.0, with_a(sec, 0.5));
+            let v = Rect { x: b.x + 8.0, y: b.y + 24.0, w: b.w - 16.0, h: b.h - 32.0 };
+            wall(cr, v, sec, ter);
+            let bw = 132.0;
+            let lift = 2.0 * wave(t, 2.4);
+            cb::fill_rounded_rect(cr, v.x + v.w - bw - 8.0, v.y + 8.0 - lift, bw, 24.0, 12.0, (0.06, 0.07, 0.1, 0.88));
+            crate::svg::draw_path(cr, "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3", v.x + v.w - bw, v.y + 13.0 - lift, 14.0, (0.35, 0.72, 1.0, 1.0), Some(2.2));
+            cb::draw_pango_text(cr, v.x + v.w - bw + 18.0, v.y + 12.0 - lift, "Download video", "Inter, Sans Semi-Bold 11px", (1.0, 1.0, 1.0, 0.95), None);
+            // One run every 6 s: the pieces, then the pill at 100%.
+            let f = ((t % 6.0) / 5.0).min(1.0);
+            let lanes = 4;
+            let top = b.y + b.h + 22.0;
+            for k in 0..lanes {
+                let y = top + k as f64 * 12.0;
+                cb::fill_rounded_rect(cr, b.x, y, b.w, 6.0, 3.0, with_a(fg, 0.10));
+                // Each connection fills its own share, a little out of step.
+                let own = ((f * 1.15 - k as f64 * 0.05).clamp(0.0, 1.0)) * b.w;
+                cb::fill_rounded_rect(cr, b.x, y, own.max(6.0), 6.0, 3.0, with_a(acc, 0.55 + 0.1 * k as f64));
+            }
+            if cfg.downloads_watch {
+                let pill = Rect { x: cx - 110.0, y: top + lanes as f64 * 12.0 + 18.0, w: 220.0, h: 34.0 };
+                cb::fill_rounded_rect(cr, pill.x, pill.y, pill.w, pill.h, 17.0, (0.08, 0.08, 0.1, 0.92));
+                cb::fill_rounded_rect(cr, pill.x + 14.0, pill.y + pill.h - 8.0, (pill.w - 28.0) * f, 3.0, 1.5, (0.55, 0.8, 1.0, 1.0));
+                cb::draw_pango_text(cr, pill.x + 16.0, pill.y + 6.0, &format!("Video.mp4   {}%", (f * 100.0).round() as u32), "Inter, Sans Semi-Bold 12px", (1.0, 1.0, 1.0, 0.92), None);
+            }
+        }
         Art::Extras => {
-            // A phone syncing, and the download pill filling.
+            // A phone syncing.
             let ph = Rect { x: cx - 55.0, y: cy - 140.0, w: 110.0, h: 200.0 };
             cb::fill_rounded_rect(cr, ph.x, ph.y, ph.w, ph.h, 18.0, with_a(fg, 0.85));
             cb::fill_rounded_rect(cr, ph.x + 6.0, ph.y + 10.0, ph.w - 12.0, ph.h - 20.0, 12.0, with_a(sec, 0.9));
@@ -434,13 +472,6 @@ fn draw_art(cr: *mut Cairo, art: Art, r: Rect, t: f64, cfg: &Config, style: &Sty
                     let a = ((t * 1.5 - k as f64 * 0.3) % 1.5 / 1.5).clamp(0.0, 1.0);
                     crate::svg::draw_path(cr, "M5 12.55a11 11 0 0 1 14.08 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01", ph.x + ph.w + 6.0 + k as f64 * 4.0, ph.y + 30.0, 26.0, with_a(acc, 1.0 - a), Some(2.0));
                 }
-            }
-            if cfg.downloads_watch {
-                let pill = Rect { x: cx - 110.0, y: ph.y + ph.h + 30.0, w: 220.0, h: 32.0 };
-                cb::fill_rounded_rect(cr, pill.x, pill.y, pill.w, pill.h, 16.0, (0.08, 0.08, 0.1, 0.92));
-                let f = (t % 4.0) / 4.0;
-                cb::fill_rounded_rect(cr, pill.x + 4.0, pill.y + pill.h - 6.0, (pill.w - 8.0) * f, 3.0, 1.5, (0.55, 0.8, 1.0, 1.0));
-                cb::draw_pango_text(cr, pill.x + 16.0, pill.y + 7.0, &format!("download.zip  {} MB", (f * 240.0) as u32), "Inter, Sans 12px", (1.0, 1.0, 1.0, 0.9), None);
             }
         }
     }
@@ -651,5 +682,22 @@ impl CardView for GuideView {
 
     fn clickable(&self) -> bool {
         self.hits.iter().any(|(_, r)| r.contains(self.pointer.0, self.pointer.1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every option on a guide page is a Settings row with a switch, a choice or a folder (a
+    /// renamed row, or a tab that moved, would drop it from the guide without a word).
+    #[test]
+    fn every_row_exists_in_settings() {
+        for page in PAGES {
+            let found: Vec<&str> = crate::settings::guide_rows(page.rows).iter().map(|r| r.title).collect();
+            for (tab, title) in page.rows {
+                assert!(found.contains(title), "{}: no row \"{title}\" on Settings tab {tab}", page.title);
+            }
+        }
     }
 }

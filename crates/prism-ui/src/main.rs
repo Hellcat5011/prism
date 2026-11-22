@@ -2536,6 +2536,7 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
     let mut auto_silent = false;
     // A fresh install (no config yet): the setup guide opens shortly after start.
     let mut guide_at = (daemon && !Config::load().setup_done).then(|| std::time::Instant::now() + std::time::Duration::from_secs(4));
+    let mut guide_tries = 0u32;
     // Microphone / camera / screen-share pill (privacy.rs), checked when PipeWire or the
     // portal change.
     let mut privacy_pill: Option<privacy::Indicator> = None;
@@ -2782,7 +2783,17 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
             let now = std::time::Instant::now();
             if now >= at {
                 guide_at = None;
-                handle_command(prism_common::UiCommand::Open("setup".into()), &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
+                if !Config::load().setup_done {
+                    handle_command(prism_common::UiCommand::Open("setup".into()), &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
+                    // It could not open (no screen yet at login, say): try again, less often
+                    // each time, until it is on screen.
+                    if !overlays.iter().any(|o| o.name() == "setup" && !o.closing()) {
+                        guide_tries += 1;
+                        let wait = (3u64 << guide_tries.min(4)).min(30);
+                        eprintln!("[prism-ui] the setup guide did not open; trying again in {wait} s");
+                        guide_at = Some(now + std::time::Duration::from_secs(wait));
+                    }
+                }
             } else {
                 let ms = (at - now).as_millis() as i32 + 1;
                 if timeout < 0 || ms < timeout {
