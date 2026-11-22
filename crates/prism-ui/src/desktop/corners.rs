@@ -66,6 +66,7 @@ fn run(action: &str) {
         "power" => &["power", "toggle"],
         "clipboard" => &["clipboard", "toggle"],
         "settings" => &["settings", "toggle"],
+        "calendar" => &["calendar", "toggle"],
         "overview" => {
             let cmd: &[&str] = match Compositor::current() {
                 Some(Compositor::Mango) => &["mmsg", "dispatch", "toggleoverview"],

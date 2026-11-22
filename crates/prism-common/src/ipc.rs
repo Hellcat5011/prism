@@ -182,6 +182,14 @@ pub enum IpcCommand {
     #[serde(rename = "game_mode")]
     GameMode(Option<bool>),
 
+    /// Read the evolution-data-server calendars again now (after Prism changed an event).
+    #[serde(rename = "calendar_refresh")]
+    CalendarRefresh,
+
+    /// The Calendar card: "toggle", "open" or "close".
+    #[serde(rename = "calendar")]
+    Calendar(String),
+
     /// Window switcher (Alt+Tab): "next", "prev" or "close".
     #[serde(rename = "switcher")]
     Switcher(String),
@@ -605,7 +613,7 @@ pub struct DownloadInfo {
 }
 
 /// The Settings card's tabs, in order (prism-ui draws them; prism-ctl resolves names).
-pub const SETTINGS_TABS: [&str; 17] = ["Appearance", "Wallpaper", "Desktop", "Bar", "Dock", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "Downloads", "System"];
+pub const SETTINGS_TABS: [&str; 18] = ["Appearance", "Wallpaper", "Desktop", "Calendar", "Bar", "Dock", "Launcher", "Search", "Notifications", "Lock Screen", "Greeter", "Power", "Display", "Connections", "Phone", "Capture", "Downloads", "System"];
 
 /// A Settings tab by name (case, spaces and hyphens ignored; a unique prefix is enough) or by
 /// its number counted from 1.
@@ -696,14 +704,15 @@ mod tests {
     #[test]
     fn settings_tab_names() {
         assert_eq!(settings_tab("1"), Some(0));
-        assert_eq!(settings_tab("17"), Some(16));
+        assert_eq!(settings_tab("18"), Some(17));
         assert_eq!(settings_tab("0"), None);
-        assert_eq!(settings_tab("18"), None);
-        assert_eq!(settings_tab("lock-screen"), Some(8));
-        assert_eq!(settings_tab("Lock Screen"), Some(8));
+        assert_eq!(settings_tab("19"), None);
+        assert_eq!(settings_tab("lock-screen"), Some(9));
+        assert_eq!(settings_tab("Lock Screen"), Some(9));
         assert_eq!(settings_tab("wall"), Some(1));
-        assert_eq!(settings_tab("dis"), Some(11));
-        assert_eq!(settings_tab("down"), Some(15));
+        assert_eq!(settings_tab("cal"), Some(3));
+        assert_eq!(settings_tab("dis"), Some(12));
+        assert_eq!(settings_tab("down"), Some(16));
         // "D" is Desktop, Dock, Display or Downloads; "s" is Search or System.
         assert_eq!(settings_tab("d"), None);
         assert_eq!(settings_tab("s"), None);

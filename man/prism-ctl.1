@@ -83,9 +83,9 @@ one tab is enough, for example
 .B wall
 or
 .BR dis )
-or a number from 1 to 17 in this order: Appearance, Wallpaper, Desktop, Bar,
-Dock, Launcher, Search, Notifications, Lock Screen, Greeter, Power, Display,
-Connections, Phone, Capture, Downloads, System.
+or a number from 1 to 18 in this order: Appearance, Wallpaper, Desktop,
+Calendar, Bar, Dock, Launcher, Search, Notifications, Lock Screen, Greeter,
+Power, Display, Connections, Phone, Capture, Downloads, System.
 .TP
 .B setup
 The first-time setup guide.
@@ -320,6 +320,14 @@ Game mode: silent notifications, the performance power profile, no
 animations or blur. Turning it off restores the earlier state.
 .B game\-mode
 is a synonym.
+.TP
+.B calendar \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
+The Calendar card: the month with its events and the selected day's agenda.
+Without an action it toggles. A click on the bar's clock does the same.
+.TP
+.B calendar refresh
+Read the calendars of online accounts (evolution-data-server) again now.
+The event card sends it after adding, changing or deleting an event.
 .TP
 .B bluelight \fR[\fBtoggle\fR|\fBmanual_toggle\fR|\fBdump\fR]
 .B toggle

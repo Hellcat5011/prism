@@ -200,6 +200,12 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
         "notes" => Ok(IpcCommand::Notes(args.get(1).cloned().unwrap_or_else(|| "toggle".into()))),
         "switcher" => Ok(IpcCommand::Switcher(args.get(1).cloned().unwrap_or_else(|| "next".into()))),
         "gamemode" | "game-mode" => Ok(IpcCommand::GameMode(on_off(args.get(1)))),
+        "calendar" => match args.get(1).map(String::as_str) {
+            Some("refresh") => Ok(IpcCommand::CalendarRefresh),
+            None => Ok(IpcCommand::Calendar("toggle".into())),
+            Some(a @ ("toggle" | "open" | "close")) => Ok(IpcCommand::Calendar(a.into())),
+            Some(other) => Err(format!("calendar: unknown action '{other}' (toggle, open, close, refresh)")),
+        },
         "clipboard" => {
             let act = match action_str {
                 Some("open") => ClipboardAction::Open,

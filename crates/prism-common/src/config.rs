@@ -370,6 +370,13 @@ pub struct Config {
     /// Remind this many minutes before timed events (0 = no reminders).
     #[serde(default = "default_calendar_reminder")]
     pub calendar_reminder_minutes: u32,
+    /// evolution-data-server calendars (source UIDs) whose events Prism does not show.
+    #[serde(default)]
+    pub calendar_hidden: Vec<String>,
+    /// The calendar new events go into (an evolution-data-server source UID; empty: the first
+    /// writable one of an online account, else the local one).
+    #[serde(default)]
+    pub calendar_default: String,
     /// Focus: apps whose notifications still pop up while silent (app names, case-insensitive).
     #[serde(default)]
     pub focus_allowed_apps: Vec<String>,
@@ -1150,6 +1157,8 @@ impl Default for Config {
             keyring_unlock_with_lock: false,
             keyring_unlock_at_login: false,
             calendar_reminder_minutes: default_calendar_reminder(),
+            calendar_hidden: Vec::new(),
+            calendar_default: String::new(),
             focus_allowed_apps: Vec::new(),
             focus_on_screen_share: false,
             focus_on_fullscreen: false,

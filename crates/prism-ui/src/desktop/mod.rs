@@ -1112,6 +1112,18 @@ impl Desk {
                         self.cal.view = CalView::Day(d);
                         self.mark(WidgetId::Calendar, qh);
                     }
+                    Hit::CalAdd => {
+                        if let CalView::Day(d) = self.cal.view {
+                            crate::event_card::open(crate::event_card::Request::New(crate::cal_events::day_start(self.cal.year, self.cal.month, d)));
+                        }
+                    }
+                    Hit::CalEvent(i) => {
+                        if let CalView::Day(d) = self.cal.view {
+                            if let Some(o) = crate::cal_events::on_day(self.cal.year, self.cal.month, d).into_iter().nth(i) {
+                                crate::event_card::open(crate::event_card::Request::Edit(o));
+                            }
+                        }
+                    }
                     Hit::CalBack => {
                         self.cal.view = CalView::Days;
                         self.mark(WidgetId::Calendar, qh);

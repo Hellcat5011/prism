@@ -59,6 +59,8 @@ pub enum PanelHit {
     MediaPlay,
     MediaNext,
     Updates,
+    /// The bar's clock: the Calendar card.
+    Clock,
     DockItem(usize),
 }
 
@@ -555,6 +557,7 @@ impl Desk {
             PanelHit::Launcher if button == BTN_LEFT => run_ctl(&["launcher", "toggle"]),
             PanelHit::Notifications if button == BTN_LEFT => run_ctl(&["notif", "toggle"]),
             PanelHit::Power if button == BTN_LEFT => run_ctl(&["power", "toggle"]),
+            PanelHit::Clock if button == BTN_LEFT => run_ctl(&["calendar", "toggle"]),
             PanelHit::Updates if button == BTN_LEFT => super::updates::run_update(&self.config.bar.updates_command),
             PanelHit::Updates => super::updates::recheck(),
             PanelHit::MediaPrev if button == BTN_LEFT => self.media_cmd("Previous"),

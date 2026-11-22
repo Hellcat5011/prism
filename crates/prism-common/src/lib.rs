@@ -8,6 +8,7 @@ pub mod calendar;
 pub mod compconf;
 pub mod config;
 pub mod deps;
+pub mod eds;
 pub mod keyring;
 pub mod config_history;
 pub mod depth;

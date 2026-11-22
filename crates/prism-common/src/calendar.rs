@@ -8,6 +8,11 @@
 //! RRULE (DAILY, WEEKLY with BYDAY, MONTHLY with BYMONTHDAY or BYDAY like 2TU/-1FR, YEARLY;
 //! INTERVAL, COUNT, UNTIL), EXDATE, RECURRENCE-ID overrides and STATUS:CANCELLED. Time zones
 //! come from the system's zoneinfo files.
+//!
+//! Calendars of online accounts come through evolution-data-server (`crate::eds`) as the same
+//! VEVENT text. Their occurrences carry the calendar, the event's UID and, for repeating
+//! events, the recurrence id, so the Calendar widget can change or remove them; `new_vevent`
+//! and `edit_vevent` write the iCalendar text for that.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +32,19 @@ pub struct Occurrence {
     /// Which feed (its position in `calendar_feeds`), for colours.
     #[serde(default)]
     pub feed: usize,
+    /// The evolution-data-server calendar (its source UID); empty for a feed (read only).
+    #[serde(default)]
+    pub calendar: String,
+    /// The event's UID.
+    #[serde(default)]
+    pub uid: String,
+    /// For an occurrence of a repeating event: its recurrence id (the original start, as
+    /// `ical_stamp` writes it). Empty for a single event.
+    #[serde(default)]
+    pub rid: String,
+    /// The calendar's colour ("#rrggbb"), empty for the default.
+    #[serde(default)]
+    pub color: String,
 }
 
 pub fn cache_path() -> PathBuf {
@@ -100,8 +118,10 @@ impl Zone {
         if matches!(name, "UTC" | "Etc/UTC" | "GMT" | "Z") {
             return Some(Zone::utc());
         }
-        let data = std::fs::read(PathBuf::from("/usr/share/zoneinfo").join(name)).ok()?;
-        parse_tzif(&data)
+        let read = |n: &str| std::fs::read(PathBuf::from("/usr/share/zoneinfo").join(n)).ok().and_then(|d| parse_tzif(&d));
+        // libical's own names carry a prefix: "/freeassociation.sourceforge.net/Europe/Berlin",
+        // "/citadel.org/20190914_1/Europe/Berlin".
+        read(name).or_else(|| name.match_indices('/').map(|(i, _)| &name[i + 1..]).filter(|rest| rest.contains('/')).find_map(read))
     }
 
     /// The system's local zone (/etc/localtime).
@@ -569,11 +589,192 @@ pub fn occurrences(ics: &str, feed: usize, from: i64, to: i64) -> Vec<Occurrence
             if end <= from || s >= to {
                 continue;
             }
-            out.push(Occurrence { start: s, end: end.max(s), all_day, summary: if e.summary.is_empty() { "(No title)".into() } else { e.summary.clone() }, location: e.location.clone(), feed });
+            let rid = match e.recurrence_id {
+                Some(r) => ical_stamp(zones.instant(r), matches!(r, When::Date(_))),
+                None if e.rrule.is_some() => ical_stamp(s, all_day),
+                None => String::new(),
+            };
+            out.push(Occurrence {
+                start: s,
+                end: end.max(s),
+                all_day,
+                summary: if e.summary.is_empty() { "(No title)".into() } else { e.summary.clone() },
+                location: e.location.clone(),
+                feed,
+                calendar: String::new(),
+                uid: e.uid.clone(),
+                rid,
+                color: String::new(),
+            });
         }
     }
     out.sort_by_key(|o| o.start);
     out
+}
+
+// ── Writing events ──────────────────────────────────────────────────────
+
+/// `t` as an iCalendar UTC stamp ("20261124T090000Z"), or for an all-day value the local date
+/// ("20261124").
+pub fn ical_stamp(t: i64, date: bool) -> String {
+    if date {
+        let wall = t + Zone::local().offset_at(t) as i64;
+        let (y, m, d) = civil_from_days(wall.div_euclid(86400));
+        return format!("{y:04}{m:02}{d:02}");
+    }
+    let (y, m, d) = civil_from_days(t.div_euclid(86400));
+    let secs = t.rem_euclid(86400);
+    format!("{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// What the event card edits. Times are Unix seconds; an all-day event runs from local
+/// midnight of its first day to local midnight after its last.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Draft {
+    pub summary: String,
+    pub location: String,
+    pub all_day: bool,
+    pub start: i64,
+    pub end: i64,
+}
+
+fn escape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ';' => out.push_str("\\;"),
+            ',' => out.push_str("\\,"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// One content line folded at 75 octets (RFC 5545), with its CRLF.
+fn fold(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut width = 0;
+    for c in line.chars() {
+        if width + c.len_utf8() > 75 {
+            out.push_str("\r\n ");
+            width = 1;
+        }
+        out.push(c);
+        width += c.len_utf8();
+    }
+    out.push_str("\r\n");
+    out
+}
+
+/// DTSTART / DTEND lines for `t`: a date, a wall time in `zone` (its TZID), or UTC.
+fn time_line(name: &str, t: i64, date: bool, zone: Option<(&str, &Zone)>) -> String {
+    if date {
+        return format!("{name};VALUE=DATE:{}", ical_stamp(t, true));
+    }
+    match zone {
+        Some((id, z)) => {
+            let wall = t + z.offset_at(t) as i64;
+            let (y, m, d) = civil_from_days(wall.div_euclid(86400));
+            let secs = wall.rem_euclid(86400);
+            format!("{name};TZID={id}:{y:04}{m:02}{d:02}T{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+        }
+        None => format!("{name}:{}", ical_stamp(t, false)),
+    }
+}
+
+fn draft_lines(d: &Draft, zone: Option<(&str, &Zone)>) -> Vec<String> {
+    let mut v = vec![format!("SUMMARY:{}", escape(d.summary.trim())), time_line("DTSTART", d.start, d.all_day, zone), time_line("DTEND", d.end.max(d.start), d.all_day, zone)];
+    if !d.location.trim().is_empty() {
+        v.push(format!("LOCATION:{}", escape(d.location.trim())));
+    }
+    v
+}
+
+/// A new VEVENT for `d` with the UID `uid`. Timed events are written in UTC.
+pub fn new_vevent(uid: &str, d: &Draft, now: i64) -> String {
+    let mut lines = vec!["BEGIN:VEVENT".to_string(), format!("UID:{uid}"), format!("DTSTAMP:{}", ical_stamp(now, false)), format!("CREATED:{}", ical_stamp(now, false))];
+    lines.extend(draft_lines(d, None));
+    lines.push("END:VEVENT".into());
+    lines.iter().map(|l| fold(l)).collect()
+}
+
+/// A fresh UID for a new event.
+pub fn new_uid() -> String {
+    let mut b = [0u8; 16];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b)).is_err() {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        b = (t ^ (std::process::id() as u128) << 64).to_le_bytes();
+    }
+    format!("{}@prism", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+}
+
+/// `original` (one VEVENT, as evolution-data-server gives it) changed to `d`, where `d` is one
+/// occurrence that started at `occ_start`: the event's own start moves by as much as the
+/// occurrence's did, so a repeating event keeps its pattern. Everything else (repeat rule,
+/// alarms, attendees) stays. A zoned start keeps its zone.
+pub fn edit_vevent(original: &str, d: &Draft, occ_start: i64, now: i64) -> Option<String> {
+    let mut zones = Zones::new();
+    let ev = parse_events(original, &mut zones).into_iter().next()?;
+    let start = ev.start?;
+    let shift = d.start - occ_start;
+    let new_start = zones.instant(start) + shift;
+    let len = (d.end - d.start).max(0);
+    let new = Draft { start: new_start, end: new_start + len, ..d.clone() };
+    // The zone the start was written in, if it was.
+    let tzid = content_lines(original).into_iter().find(|(n, _, _)| n == "DTSTART").and_then(|(_, p, _)| p.get("TZID").cloned());
+    let zone = tzid.as_deref().and_then(|id| Zone::named(id).map(|z| (id.to_string(), z)));
+    let mut sequence = 0u32;
+    let mut out: Vec<String> = Vec::new();
+    let mut depth = 0;
+    let mut lines = Vec::new();
+    for raw in original.split('\n') {
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some(cont) = raw.strip_prefix(' ').or_else(|| raw.strip_prefix('\t')) {
+            if let Some(last) = lines.last_mut() {
+                let last: &mut String = last;
+                last.push_str(cont);
+                continue;
+            }
+        }
+        if !raw.is_empty() {
+            lines.push(raw.to_string());
+        }
+    }
+    for line in lines {
+        let name = line.split([':', ';']).next().unwrap_or("").trim().to_uppercase();
+        let value = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+        match (name.as_str(), value) {
+            ("BEGIN", "VEVENT") if depth == 0 => {
+                depth = 1;
+                out.push(line);
+                out.extend(draft_lines(&new, zone.as_ref().map(|(id, z)| (id.as_str(), z))));
+                out.push(format!("DTSTAMP:{}", ical_stamp(now, false)));
+                out.push(format!("LAST-MODIFIED:{}", ical_stamp(now, false)));
+                continue;
+            }
+            ("BEGIN", _) if depth > 0 => depth += 1,
+            ("END", _) if depth > 0 => depth -= 1,
+            _ => {}
+        }
+        if depth == 1 {
+            match name.as_str() {
+                "SUMMARY" | "LOCATION" | "DTSTART" | "DTEND" | "DURATION" | "DTSTAMP" | "LAST-MODIFIED" => continue,
+                "SEQUENCE" => {
+                    sequence = value.parse().unwrap_or(0);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if name == "END" && value == "VEVENT" && depth == 0 {
+            out.push(format!("SEQUENCE:{}", sequence + 1));
+        }
+        out.push(line);
+    }
+    Some(out.iter().map(|l| fold(l)).collect())
 }
 
 /// webcal:// is https.
@@ -637,6 +838,45 @@ BEGIN:VEVENT\r\nUID:a\r\nRECURRENCE-ID:20261109T090000Z\r\nSUMMARY:Moved\r\nDTST
         assert_eq!(o.len(), 7); // Jan..Jul
         assert_eq!(o[0].start, utc(2026, 1, 30, 9, 0)); // CET = UTC+1
         assert_eq!(o[5].start, utc(2026, 6, 26, 8, 0)); // CEST = UTC+2
+    }
+
+    #[test]
+    fn writes_and_reads_back_a_new_event() {
+        let d = Draft { summary: "Lunch; with Sam, Kim".into(), location: "Caf\u{e9}".into(), all_day: false, start: utc(2026, 11, 24, 12, 0), end: utc(2026, 11, 24, 13, 30) };
+        let ics = new_vevent("x@prism", &d, utc(2026, 11, 23, 0, 0));
+        assert!(ics.contains("SUMMARY:Lunch\\; with Sam\\, Kim\r\n"));
+        assert!(ics.contains("DTSTART:20261124T120000Z\r\n"));
+        let o = occurrences(&ics, 0, utc(2026, 11, 1, 0, 0), utc(2026, 12, 1, 0, 0));
+        assert_eq!(o.len(), 1);
+        assert_eq!((o[0].start, o[0].end, o[0].summary.as_str(), o[0].uid.as_str(), o[0].rid.as_str()), (d.start, d.end, "Lunch; with Sam, Kim", "x@prism", ""));
+        // Long lines fold at 75 octets.
+        let long = new_vevent("y", &Draft { summary: "z".repeat(200), ..d.clone() }, 0);
+        assert!(long.split("\r\n").all(|l| l.len() <= 75));
+        assert_eq!(occurrences(&long, 0, 0, i64::MAX / 2)[0].summary, "z".repeat(200));
+    }
+
+    #[test]
+    fn edits_keep_the_rule_and_move_the_series() {
+        let orig = "BEGIN:VEVENT\r\nUID:s\r\nDTSTAMP:20261101T000000Z\r\nSUMMARY:Standup\r\nDTSTART:20261102T090000Z\r\nDTEND:20261102T091500Z\r\nRRULE:FREQ=DAILY;COUNT=5\r\nSEQUENCE:2\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nSUMMARY:alarm text\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\nEND:VEVENT\r\n";
+        // The third occurrence moved an hour later and made 30 minutes long: the series follows.
+        let occ = utc(2026, 11, 4, 9, 0);
+        let d = Draft { summary: "Sync".into(), location: String::new(), all_day: false, start: occ + 3600, end: occ + 3600 + 1800 };
+        let out = edit_vevent(orig, &d, occ, utc(2026, 11, 23, 0, 0)).unwrap();
+        assert!(out.contains("RRULE:FREQ=DAILY;COUNT=5\r\n") && out.contains("SUMMARY:alarm text\r\n") && out.contains("SEQUENCE:3\r\n"));
+        assert_eq!(out.matches("SUMMARY:Sync").count(), 1);
+        let o = occurrences(&out, 0, utc(2026, 11, 1, 0, 0), utc(2026, 12, 1, 0, 0));
+        assert_eq!(o.len(), 5);
+        assert_eq!((o[0].start, o[0].end - o[0].start), (utc(2026, 11, 2, 10, 0), 1800));
+        assert_eq!(o[2].rid, "20261104T100000Z");
+    }
+
+    #[test]
+    fn libical_zone_names() {
+        if Zone::named("Europe/Berlin").is_none() {
+            return;
+        }
+        assert!(Zone::named("/freeassociation.sourceforge.net/Europe/Berlin").is_some());
+        assert!(Zone::named("/citadel.org/20190914_1/Europe/Berlin").is_some());
     }
 
     #[test]

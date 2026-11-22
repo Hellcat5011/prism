@@ -154,6 +154,22 @@ pub const DEPS: &[Dep] = &[
         applies: has_bluetooth,
     },
     Dep { name: "python3", probe: Probe::Cmd("python3"), what: "the keybinds viewer and depth wallpapers", arch: "python", level: Level::Optional, applies: always },
+    Dep {
+        name: "evolution-data-server",
+        probe: Probe::AnyPath(&["/usr/share/dbus-1/services/org.gnome.evolution.dataserver.Calendar8.service"]),
+        what: "calendars of online accounts, and adding events from the Calendar widget",
+        arch: "evolution-data-server",
+        level: Level::Optional,
+        applies: always,
+    },
+    Dep {
+        name: "gnome-online-accounts",
+        probe: Probe::AnyPath(&["/usr/share/dbus-1/services/org.gnome.OnlineAccounts.service"]),
+        what: "Google, Microsoft and CalDAV (iCloud) accounts for the calendar",
+        arch: "gnome-online-accounts",
+        level: Level::Optional,
+        applies: always,
+    },
 ];
 
 /// Whether `cmd` is an executable file in PATH.

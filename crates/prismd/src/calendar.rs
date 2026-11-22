@@ -5,6 +5,11 @@
 //! Calendar widget and the notification centre. Reminders: a notification
 //! `calendar_reminder_minutes` before each timed event.
 //!
+//! Calendars of online accounts (and the local one) come from evolution-data-server
+//! (`prism_common::eds`), read every minute and right after Prism changed an event
+//! (`IpcCommand::CalendarRefresh`); every 15 minutes EDS is asked to sync them with their
+//! servers. `calendar_hidden` leaves calendars out.
+//!
 //! prismd never makes the keyring ask for its password. While it is locked, the events last
 //! fetched stay, and one notification offers to unlock it. Old `calendar_feeds` entries in
 //! config.json move into the keyring once it is unlocked, and are then removed from config.json
@@ -16,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use prism_common::calendar::{self, Occurrence};
-use prism_common::{keyring, Config};
+use prism_common::{eds, keyring, Config};
 
 const REFRESH: Duration = Duration::from_secs(15 * 60);
 /// While the keyring is locked (or not there yet at login), look again this often.
@@ -24,10 +29,14 @@ const RETRY: Duration = Duration::from_secs(60);
 /// Occurrences kept: this far back and ahead (the Calendar widget pages through months).
 const AHEAD: i64 = 366 * 86400;
 const BACK: i64 = 366 * 86400;
+/// evolution-data-server is local: read it this often.
+const EDS_POLL: Duration = Duration::from_secs(60);
 
 enum Msg {
-    /// (old config feeds, reminder minutes, calendars_changed) from the config.
-    Settings(Vec<String>, u32, u64),
+    /// (old config feeds, reminder minutes, calendars_changed, hidden calendars) from the config.
+    Settings(Vec<String>, u32, u64, Vec<String>),
+    /// Prism changed an event: read evolution-data-server now.
+    Eds,
     /// The keyring was unlocked from our notification: read it now.
     Refresh,
 }
@@ -40,7 +49,85 @@ pub fn apply(cfg: &Config) {
         std::thread::Builder::new().name("prism-calendar".into()).spawn(move || run(rx)).ok();
         Mutex::new(tx)
     });
-    let _ = tx.lock().unwrap().send(Msg::Settings(cfg.calendar_feeds.clone(), cfg.calendar_reminder_minutes, cfg.calendars_changed));
+    let _ = tx.lock().unwrap().send(Msg::Settings(cfg.calendar_feeds.clone(), cfg.calendar_reminder_minutes, cfg.calendars_changed, cfg.calendar_hidden.clone()));
+}
+
+/// `IpcCommand::CalendarRefresh`.
+pub fn refresh_eds() {
+    if let Some(tx) = TX.get() {
+        let _ = tx.lock().unwrap().send(Msg::Eds);
+    }
+}
+
+/// evolution-data-server's side: a connection kept open (EDS closes calendars whose client
+/// left), the events last read, and when it was last asked to sync with the servers.
+struct Eds {
+    client: Option<eds::Client>,
+    occ: Vec<Occurrence>,
+    read: Option<Instant>,
+    synced: Option<Instant>,
+    logged: Option<String>,
+}
+
+impl Eds {
+    /// Reads every shown calendar; true when the events changed. Feeds take colour slots
+    /// 0..first, these the ones after.
+    fn read(&mut self, hidden: &[String], first: usize) -> bool {
+        self.read = Some(Instant::now());
+        if !eds::available() {
+            return false;
+        }
+        if self.client.is_none() {
+            self.client = eds::Client::new().ok();
+        }
+        let Some(client) = self.client.as_mut() else { return false };
+        let cals = match client.calendars() {
+            Ok(c) => c,
+            Err(e) => {
+                if self.logged.as_ref() != Some(&e) {
+                    eprintln!("[prismd/calendar] {e}");
+                    self.logged = Some(e);
+                }
+                // A new connection next time (EDS may have restarted).
+                self.client = None;
+                return false;
+            }
+        };
+        let sync = self.synced.is_none_or(|t| t.elapsed() >= REFRESH);
+        if sync {
+            self.synced = Some(Instant::now());
+        }
+        let t = now();
+        let mut all = Vec::new();
+        for (i, cal) in cals.iter().filter(|c| !hidden.contains(&c.uid)).enumerate() {
+            if sync {
+                client.refresh(&cal.uid);
+            }
+            match client.events(&cal.uid, t - BACK, t + AHEAD) {
+                Ok(list) => {
+                    let mut occ = calendar::occurrences(&list.concat(), first + i, t - BACK, t + AHEAD);
+                    for o in &mut occ {
+                        o.calendar = cal.uid.clone();
+                        o.color = cal.color.clone();
+                    }
+                    all.extend(occ);
+                }
+                Err(e) => {
+                    // Keep what was read before from this calendar.
+                    let msg = format!("{}: {e}", cal.name);
+                    if self.logged.as_ref() != Some(&msg) {
+                        eprintln!("[prismd/calendar] {msg}");
+                        self.logged = Some(msg);
+                    }
+                    all.extend(self.occ.iter().filter(|o| o.calendar == cal.uid).cloned());
+                }
+            }
+        }
+        all.sort_by_key(|o| o.start);
+        let changed = all != self.occ;
+        self.occ = all;
+        changed
+    }
 }
 
 fn refresh_now() {
@@ -151,9 +238,13 @@ fn run(rx: std::sync::mpsc::Receiver<Msg>) {
     let mut asked_unlock = false;
     let mut logged: Option<String> = None;
     let mut occ: Vec<Occurrence> = calendar::load_cache();
+    let mut feed_occ: Vec<Occurrence> = occ.iter().filter(|o| o.calendar.is_empty()).cloned().collect();
+    let mut eds = Eds { client: None, occ: occ.iter().filter(|o| !o.calendar.is_empty()).cloned().collect(), read: None, synced: None, logged: None };
+    let mut hidden: Vec<String> = Vec::new();
     let mut reminded: HashSet<(i64, String)> = HashSet::new();
     let mut first_check = true;
     loop {
+        let mut changed = false;
         // Read the keyring: at start, when Settings changed the calendars, every refresh, and
         // every minute while it is locked.
         let due = match feeds {
@@ -210,10 +301,22 @@ fn run(rx: std::sync::mpsc::Receiver<Msg>) {
                 let t = now();
                 let mut all: Vec<Occurrence> = texts.iter().enumerate().filter_map(|(i, t)| t.as_ref().map(|t| (i, t))).flat_map(|(i, text)| calendar::occurrences(text, i, t - BACK, t + AHEAD)).collect();
                 all.sort_by_key(|o| o.start);
-                if all != occ || !calendar::cache_path().exists() {
-                    occ = all;
-                    write_cache(&occ);
+                if all != feed_occ {
+                    feed_occ = all;
+                    changed = true;
                 }
+            }
+        }
+        if eds.read.is_none_or(|t| t.elapsed() >= EDS_POLL) {
+            let first = feeds.as_ref().map_or(0, Vec::len);
+            changed |= eds.read(&hidden, first);
+        }
+        if changed || !calendar::cache_path().exists() {
+            let mut all: Vec<Occurrence> = feed_occ.iter().chain(eds.occ.iter()).cloned().collect();
+            all.sort_by_key(|o| o.start);
+            if all != occ || !calendar::cache_path().exists() {
+                occ = all;
+                write_cache(&occ);
             }
         }
         // Reminders (not for events that started before prismd did).
@@ -230,7 +333,12 @@ fn run(rx: std::sync::mpsc::Receiver<Msg>) {
         }
         first_check = false;
         match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(Msg::Settings(old, r, changed)) => {
+            Ok(Msg::Eds) => eds.read = None,
+            Ok(Msg::Settings(old, r, changed, h)) => {
+                if h != hidden {
+                    hidden = h;
+                    eds.read = None;
+                }
                 if old != old_feeds {
                     old_feeds = old;
                     feeds = None;

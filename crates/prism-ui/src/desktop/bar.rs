@@ -346,7 +346,10 @@ fn draw_updates(cr: *mut Cairo, r: Rect, vertical: bool, t: f64, v: &BarView, st
 fn draw_module(cr: *mut Cairo, id: &str, r: Rect, vertical: bool, t: f64, v: &BarView, st: &mut BarState, hits: &mut Vec<(PanelHit, Rect)>) {
     match id {
         "workspaces" => draw_workspaces(cr, r, vertical, t, v, st, hits),
-        "clock" => draw_clock(cr, r, vertical, v),
+        "clock" => {
+            draw_clock(cr, r, vertical, v);
+            hits.push((PanelHit::Clock, r));
+        }
         "sysmon" => draw_sysmon(cr, r, vertical, v),
         "tray" => draw_tray(cr, r, vertical, t, v, st, hits),
         "mpris" => draw_media(cr, r, vertical, t, v, st, hits),

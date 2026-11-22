@@ -70,6 +70,10 @@ pub enum Hit {
     CalBack,
     /// Back to today's month (shown away from it).
     CalToday,
+    /// The day page's +: a new event on that day.
+    CalAdd,
+    /// An event on the day page (index into that day's events).
+    CalEvent(usize),
     MediaPrev,
     MediaPlayPause,
     MediaNext,
@@ -361,13 +365,21 @@ fn draw_cal_day(cr: *mut Cairo, r: Rect, sf: f64, family: &str, look: &Look, yea
     draw_in_box(cr, "Calendar", &bst, b.x + padx + iw_ + gap, b.y, lw + 1.0, b.h, Align::Start);
     hits.push((Hit::CalBack, pad(b, 3.0)));
 
-    // The date, beside it.
+    // + (a new event) at the right end.
+    let ast = TextStyle { family, px: (16.0 * sf).round().max(12.0), bold: true, color: look.background };
+    let ad = (lh + 8.0).round();
+    let add = Rect { x: r.x + r.w - ad, y: b.y, w: ad, h: ad };
+    fill_rounded_rect(cr, add.x, add.y, add.w, add.h, ad / 2.0, look.primary);
+    draw_in_box(cr, "+", &ast, add.x, add.y - 1.0, add.w, add.h, Align::Center);
+    hits.push((Hit::CalAdd, pad(add, 3.0)));
+
+    // The date, between them.
     let wd = WEEKDAYS[weekday_of(year, month0 + 1, day) as usize % 7];
     let this_year = crate::cal_events::local(crate::cal_events::day_start(year, month0, day)).0 == LocalTime::now().year;
     let title = if this_year { format!("{wd} {day} {}", MONTHS_SHORT[month0 as usize % 12]) } else { format!("{wd} {day} {} {year}", MONTHS_SHORT[month0 as usize % 12]) };
     let tst = TextStyle { family, px: (15.0 * sf).round().max(11.0), bold: true, color: look.fg };
     let tx = b.x + b.w + gap * 1.5;
-    draw_in_box(cr, &title, &tst, tx, r.y, (r.x + r.w - tx).max(10.0), header_h, Align::End);
+    draw_in_box(cr, &title, &tst, tx, r.y, (add.x - gap - tx).max(10.0), header_h, Align::End);
 
     // The events.
     let events = crate::cal_events::on_day(year, month0, day);
@@ -402,7 +414,9 @@ fn draw_cal_day(cr: *mut Cairo, r: Rect, sf: f64, family: &str, look: &Look, yea
         };
         let detail = if o.location.is_empty() { when } else { format!("{when} \u{b7} {}", o.location) };
         let bar = (3.0 * sf).max(2.0);
-        fill_rounded_rect(cr, r.x, y + 2.0, bar, row_h - (8.0 * sf).round() - 4.0, bar / 2.0, look.primary);
+        let colour = if o.color.len() == 7 && o.color.starts_with('#') { hex_to_rgba(&o.color, 1.0) } else { look.primary };
+        fill_rounded_rect(cr, r.x, y + 2.0, bar, row_h - (8.0 * sf).round() - 4.0, bar / 2.0, colour);
+        hits.push((Hit::CalEvent(i), Rect { x: r.x, y, w: r.w, h: row_h - (4.0 * sf).round() }));
         let tx = r.x + bar + (8.0 * sf).round();
         let summary = if o.summary.trim().is_empty() { "(No title)" } else { o.summary.trim() };
         draw_in_box(cr, summary, &TextStyle { family, px, bold: true, color: look.fg }, tx, y, r.x + r.w - tx, px * 1.35, Align::Start);

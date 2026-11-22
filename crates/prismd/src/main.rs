@@ -1315,6 +1315,21 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                 let flags = prism_common::ipc::DaemonFlags { silent: st.silent, auto_silent: st.auto_silent, caffeinate: CAFFEINATE.load(Ordering::SeqCst), game_mode: GAME_MODE.load(Ordering::SeqCst), timer: *TIMER.lock().unwrap() };
                 IpcResponse::Ok(serde_json::to_string(&flags).ok())
             }
+            Ok(IpcCommand::Calendar(action)) => {
+                let cmd = match action.as_str() {
+                    "open" => prism_common::UiCommand::Open("calendar".into()),
+                    "close" => prism_common::UiCommand::Close,
+                    _ => prism_common::UiCommand::Toggle("calendar".into()),
+                };
+                match send_ui(&cmd) {
+                    Ok(_) => IpcResponse::Ok(None),
+                    Err(e) => IpcResponse::Error(e),
+                }
+            }
+            Ok(IpcCommand::CalendarRefresh) => {
+                calendar::refresh_eds();
+                IpcResponse::Ok(None)
+            }
             Ok(IpcCommand::GameMode(want)) => {
                 let on = want.unwrap_or(!GAME_MODE.load(Ordering::SeqCst));
                 set_game_mode(&state, on);

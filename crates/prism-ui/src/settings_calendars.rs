@@ -1,4 +1,4 @@
-//! Settings > Desktop > Calendars: the calendar feeds kept in the keyring
+//! Settings > Calendar > Calendars: the calendar feeds kept in the keyring
 //! (`prism_common::keyring`). The list is hidden until the user unlocks it: the keyring's own
 //! password prompt when the keyring is locked, else their password (checked with PAM by
 //! `prism-lock --check-auth`, which reads it from a pipe). Addresses are typed into a masked

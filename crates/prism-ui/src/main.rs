@@ -24,6 +24,9 @@ mod phone;
 mod phone_client;
 mod keyring_prompter;
 mod notes;
+mod event_card;
+mod calendar_card;
+mod settings_accounts;
 mod picker;
 mod privacy;
 mod weather;
@@ -125,6 +128,10 @@ enum UiMode {
     Power,
     Keybinds,
     Notes,
+    /// Add or change a calendar event (`event_card.rs`).
+    Event,
+    /// The month and its events (`calendar_card.rs`).
+    Calendar,
     Phone,
     /// Password / secret prompt for the polkit and NetworkManager agents (prompt.rs).
     Prompt,
@@ -659,7 +666,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                             let is_modal = matches!(
                                 state.mode,
                                 UiMode::Launcher | UiMode::Spotlight | UiMode::Clipboard | UiMode::Emoji |
-                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide
+                                UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Event | UiMode::Calendar | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide
                             );
 
                             if is_modal && cw > 0 && ch > 0
@@ -1236,6 +1243,8 @@ impl UiState {
             }
             UiMode::Emoji => centered(emoji::CARD_W, emoji::CARD_H),
             UiMode::Notes => centered(notes::CARD_W, notes::CARD_H),
+            UiMode::Event => centered(event_card::CARD_W, event_card::CARD_H),
+            UiMode::Calendar => centered(calendar_card::CARD_W, calendar_card::CARD_H),
             UiMode::Trim => centered(trim::CARD_W, trim::CARD_H),
             UiMode::DownloadConfirm => centered(download_confirm::CARD_W, download_confirm::CARD_H),
             UiMode::Downloads => centered(downloads_card::CARD_W, downloads_card::CARD_H),
@@ -1577,7 +1586,7 @@ impl UiState {
                         is_animating |= v.animating();
                     }
                 }
-                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide => {
+                UiMode::Launcher | UiMode::Spotlight | UiMode::Power | UiMode::Clipboard | UiMode::Emoji | UiMode::Keybinds | UiMode::Notes | UiMode::Event | UiMode::Calendar | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide => {
                     let card = self.design_card();
                     self.card_bounds = self.desired_card_rect();
                     let (style, theme) = (self.style.clone(), self.theme.clone());
@@ -1911,6 +1920,8 @@ fn mode_from_name(name: &str) -> Option<UiMode> {
         "power" => UiMode::Power,
         "keybinds" => UiMode::Keybinds,
         "notes" => UiMode::Notes,
+        "event" => UiMode::Event,
+        "calendar" => UiMode::Calendar,
         "phone" => UiMode::Phone,
         "trim" => UiMode::Trim,
         "download-confirm" => UiMode::DownloadConfirm,
@@ -1935,6 +1946,8 @@ fn mode_name(mode: &UiMode) -> &'static str {
         UiMode::Power => "power",
         UiMode::Keybinds => "keybinds",
         UiMode::Notes => "notes",
+        UiMode::Event => "event",
+        UiMode::Calendar => "calendar",
         UiMode::Phone => "phone",
         UiMode::Prompt => "prompt",
         UiMode::Trim => "trim",
@@ -1999,7 +2012,7 @@ impl Overlay {
                 &style,
             )),
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide => Some(Transition::enter(Motion::Scale, &style)),
+            | UiMode::Settings | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Event | UiMode::Calendar | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide => Some(Transition::enter(Motion::Scale, &style)),
             _ => None,
         };
         // Rows of the new card start hidden; the entrance restarts with its first shown frame.
@@ -2105,6 +2118,8 @@ impl Overlay {
             UiMode::Emoji => state.view = Some(Box::new(emoji::EmojiView::new(res.emojis()))),
             UiMode::Keybinds => state.view = Some(Box::new(keybinds::KeybindsView::new(waker.clone()))),
             UiMode::Notes => state.view = Some(Box::new(notes::NotesView::new())),
+            UiMode::Event => state.view = Some(Box::new(event_card::EventView::new(waker.clone()))),
+            UiMode::Calendar => state.view = Some(Box::new(calendar_card::CalendarView::new())),
             UiMode::Phone => state.view = Some(Box::new(phone::PhoneView::new(waker.clone()))),
             UiMode::Trim => state.view = Some(Box::new(trim::TrimView::new(waker.clone()))),
             UiMode::DownloadConfirm => state.view = Some(Box::new(download_confirm::DownloadConfirmView::new(waker.clone()))),
@@ -2125,7 +2140,7 @@ impl Overlay {
         let uses_card_surface = matches!(
             state.mode,
             UiMode::Launcher | UiMode::Spotlight | UiMode::Wallpaper | UiMode::Clipboard | UiMode::Emoji
-                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide
+                | UiMode::Settings | UiMode::NotificationCenter | UiMode::Power | UiMode::Keybinds | UiMode::Notes | UiMode::Event | UiMode::Calendar | UiMode::Phone | UiMode::Prompt | UiMode::Trim | UiMode::DownloadConfirm | UiMode::Downloads | UiMode::CompEdit | UiMode::Guide
         );
         if uses_card_surface {
             // The power menu blurs the whole screen behind its dim. Mapped first so it stays below
@@ -2596,6 +2611,14 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 Ok(o) => overlays.push(o),
                 Err(e) => eprintln!("[prism-ui] cannot open prompt: {e}"),
             }
+        }
+        // The Calendar widget asked for the event card.
+        if event_card::take_open() {
+            handle_command(prism_common::UiCommand::Open("event".into()), &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
+        }
+        // Back to the Calendar card after the event card it opened.
+        if calendar_card::take_open() && !overlays.iter().any(|o| o.is_modal() && !o.closing()) {
+            handle_command(prism_common::UiCommand::Open("calendar".into()), &conn, &globals, &mut overlays, &mut edit, &mut toasts, &mut res, &waker);
         }
         // Portal (xdp.rs): screenshots and colour picks for apps.
         for req in xdp::take() {

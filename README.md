@@ -337,7 +337,7 @@ to write to, e.g. through a shared group).
 - `~/.config/prism/config.json`: every setting; edited by the Settings window (`prism-ctl settings toggle`) and
   reloaded live when the file changes.
 - `~/.config/prism/colors.json`: matugen palette.
-- Calendar feeds (Settings > Desktop > Calendars) are kept in your keyring (gnome-keyring or another
+- Calendar feeds (Settings > Calendar > Calendars) are kept in your keyring (gnome-keyring or another
   Secret Service), not in `config.json`; your password shows and changes the list. Settings, their
   snapshots and backups are readable only by you.
 - `~/.cache/prism/`: clipboard history, notifications, current wallpaper (private, `0700`).
