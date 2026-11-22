@@ -534,6 +534,9 @@ pub enum DownloadAction {
     Show(u64),
     /// The Downloads card: "toggle", "open" or "close".
     Card(String),
+    /// Read an HLS playlist with the request's headers (for the extension, whose own reads
+    /// some hosts refuse): JSON `{"variants": [{"url", "height", "bandwidth"}], "duration"}`.
+    Inspect(DownloadRequest),
 }
 
 /// A download as the browser (or a script) would fetch it.

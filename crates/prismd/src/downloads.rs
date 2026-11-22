@@ -189,8 +189,9 @@ fn classify(roots: &Roots, path: &Path) -> Kind {
         return Kind::Ignore;
     }
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    // Prism's own downloads report themselves (dl.rs).
-    if ext == "prismdl" || is_own(path) {
+    // Prism's own downloads report themselves (dl.rs), and the segments of a video it
+    // downloads (`<name>.prismdl.d/`) are parts, not downloads.
+    if ext == "prismdl" || is_own(path) || parts.iter().any(|p| p.as_bytes().ends_with(b".prismdl.d")) {
         return Kind::Ignore;
     }
     if TEMP_EXT.contains(&ext.as_str()) {
@@ -421,7 +422,7 @@ impl Watcher {
         let path = dir.join(std::ffi::OsStr::from_bytes(name));
         let is_dir = mask & libc::IN_ISDIR != 0;
         let kind = classify(&self.roots, &path);
-        if is_dir && mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 {
+        if is_dir && mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 && !name.ends_with(b".prismdl.d") {
             let depth = self.depth(&path);
             self.add_tree(&path, depth);
         }
@@ -522,12 +523,25 @@ fn finished(path: PathBuf) {
     }
 }
 
+/// One session bus connection for every "Download finished" notification: each waits for its
+/// answer, so a connection apiece would pile up open sockets on the bus.
+fn session_bus() -> Option<zbus::blocking::Connection> {
+    static BUS: std::sync::Mutex<Option<zbus::blocking::Connection>> = std::sync::Mutex::new(None);
+    let mut bus = BUS.lock().unwrap();
+    // The bus may have restarted since.
+    let alive = bus.as_ref().is_some_and(|c| c.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus.Peer"), "Ping", &()).is_ok());
+    if !alive {
+        *bus = zbus::blocking::Connection::session().ok();
+    }
+    bus.clone()
+}
+
 /// "Download finished" with Open and Show in Folder, and the pill's "Download completed".
 pub fn announce(path: PathBuf) {
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let _ = crate::send_ui(&UiCommand::DownloadDone(name));
     std::thread::spawn(move || {
-        let Ok(session) = zbus::blocking::Connection::session() else { return };
+        let Some(session) = session_bus() else { return };
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let body = format!("{name}\n{}", human(size_of(&path).unwrap_or(0)));
         let answer = crate::obex::ask_as(&session, "Downloads", "Download finished", &body, "folder-download", &["default", "Open", "open", "Open", "folder", "Show in Folder"], None);

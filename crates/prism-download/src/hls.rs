@@ -187,6 +187,12 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist, String> {
     Ok(Playlist::Media(media))
 }
 
+/// Read a playlist as the download would (same headers): its qualities, or its segments.
+pub fn inspect(req: &Request) -> Result<Playlist, String> {
+    let agent = crate::agent(Duration::from_secs(15));
+    parse(&fetch_text(&agent, &req.url, req)?, &req.url)
+}
+
 fn fetch_text(agent: &ureq::Agent, url: &str, req: &Request) -> Result<String, String> {
     let mut resp = get(agent, url, req, None)?;
     let status = resp.status().as_u16();

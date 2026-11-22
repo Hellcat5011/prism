@@ -53,6 +53,8 @@ struct State {
     /// When the list went empty without word of a file (cancelled, or the word is late).
     ended: Option<Instant>,
     opened: Instant,
+    /// The bar's fill, following the overall progress on a spring.
+    fill: crate::ui::SpringValue,
     /// Hover: 0 at rest, 1 under the pointer, eased toward `hover`.
     lit: f64,
     /// Size: 0 small, 1 large, eased toward hovering (or completed).
@@ -160,6 +162,7 @@ impl Pill {
                 done,
                 ended: None,
                 opened: Instant::now(),
+            fill: crate::ui::SpringValue::new(0.0),
                 lit: 0.0,
                 grow: if w0 == LARGE.0 { 1.0 } else { 0.0 },
                 lit_at: Instant::now(),
@@ -307,7 +310,21 @@ impl State {
         self.cancel = None;
         let going = self.going();
         let list = if going.is_empty() { self.last.clone() } else { going };
-        let progress = overall(&list).filter(|_| phase == Phase::Active);
+        let progress = match phase {
+            Phase::Active => overall(&list),
+            // Every download has ended: full until the word of the file comes.
+            _ => Some(1.0),
+        };
+        if let Some(p) = progress {
+            // A new, less advanced download starts from where it is, not sliding back.
+            if p + 0.25 < self.fill.target() {
+                self.fill.snap(p);
+            } else if (p - self.fill.target()).abs() > 1e-4 {
+                self.fill.set_scaled(p, (0.6, 1.0), Some(1.0));
+            }
+        }
+        let fill = self.fill.value().clamp(0.0, 1.0);
+        let filling = (fill - self.fill.target()).abs() > 1e-3;
         let blue = (0.55, 0.80, 1.0, 1.0);
         let green = (0.45, 0.85, 0.55, 1.0);
         let (w, h) = (iw as f64, ih as f64);
@@ -330,7 +347,7 @@ impl State {
             let bar = |x: f64, y: f64, bw: f64, bh: f64, a: f64| {
                 cb::fill_rounded_rect(cr, x, y, bw, bh, bh / 2.0, white(0.12 * a));
                 match progress {
-                    Some(p) => cb::fill_rounded_rect(cr, x, y, (bw * p).max(bh), bh, bh / 2.0, with(blue, a)),
+                    Some(_) => cb::fill_rounded_rect(cr, x, y, (bw * fill).max(bh), bh, bh / 2.0, with(blue, a)),
                     None => {
                         let t = self.opened.elapsed().as_secs_f64();
                         let seg = bw * 0.3;
@@ -397,7 +414,7 @@ impl State {
             cb::cairo_surface_destroy(surf);
         }
         // Keep drawing while anything moves: the sweep, a fade, the hover easing, the tick.
-        let sweeping = phase != Phase::Completed && (phase == Phase::Finishing || progress.is_none());
+        let sweeping = progress.is_none() || filling;
         let fading = shown < 1.0 || self.done.is_some() || self.ended.is_some();
         self.dirty = sweeping || fading || self.lit != lit_to || self.grow != grow_to || self.cancel_lit != cancel_was;
         self.surface.attach(Some(&self.bufs[idx].buffer), 0, 0);

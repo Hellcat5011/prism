@@ -886,6 +886,10 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<DaemonState>>) {
                         IpcResponse::Ok(None)
                     }
                     D::List => IpcResponse::Ok(serde_json::to_string(&dl::list()).ok()),
+                    D::Inspect(req) => match dl::inspect(req) {
+                        Ok(v) => IpcResponse::Ok(Some(v.to_string())),
+                        Err(e) => IpcResponse::Error(e),
+                    },
                 }
             }
             Ok(IpcCommand::Setup) => match open_popup("setup") {

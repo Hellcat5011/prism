@@ -444,6 +444,18 @@ pub fn clear() {
     m.dirty = true;
 }
 
+/// `DownloadAction::Inspect`: what an HLS playlist offers.
+pub fn inspect(req: DownloadRequest) -> Result<serde_json::Value, String> {
+    let ereq = engine::Request { url: req.url, referer: req.referer, cookie: req.cookie, user_agent: req.user_agent, headers: req.headers };
+    Ok(match engine::hls::inspect(&ereq)? {
+        engine::hls::Playlist::Master { variants, .. } => serde_json::json!({
+            "variants": variants.iter().map(|v| serde_json::json!({"url": v.uri, "height": v.resolution.map_or(0, |r| r.1), "bandwidth": v.bandwidth})).collect::<Vec<_>>(),
+            "duration": 0,
+        }),
+        engine::hls::Playlist::Media(m) => serde_json::json!({"variants": [], "duration": m.segments.iter().map(|s| s.duration).sum::<f64>()}),
+    })
+}
+
 pub fn list() -> Vec<DownloadInfo> {
     let mut m = MGR.lock().unwrap();
     m.load();
@@ -565,6 +577,10 @@ fn run() {
                 let Some(h) = &e.handle else { continue };
                 let p = h.progress();
                 e.info.done = p.done;
+                // Video streams learn their size as segments arrive (an estimate from them).
+                if p.size.is_some() {
+                    e.info.size = p.size;
+                }
                 e.info.connections = p.connections as u32;
                 e.samples.push_back((now, p.done));
                 while e.samples.len() > 8 {
@@ -593,6 +609,10 @@ fn run() {
                     engine::State::Failed(err) => {
                         e.info.state = "failed".into();
                         e.info.error = Some(err);
+                        // Nothing fetched yet (the playlist was refused): leave no empty folder.
+                        if !e.info.path.is_empty() {
+                            let _ = std::fs::remove_dir(work_dir(&engine::temp_path(Path::new(&e.info.path))));
+                        }
                     }
                     _ => e.info.state = "paused".into(),
                 }
@@ -619,7 +639,7 @@ fn run() {
                 .entries
                 .iter()
                 .filter(|e| matches!(e.info.state.as_str(), "running" | "probing"))
-                .map(|e| DownloadProgress { name: e.info.name.clone(), bytes: e.info.done, rate: e.info.rate, progress: e.info.size.filter(|s| *s > 0).map(|s| e.info.done as f64 / s as f64), id: Some(e.info.id) })
+                .map(|e| DownloadProgress { name: e.info.name.clone(), bytes: e.info.done, rate: e.info.rate, progress: e.info.size.filter(|s| *s > 0).map(|s| (e.info.done as f64 / s as f64).min(1.0)).or((e.req.kind == "hls").then_some(0.0)), id: Some(e.info.id) })
                 .collect();
             crate::downloads::set_engine(pill);
             let save_due = m.last_save.is_none_or(|t| t.elapsed() >= Duration::from_secs(5));

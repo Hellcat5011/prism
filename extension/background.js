@@ -243,20 +243,84 @@ function changed(tabId) {
   browser.tabs.sendMessage(tabId, { type: "media-changed" }).catch(() => {});
 }
 
-async function addHls(d) {
+// Headers the page sent with a request (by requestId), kept until its answer arrives. Many
+// stream hosts refuse a playlist without the player's Origin and Referer, so Prism sends the
+// same ones.
+const sent = new Map();
+
+browser.webRequest.onSendHeaders.addListener(
+  (d) => {
+    if (d.tabId < 0) return;
+    const referer = header(d.requestHeaders, "referer");
+    const origin = header(d.requestHeaders, "origin");
+    if (!referer && !origin) return;
+    sent.set(d.requestId, { referer, origin });
+    if (sent.size > 1000) sent.delete(sent.keys().next().value);
+  },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "object", "other"] },
+  ["requestHeaders"]
+);
+
+// A playlist as the page sees it: read by the content script of the frame that played it
+// (content.fetch sends that page's Origin, Referer and cookies), else by this script.
+async function readPlaylist(d) {
+  try {
+    const text = await browser.tabs.sendMessage(d.tabId, { type: "read-playlist", url: d.url }, { frameId: d.frameId });
+    if (typeof text === "string") return text;
+  } catch {
+    // No content script in that frame.
+  }
+  const r = await fetch(d.url, { credentials: "include" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.text();
+}
+
+// What Prism sends for one of the page's media requests: the headers the page used.
+async function mediaRequest(entry, tab) {
+  const seen = entry.headers || {};
+  return {
+    url: entry.url,
+    referer: isHttp(seen.referer) ? seen.referer : isHttp(entry.pageUrl) ? entry.pageUrl : isHttp(tab && tab.url) ? tab.url : null,
+    cookie: await cookieHeader(entry.url, tab && tab.cookieStoreId),
+    user_agent: navigator.userAgent,
+    headers: isHttp(seen.origin) ? [["Origin", seen.origin]] : [],
+  };
+}
+
+// Qualities and length of a playlist: read in the page's frame, else by Prism with the
+// page's headers (what the download itself will send).
+async function playlistInfo(d, entry) {
+  try {
+    return parseM3u8(await readPlaylist(d), d.url);
+  } catch {
+    const tab = await browser.tabs.get(d.tabId).catch(() => null);
+    const info = await prism({ inspect: await mediaRequest(entry, tab) });
+    const variants = info.variants.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth);
+    const seen = new Set();
+    return { variants: variants.filter((v) => (v.height ? !seen.has(v.height) && seen.add(v.height) : true)), duration: info.duration };
+  }
+}
+
+async function addHls(d, headers) {
   const list = tabMedia(d.tabId);
   if (children.has(d.url) || list.has(d.url)) return;
-  const entry = { id: nextMediaId++, kind: "hls", url: d.url, variants: [], duration: 0, pageUrl: d.documentUrl || d.originUrl || "", found: Date.now() };
+  const entry = { id: nextMediaId++, kind: "hls", url: d.url, variants: [], duration: 0, pageUrl: d.documentUrl || d.originUrl || "", headers, found: Date.now() };
   list.set(d.url, entry);
   try {
-    const r = await fetch(d.url, { credentials: "include" });
-    const info = parseM3u8(await r.text(), d.url);
+    const info = await playlistInfo(d, entry);
     entry.variants = info.variants;
     entry.duration = info.duration;
     for (const v of info.variants) {
       children.add(v.url);
       // A variant listed before its master was seen: the master covers it.
       for (const [k, e] of list) if (e.url === v.url && e !== entry) list.delete(k);
+    }
+    // Players fetch the same playlist again under new signed URLs: one entry per stream
+    // (the newest, whose signature is freshest).
+    if (!entry.variants.length && entry.duration) {
+      for (const [k, e] of list) {
+        if (e !== entry && e.kind === "hls" && !e.variants.length && Math.abs(e.duration - entry.duration) < 0.5 && hostOf(e.url) === hostOf(entry.url)) list.delete(k);
+      }
     }
   } catch {
     // Listed as it is; Prism reads it again.
@@ -266,12 +330,14 @@ async function addHls(d) {
 
 browser.webRequest.onHeadersReceived.addListener(
   (d) => {
+    const headers = sent.get(d.requestId);
+    sent.delete(d.requestId);
     if (d.tabId < 0 || !isHttp(d.url) || d.statusCode >= 400) return;
     if (BLOCKED.some((b) => hostOf(d.url) === b || hostOf(d.url).endsWith("." + b))) return;
     const type = header(d.responseHeaders, "content-type").toLowerCase();
     const path = (() => { try { return new URL(d.url).pathname.toLowerCase(); } catch { return ""; } })();
     if (/mpegurl/.test(type) || path.endsWith(".m3u8")) {
-      addHls(d);
+      addHls(d, headers);
       return;
     }
     const isMedia = /^(video|audio)\//.test(type) || /\.(mp4|webm|mkv|mov|m4v|ogv|mp3|m4a|flac|opus|oga)$/.test(path);
@@ -284,7 +350,7 @@ browser.webRequest.onHeadersReceived.addListener(
     const key = d.url.replace(/([?&])(range|bytes)=[^&]*/g, "$1");
     const list = tabMedia(d.tabId);
     if (list.has(key)) return;
-    list.set(key, { id: nextMediaId++, kind: "file", url: d.url, size, type: type.split(";")[0], pageUrl: d.documentUrl || d.originUrl || "", found: Date.now() });
+    list.set(key, { id: nextMediaId++, kind: "file", url: d.url, size, type: type.split(";")[0], pageUrl: d.documentUrl || d.originUrl || "", headers, found: Date.now() });
     changed(d.tabId);
   },
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "object", "other"] },
@@ -309,13 +375,7 @@ async function grab(tabId, entryId, variantUrl) {
   if (!entry) throw new Error("That video is gone; play it again");
   const tab = await browser.tabs.get(tabId);
   const title = (tab.title || "video").replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 150);
-  const req = {
-    url: entry.url,
-    referer: isHttp(entry.pageUrl) ? entry.pageUrl : isHttp(tab.url) ? tab.url : null,
-    cookie: await cookieHeader(entry.url, tab.cookieStoreId),
-    user_agent: navigator.userAgent,
-    ask: true,
-  };
+  const req = { ...(await mediaRequest(entry, tab)), ask: true };
   if (entry.kind === "hls") {
     req.kind = "hls";
     req.variant = variantUrl || null;

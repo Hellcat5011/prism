@@ -25,6 +25,11 @@
 
   browser.runtime.onMessage.addListener((m) => {
     if (m && m.type === "media-changed") refresh();
+    // Read a playlist as this page would (its Origin, Referer and cookies).
+    if (m && m.type === "read-playlist") {
+      const f = typeof content !== "undefined" && content.fetch ? content.fetch : fetch;
+      return f(m.url, { credentials: "include" }).then((r) => (r.ok ? r.text() : null), () => null);
+    }
   });
 
   function size(b) {
@@ -46,7 +51,7 @@
           out.push({ id: e.id, variant: v.url, label: e.labels[i], detail: est ? `about ${est}` : "Stream" });
         });
       } else if (e.kind === "hls") {
-        out.push({ id: e.id, variant: null, label: "Video", detail: "Stream" });
+        out.push({ id: e.id, variant: null, label: "Video", detail: e.duration ? `${Math.max(1, Math.round(e.duration / 60))} min` : "Stream" });
       } else {
         out.push({ id: e.id, variant: null, label: (e.type.split("/")[1] || "file").toUpperCase(), detail: size(e.size) });
       }
