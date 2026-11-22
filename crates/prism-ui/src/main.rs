@@ -2680,6 +2680,13 @@ fn run(initial: Option<UiMode>, toast: Option<prism_common::NotifOverlayMessage>
                 }
                 continue;
             }
+            if let prism_common::UiCommand::DownloadFailed { name, error } = &cmd {
+                match dl_pill.as_mut() {
+                    Some(p) => p.failed(name.clone(), error.clone()),
+                    None => dl_pill = downloads_pill::Pill::open_failed(&conn, &globals, name.clone(), error.clone(), indicator.is_some()),
+                }
+                continue;
+            }
             if let prism_common::UiCommand::DownloadDone(name) = &cmd {
                 match dl_pill.as_mut() {
                     Some(p) => p.done(name.clone()),
@@ -3142,7 +3149,7 @@ fn handle_command(
             }
         }
         // Handled by the run loop (it owns the inhibitor and the picker).
-        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Downloads(_) | UiCommand::DownloadDone(_) | UiCommand::Trim(_) | UiCommand::Wallpaper(_) | UiCommand::Search(_) | UiCommand::SettingsTab(_) | UiCommand::DownloadConfirm(_) => {}
+        UiCommand::Caffeinate(_) | UiCommand::GameMode(_) | UiCommand::Away(_) | UiCommand::Switcher(_) | UiCommand::ColorPicker(_) | UiCommand::Capture(_) | UiCommand::Recording(_) | UiCommand::Downloads(_) | UiCommand::DownloadDone(_) | UiCommand::DownloadFailed { .. } | UiCommand::Trim(_) | UiCommand::Wallpaper(_) | UiCommand::Search(_) | UiCommand::SettingsTab(_) | UiCommand::DownloadConfirm(_) => {}
         UiCommand::EditMode(action) => {
             let open = edit.as_ref().map(|e| !e.finished()).unwrap_or(false);
             let want_open = match action.as_str() {

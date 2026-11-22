@@ -380,11 +380,17 @@ fn begin_hls(id: u64, req: DownloadRequest, path: String) {
             e.samples.clear();
         }
         Err(err) => {
-            e.info.state = "failed".into();
-            e.info.error = Some(err);
+            fail(e, err);
         }
     }
     m.dirty = true;
+}
+
+/// A download failed: its entry says why, and the pill and a notification tell the user.
+fn fail(e: &mut Entry, err: String) {
+    e.info.state = "failed".into();
+    e.info.error = Some(err.clone());
+    crate::downloads::failed(e.info.id, e.info.name.clone(), err);
 }
 
 pub fn cancel(id: u64, forget: bool) -> Result<(), String> {
@@ -495,8 +501,7 @@ fn begin(id: u64) {
     let probe = match probed {
         Ok(p) => p,
         Err(err) => {
-            e.info.state = "failed".into();
-            e.info.error = Some(err);
+            fail(e, err);
             m.dirty = true;
             return;
         }
@@ -535,8 +540,7 @@ fn begin(id: u64) {
             e.samples.clear();
         }
         Err(err) => {
-            e.info.state = "failed".into();
-            e.info.error = Some(err);
+            fail(e, err);
         }
     }
     m.dirty = true;
@@ -558,8 +562,7 @@ fn complete(e: &mut Entry) {
             crate::downloads::announce(dest);
         }
         Err(err) => {
-            e.info.state = "failed".into();
-            e.info.error = Some(format!("moving the finished file into place: {err}"));
+            fail(e, format!("moving the finished file into place: {err}"));
         }
     }
 }
@@ -607,8 +610,7 @@ fn run() {
                 match p.state {
                     engine::State::Done => complete(e),
                     engine::State::Failed(err) => {
-                        e.info.state = "failed".into();
-                        e.info.error = Some(err);
+                        fail(e, err);
                         // Nothing fetched yet (the playlist was refused): leave no empty folder.
                         if !e.info.path.is_empty() {
                             let _ = std::fs::remove_dir(work_dir(&engine::temp_path(Path::new(&e.info.path))));

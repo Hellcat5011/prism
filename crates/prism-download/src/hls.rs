@@ -202,15 +202,42 @@ fn fetch_text(agent: &ureq::Agent, url: &str, req: &Request) -> Result<String, S
     resp.body_mut().with_config().limit(16 << 20).read_to_string().map_err(|e| e.to_string())
 }
 
-fn fetch_bytes(agent: &ureq::Agent, url: &str, req: &Request, range: Option<(u64, u64)>) -> Result<Vec<u8>, String> {
+/// Why a segment (or key) could not be fetched.
+#[derive(Debug)]
+enum SegErr {
+    /// 429 / 503: the server wants fewer requests (and maybe says when to come back).
+    Busy(Option<Duration>),
+    Other(String),
+}
+
+impl From<String> for SegErr {
+    fn from(e: String) -> Self {
+        SegErr::Other(e)
+    }
+}
+
+impl std::fmt::Display for SegErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            SegErr::Busy(_) => f.write_str("the server answered 429 (too many requests)"),
+            SegErr::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+fn fetch_bytes(agent: &ureq::Agent, url: &str, req: &Request, range: Option<(u64, u64)>) -> Result<Vec<u8>, SegErr> {
     let r = range.map(|(off, len)| (off, Some(off + len.max(1) - 1)));
     let mut resp = get(agent, url, req, r)?;
     let status = resp.status().as_u16();
+    if status == 429 || status == 503 {
+        let wait = crate::header(&resp, "retry-after").and_then(|v| v.parse::<u64>().ok()).map(|s| Duration::from_secs(s.min(120)));
+        return Err(SegErr::Busy(wait));
+    }
     if !(200..300).contains(&status) {
-        return Err(format!("the server answered {status}"));
+        return Err(SegErr::Other(format!("the server answered {status}")));
     }
     let mut out = Vec::new();
-    resp.body_mut().with_config().limit(1 << 30).reader().read_to_end(&mut out).map_err(|e| e.to_string())?;
+    resp.body_mut().with_config().limit(1 << 30).reader().read_to_end(&mut out).map_err(|e| SegErr::Other(e.to_string()))?;
     Ok(out)
 }
 
@@ -305,6 +332,8 @@ fn run(sh: &Arc<Shared>, req: &Request, variant: Option<&str>, work: &Path, out:
     sh.done.store(on_disk, Ordering::SeqCst);
     let todo: Vec<(usize, usize)> = jobs.iter().zip(&have).filter(|(_, h)| !**h).map(|(j, _)| *j).collect();
     let next = AtomicUsize::new(0);
+    // Connections allowed now (halved on each 429 / 503).
+    let limit = AtomicUsize::new(opts.connections.clamp(1, 16));
     let keys: Mutex<HashMap<String, Vec<u8>>> = Mutex::new(HashMap::new());
     let failure: Mutex<Option<String>> = Mutex::new(None);
     let estimate = |sh: &Shared| {
@@ -313,9 +342,14 @@ fn run(sh: &Arc<Shared>, req: &Request, variant: Option<&str>, work: &Path, out:
     };
     estimate(sh);
     std::thread::scope(|s| {
-        for _ in 0..opts.connections.clamp(1, 16) {
-            s.spawn(|| loop {
+        for w in 0..opts.connections.clamp(1, 16) {
+            let (failure, next, keys, done_jobs, todo, plan, agent, limit) = (&failure, &next, &keys, &done_jobs, &todo, &plan, &agent, &limit);
+            s.spawn(move || loop {
                 if sh.stop.load(Ordering::SeqCst) || failure.lock().unwrap().is_some() {
+                    return;
+                }
+                // The server asked for fewer requests: this connection stops taking segments.
+                if w >= limit.load(Ordering::SeqCst) {
                     return;
                 }
                 let k = next.fetch_add(1, Ordering::SeqCst);
@@ -335,6 +369,7 @@ fn run(sh: &Arc<Shared>, req: &Request, variant: Option<&str>, work: &Path, out:
                     (sg.uri.clone(), sg.range, sg.key.clone(), sg.seq)
                 };
                 let mut tries = 0;
+                let mut busy_tries = 0u32;
                 let data = loop {
                     sh.receiving.fetch_add(1, Ordering::SeqCst);
                     let r = fetch_bytes(&agent, &url, req, range).and_then(|d| match &key {
@@ -356,12 +391,28 @@ fn run(sh: &Arc<Shared>, req: &Request, variant: Option<&str>, work: &Path, out:
                                 iv[8..].copy_from_slice(&seq.to_be_bytes());
                                 iv
                             });
-                            decrypt(&d, &kb, iv)
+                            decrypt(&d, &kb, iv).map_err(SegErr::Other)
                         }
                     });
                     sh.receiving.fetch_sub(1, Ordering::SeqCst);
                     match r {
                         Ok(d) => break Some(d),
+                        // Rate limited: not a failure. Fewer connections, and wait as long as
+                        // the server asks (else longer each time, up to 30 s; about 10 minutes
+                        // in all before giving up).
+                        Err(SegErr::Busy(wait)) if busy_tries < 30 && !sh.stop.load(Ordering::SeqCst) => {
+                            busy_tries += 1;
+                            let now = limit.load(Ordering::SeqCst);
+                            let _ = limit.compare_exchange(now, (now / 2).max(1), Ordering::SeqCst, Ordering::SeqCst);
+                            sh.cap.store(limit.load(Ordering::SeqCst), Ordering::SeqCst);
+                            let wait = wait.unwrap_or_else(|| Duration::from_secs((2u64 << busy_tries.min(4)).min(30)));
+                            debug(|| format!("segment {t}/{i}: busy, waiting {wait:?} (limit {})", limit.load(Ordering::SeqCst)));
+                            // In short steps, so a pause is not held up.
+                            let until = Instant::now() + wait;
+                            while Instant::now() < until && !sh.stop.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(200));
+                            }
+                        }
                         Err(e) => {
                             tries += 1;
                             debug(|| format!("segment {t}/{i}: {e} (try {tries})"));
@@ -471,5 +522,73 @@ mod tests {
         let (key, iv) = ([7u8; 16], [3u8; 16]);
         let enc = cbc::Encryptor::<aes::Aes128>::new(&key.into(), &iv.into()).encrypt_padded_vec_mut::<Pkcs7>(b"segment bytes");
         assert_eq!(decrypt(&enc, &key, iv).unwrap(), b"segment bytes");
+    }
+
+    /// A server that answers 429 (Retry-After: 1) the first 6 times each segment is asked for,
+    /// more than the retries for errors: every segment still arrives, with fewer connections.
+    #[test]
+    fn rate_limited_segments_are_retried() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let seen = Arc::new(Mutex::new(HashMap::<String, u32>::new()));
+            for s in listener.incoming().flatten() {
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut s = s;
+                    let mut line = String::new();
+                    let mut r = BufReader::new(s.try_clone().unwrap());
+                    r.read_line(&mut line).unwrap();
+                    loop {
+                        let mut h = String::new();
+                        if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                            break;
+                        }
+                    }
+                    let path = line.split(' ').nth(1).unwrap_or("/").to_string();
+                    let body: Vec<u8> = if path == "/v.m3u8" {
+                        let mut p = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n".to_string();
+                        for i in 0..6 {
+                            p += &format!("#EXTINF:1.0,\ns{i}.ts\n");
+                        }
+                        (p + "#EXT-X-ENDLIST\n").into_bytes()
+                    } else if {
+                        let mut seen = seen.lock().unwrap();
+                        let n = seen.entry(path.clone()).or_insert(0);
+                        *n += 1;
+                        *n <= 6
+                    } {
+                        let _ = s.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        return;
+                    } else {
+                        path.into_bytes()
+                    };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes());
+                    let _ = s.write_all(&body);
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("prism-hls-429-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let req = Request { url: format!("http://127.0.0.1:{port}/v.m3u8"), ..Default::default() };
+        let opts = Options { connections: 4, ..Default::default() };
+        let h = start(req, None, &dir.join("work"), &dir.join("out.mp4"), opts).unwrap();
+        let t = Instant::now();
+        let state = loop {
+            let p = h.progress();
+            if p.state != State::Running || t.elapsed() > Duration::from_secs(120) {
+                break p.state;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // The segments are not real video, so ffmpeg may refuse them; what matters is that
+        // no segment failed.
+        if let State::Failed(e) = &state {
+            assert!(!e.contains("segment"), "{e}");
+        }
+        assert_ne!(state, State::Running);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

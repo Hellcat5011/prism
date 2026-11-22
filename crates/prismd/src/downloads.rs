@@ -523,6 +523,26 @@ fn finished(path: PathBuf) {
     }
 }
 
+/// One of Prism's downloads failed: the pill shows it, and a notification offers Retry and the
+/// Downloads card.
+pub fn failed(id: u64, name: String, error: String) {
+    let _ = crate::send_ui(&UiCommand::DownloadFailed { name: name.clone(), error: error.clone() });
+    std::thread::spawn(move || {
+        let Some(session) = session_bus() else { return };
+        let body = format!("{name}\n{error}");
+        let answer = crate::obex::ask_as(&session, "Downloads", "Download failed", &body, "dialog-error", &["retry", "Retry", "downloads", "Show Downloads"], None);
+        match answer.as_deref() {
+            Some("retry") => {
+                let _ = crate::dl::resume(id);
+            }
+            Some("downloads") | Some("default") => {
+                let _ = crate::send_ui(&UiCommand::Open("downloads".into()));
+            }
+            _ => {}
+        }
+    });
+}
+
 /// One session bus connection for every "Download finished" notification: each waits for its
 /// answer, so a connection apiece would pile up open sockets on the bus.
 fn session_bus() -> Option<zbus::blocking::Connection> {

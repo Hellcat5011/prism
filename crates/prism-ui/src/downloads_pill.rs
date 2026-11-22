@@ -31,6 +31,8 @@ const REST: f64 = 0.8;
 /// "Download completed" stays this long, then fades out over FADE_S.
 const DONE_S: f64 = 1.8;
 const FADE_S: f64 = 0.45;
+/// How long a failure stays (long enough to read why).
+const FAILED_S: f64 = 5.0;
 /// After the downloads end, how long to wait for word that a file arrived.
 const FINISH_WAIT_S: f64 = 6.0;
 /// Lucide "check".
@@ -50,6 +52,8 @@ struct State {
     last: Vec<DownloadProgress>,
     /// A finished download's name and when word came.
     done: Option<(String, Instant)>,
+    /// With `done`: the download failed, and why.
+    error: Option<String>,
     /// When the list went empty without word of a file (cancelled, or the word is late).
     ended: Option<Instant>,
     opened: Instant,
@@ -160,6 +164,7 @@ impl Pill {
                 last: list.clone(),
                 list,
                 done,
+                error: None,
                 ended: None,
                 opened: Instant::now(),
             fill: crate::ui::SpringValue::new(0.0),
@@ -203,7 +208,21 @@ impl Pill {
     /// A download's file arrived.
     pub fn done(&mut self, name: String) {
         self.st.done = Some((name, Instant::now()));
+        self.st.error = None;
         self.st.dirty = true;
+    }
+
+    /// One of Prism's downloads failed: a cross, "Download failed" and why, for longer.
+    pub fn failed(&mut self, name: String, error: String) {
+        self.st.done = Some((name, Instant::now()));
+        self.st.error = Some(error);
+        self.st.dirty = true;
+    }
+
+    pub fn open_failed(conn: &Connection, g: &Globals, name: String, error: String, below_rec: bool) -> Option<Pill> {
+        let mut p = Pill::open_with(conn, g, Vec::new(), Some((name, Instant::now())), below_rec)?;
+        p.st.error = Some(error);
+        Some(p)
     }
 
     /// Finished and faded out: tear it down.
@@ -263,7 +282,8 @@ impl State {
         }
         if let Some((_, t)) = &self.done {
             let t = t.elapsed().as_secs_f64();
-            return (Phase::Completed, appear * (1.0 - smooth((t - DONE_S) / FADE_S)));
+            let hold = if self.error.is_some() { FAILED_S } else { DONE_S };
+            return (Phase::Completed, appear * (1.0 - smooth((t - hold) / FADE_S)));
         }
         let waited = self.ended.map_or(0.0, |t| t.elapsed().as_secs_f64());
         (Phase::Finishing, appear * (1.0 - smooth((waited - FINISH_WAIT_S) / FADE_S)))
@@ -327,6 +347,7 @@ impl State {
         let filling = (fill - self.fill.target()).abs() > 1e-3;
         let blue = (0.55, 0.80, 1.0, 1.0);
         let green = (0.45, 0.85, 0.55, 1.0);
+        let red = (1.0, 0.45, 0.45, 1.0);
         let (w, h) = (iw as f64, ih as f64);
         // The large layout fades in over the small one as it grows.
         let big = smooth((g - 0.35) / 0.65);
@@ -363,12 +384,16 @@ impl State {
             if phase == Phase::Completed {
                 let pop = smooth(self.done.as_ref().map_or(1.0, |d| d.1.elapsed().as_secs_f64() / 0.3)).max(0.3);
                 let cx = icon_x + 14.0;
-                cb::fill_circle(cr, cx, h / 2.0, 14.0, with(green, 0.25));
-                crate::svg::draw_path(cr, CHECK, cx - 9.0 * pop, h / 2.0 - 9.0 * pop, 18.0 * pop, green, Some(2.4));
                 let name = self.done.as_ref().map(|d| d.0.clone()).unwrap_or_default();
+                let (colour, icon, title, detail) = match &self.error {
+                    Some(err) => (red, CROSS, "Download failed", format!("{name} \u{2014} {err}")),
+                    None => (green, CHECK, "Download completed", name),
+                };
+                cb::fill_circle(cr, cx, h / 2.0, 14.0, with(colour, 0.25));
+                crate::svg::draw_path(cr, icon, cx - 9.0 * pop, h / 2.0 - 9.0 * pop, 18.0 * pop, colour, Some(2.4));
                 let tx = cx + 26.0;
-                cb::draw_pango_text(cr, tx, h / 2.0 - 19.0, "Download completed", "Inter, Sans Semi-Bold 13px", white(big), Some((w - tx - 18.0) as i32));
-                cb::draw_pango_text(cr, tx, h / 2.0 + 1.0, &name, "Inter, Sans 12px", white(0.65 * big), Some((w - tx - 18.0) as i32));
+                cb::draw_pango_text(cr, tx, h / 2.0 - 19.0, title, "Inter, Sans Semi-Bold 13px", white(big), Some((w - tx - 18.0) as i32));
+                cb::draw_pango_text(cr, tx, h / 2.0 + 1.0, &detail, "Inter, Sans 12px", white(0.65 * big), Some((w - tx - 18.0) as i32));
             } else {
                 let cx = icon_x + 12.0;
                 let cy = 18.0 + 6.0 * g;

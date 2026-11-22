@@ -62,6 +62,8 @@ pub enum UiCommand {
     Downloads(Vec<DownloadProgress>),
     /// A download finished and its file arrived (named): the pill says so before it goes.
     DownloadDone(String),
+    /// One of Prism's downloads failed (its name, why): the pill shows it.
+    DownloadFailed { name: String, error: String },
     /// Show this wallpaper on the built-in background.
     Wallpaper(std::path::PathBuf),
     /// Open search with this text typed in (replacing any text it has).
