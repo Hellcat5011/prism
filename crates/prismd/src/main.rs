@@ -1728,6 +1728,19 @@ fn show_popup(message: prism_common::NotifOverlayMessage, delay: std::time::Dura
     let _ = queue.send(QueuedPopup { due: std::time::Instant::now() + delay, message, stored });
 }
 
+/// Settings, their snapshots and the calendar cache are owner-only (older versions wrote them
+/// readable by every user).
+fn tighten_private_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let cfg = Config::config_path();
+    for (p, mode) in [(cfg.parent().map(std::path::Path::to_path_buf), 0o700), (Some(cfg.clone()), 0o600), (Some(prism_common::calendar::cache_path()), 0o600)] {
+        if let Some(p) = p.filter(|p| p.exists()) {
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    prism_common::config_history::tighten();
+}
+
 fn main() {
     println!("Starting Prism Daemon (prismd)...");
 
@@ -1799,6 +1812,7 @@ fn main() {
     drives::apply(&cfg);
     downloads::apply(&cfg);
     dl::init();
+    tighten_private_files();
     calendar::apply(&cfg);
     recording::apply_replay(&cfg);
     displays::apply(&cfg);

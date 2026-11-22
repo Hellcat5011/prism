@@ -791,6 +791,9 @@ impl State {
                 let mut changed = false;
                 if special != 0 {
                     changed = self.query.key(special, None, false) == Some(true);
+                } else if utf8 == "\u{16}" {
+                    // Ctrl+V: paste.
+                    changed = self.query.key(0, Some('v'), true) == Some(true);
                 } else {
                     for c in utf8.chars().filter(|c| !c.is_control()) {
                         changed |= self.query.key(0, Some(c), false) == Some(true);

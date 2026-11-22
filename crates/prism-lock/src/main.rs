@@ -532,6 +532,7 @@ impl App {
             let result = match mode {
                 Mode::Lock => {
                     if auth::authenticate(&user, &password) {
+                        unlock_keyring(&password);
                         AuthResult::Ok
                     } else {
                         AuthResult::Failed("Authentication failed".into())
@@ -1496,6 +1497,27 @@ macro_rules! ignore {
 ignore!(wl_compositor::WlCompositor, wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface, wl_output::WlOutput, ExtSessionLockManagerV1, ZwlrLayerShellV1);
 
 // ── Main ─────────────────────────────────────────────────────────────────
+
+/// Settings > Lock Screen > Unlock Keyring Too: hand the accepted password to the keyring.
+/// At most 2 s, so a stuck keyring never holds up unlocking; the copy is wiped either way.
+fn unlock_keyring(password: &str) {
+    if !prism_common::Config::load().keyring_unlock_with_lock {
+        return;
+    }
+    let mut pw = password.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = prism_common::keyring::unlock_with_password(&pw);
+        prism_common::secret::wipe(&mut pw);
+        let _ = tx.send(r);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(true)) => eprintln!("[prism-lock] keyring unlocked"),
+        Ok(Ok(false)) => eprintln!("[prism-lock] keyring still locked (its password differs from yours)"),
+        Ok(Err(e)) => eprintln!("[prism-lock] keyring: {e}"),
+        Err(_) => eprintln!("[prism-lock] keyring: no answer in time"),
+    }
+}
 
 /// `--check-auth`: read a password from the terminal and run the same PAM check as the lock.
 fn check_auth() -> ! {

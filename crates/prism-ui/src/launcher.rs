@@ -114,6 +114,19 @@ impl Query {
                 self.caret = self.len();
                 Some(false)
             }
+            // Paste: one line (line breaks and tabs become spaces).
+            (_, Some('v' | 'V')) if ctrl => {
+                let pasted = prism_common::wlclip::paste_text().unwrap_or_default();
+                let line = pasted.split(['\r', '\n', '\t']).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+                let line = line.trim();
+                if line.is_empty() {
+                    return Some(false);
+                }
+                let b = self.byte(self.caret);
+                self.text.insert_str(b, line);
+                self.caret += line.chars().count();
+                Some(true)
+            }
             (_, Some('u')) if ctrl => {
                 let changed = !self.text.is_empty();
                 self.text.clear();

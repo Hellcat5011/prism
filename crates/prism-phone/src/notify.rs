@@ -62,6 +62,10 @@ pub fn start(shared: Shared) {
                     let mut hints: HashMap<&str, Value> = HashMap::new();
                     hints.insert("urgency", Value::U8(n.urgency));
                     hints.insert("desktop-entry", Value::from("prism-phone"));
+                    let placeholder = format!("Reply to {}", n.summary);
+                    if n.actions.iter().any(|(a, _)| a == crate::plugins::notifications::INLINE_REPLY) {
+                        hints.insert("x-kde-reply-placeholder-text", Value::from(placeholder.as_str()));
+                    }
                     let r = conn.call_method(Some(DEST), PATH, Some(DEST), "Notify", &(n.app.as_str(), replaces, n.icon.as_str(), n.summary.as_str(), n.body.as_str(), actions, hints, -1i32));
                     if let Ok(id) = r.and_then(|m| m.body().deserialize::<u32>()) {
                         by_key.insert(n.key.clone(), id);
@@ -91,6 +95,14 @@ pub fn start(shared: Shared) {
                         let key = ids.lock().unwrap().get(&id).cloned();
                         if let Some(key) = key {
                             crate::plugins::on_desktop_action(&shared, &key, &action);
+                        }
+                    }
+                }
+                "NotificationReplied" => {
+                    if let Ok((id, text)) = m.body().deserialize::<(u32, String)>() {
+                        let key = ids.lock().unwrap().get(&id).cloned();
+                        if let Some(key) = key {
+                            crate::plugins::on_desktop_reply(&shared, &key, &text);
                         }
                     }
                 }

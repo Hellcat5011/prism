@@ -151,6 +151,8 @@ enum Control {
     Pills { options: &'static [(&'static str, &'static str)], get: fn(&Config) -> Vec<String>, set: fn(&mut Config, Vec<String>) },
     /// The bar's modules: drag them between left, center, right and off.
     BarModules,
+    /// Calendar feeds in the keyring (`settings_calendars.rs`): hidden until unlocked.
+    Calendars,
     /// Small print at the end of a tab (the row subtitle); not focusable, hidden in search results.
     Note,
     /// Section heading (the row title) grouping the rows after it; not focusable, hidden
@@ -222,6 +224,15 @@ pub(crate) fn guide_rows(want: &[(usize, &str)]) -> Vec<GuideRow> {
 }
 
 /// A row's subtitle; the depth status row shows the last runtime status.
+const CAL_LINE_H: f64 = 44.0;
+const CAL_GAP: f64 = 6.0;
+
+/// Height of the Calendars row's list and button.
+fn calendars_height(c: &crate::settings_calendars::Calendars) -> f64 {
+    let lines = if c.shown { c.list.len() as f64 * (CAL_LINE_H + CAL_GAP) } else { 0.0 };
+    lines + 34.0
+}
+
 /// Labels and minimum widths of a Buttons / Pills row.
 fn button_labels(r: &Row, c: &Config) -> Vec<(&'static str, f64)> {
     match &r.control {
@@ -372,7 +383,7 @@ impl Control {
             Control::Text { get, .. } | Control::Combo { get, .. } => Some(get(c)),
             Control::Pills { get, .. } => Some(get(c).join(",")),
             Control::BarModules => Some(format!("{:?}", (&c.bar.left, &c.bar.center, &c.bar.right))),
-            Control::Buttons(_) | Control::Heading | Control::Note => None,
+            Control::Buttons(_) | Control::Heading | Control::Note | Control::Calendars => None,
         }
     }
 
@@ -391,7 +402,7 @@ impl Control {
                 to.bar.center = from.bar.center.clone();
                 to.bar.right = from.bar.right.clone();
             }
-            Control::Buttons(_) | Control::Heading | Control::Note => {}
+            Control::Buttons(_) | Control::Heading | Control::Note | Control::Calendars => {}
         }
     }
 }
@@ -599,9 +610,9 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.desktop_layout.cat.visible, |c, v| c.desktop_layout.set_cat_visible(v)) },
         // ── Bar ──
         heading(2, "Calendar Events"),
-        Row { tab: 2, title: "Calendar Feeds", subtitle: "iCalendar (.ics) links, separated by spaces: Google Calendar's secret address in iCal format, a Nextcloud or iCloud share link, Outlook's ICS link, or a .ics file. Events show on the Calendar widget and in the notification centre.", visible: always,
-            control: Text { get: |c| c.calendar_feeds.join(" "), set: |c, v| { c.calendar_feeds = v.split_whitespace().map(str::to_string).collect(); true }, placeholder: "https://… .ics", browse: false } },
-        Row { tab: 2, title: "Event Reminders", subtitle: "A notification before each event with a start time.", visible: |c| !c.calendar_feeds.is_empty(),
+        Row { tab: 2, title: "Calendars", subtitle: "iCalendar (.ics) links: Google Calendar's secret address in iCal format, a Nextcloud or iCloud share link, Outlook's ICS link, or a .ics file. Their addresses are kept in your keyring, not in Prism's settings; your password shows the list. Events show on the Calendar widget and in the notification centre.", visible: always,
+            control: Calendars },
+        Row { tab: 2, title: "Event Reminders", subtitle: "A notification before each event with a start time.", visible: always,
             control: Combo { options: |_| opts(&[("Off", "0"), ("5 minutes before", "5"), ("10 minutes before", "10"), ("15 minutes before", "15"), ("30 minutes before", "30"), ("1 hour before", "60")]), get: |c| c.calendar_reminder_minutes.to_string(), set: |c, v| c.calendar_reminder_minutes = v.parse().unwrap_or(10), fonts: false } },
         heading(2, "Hot Corners"),
         Row { tab: 2, title: "Top Left Corner", subtitle: "Push the pointer into this corner of the screen to run an action. Fullscreen windows cover the corners.", visible: always,
@@ -744,11 +755,15 @@ fn rows() -> Vec<Row> {
             control: Switch(|c| c.show_lockscreen_session_controls, |c, v| c.show_lockscreen_session_controls = v) },
         note(8, THEME_FILTER_NOTE),
         heading(8, "Idle & Lock"),
+        Row { tab: 8, title: "Unlock Keyring Too", subtitle: "When the lock screen accepts your password, it also unlocks your keyring with it, so calendars and apps that keep passwords there need no second password. Works when the keyring's password is your login password (gnome-keyring).", visible: always,
+            control: Switch(|c| c.keyring_unlock_with_lock, |c, v| c.keyring_unlock_with_lock = v) },
         Row { tab: 8, title: "Lock When Idle", subtitle: "Lock the screen automatically when the system is idle.", visible: always,
             control: Switch(|c| c.manage_idle, |c, v| c.manage_idle = v) },
         Row { tab: 8, title: "Lock After (Minutes)", subtitle: "Minutes of inactivity before the screen locks.", visible: |c| c.manage_idle,
             control: Text { get: |c| c.idle_timeout.to_string(), set: |c, v| match v.trim().parse::<u32>() { Ok(n) if n >= 1 => { c.idle_timeout = n; true } _ => false }, placeholder: "5", browse: false } },
         // ── Greeter ──
+        Row { tab: 9, title: "Unlock Keyring at Login", subtitle: "Logging in through the greeter also unlocks your keyring (gnome-keyring), so calendars and apps that keep passwords there need no second password. Needs your keyring to be the \u{201c}login\u{201d} keyring with your login password: Prism renames your default keyring to it (after a backup in ~/.local/share) and adds pam_gnome_keyring to /etc/pam.d/greetd (asks for your password).", visible: always,
+            control: Switch(|c| c.keyring_unlock_at_login, |c, v| c.keyring_unlock_at_login = v) },
         Row { tab: 9, title: "Greeter Theme", subtitle: "The design of the login screen.", visible: always,
             control: Combo { options: |c| { let mut o = opts(&[("Mirror the Lock Screen", "mirror")]); o.extend(lock_theme_options(c)); o }, get: |c| shown_theme(c, &c.greeter_theme), set: |c, v| c.greeter_theme = v.to_string(), fonts: false } },
         Row { tab: 9, title: "Remember Last User", subtitle: "Pre-select the last user and session on the next boot (applies after logout).", visible: always,
@@ -1194,6 +1209,8 @@ pub struct SettingsView {
     bg_tx: Sender<(String, bool)>,
     bg_rx: Receiver<(String, bool)>,
     waker: Waker,
+    /// The Calendars row's state.
+    cals: crate::settings_calendars::Calendars,
     pending_edit_mode: bool,
     /// Row whose folder picker is open, and where its answer arrives.
     picking: Option<usize>,
@@ -1212,6 +1229,14 @@ pub struct SettingsView {
 
 impl SettingsView {
     pub fn new(config: &Config, waker: Waker) -> Self {
+        // Unlock Keyring at Login shows what greetd's PAM service does (changed outside Prism too).
+        let mut synced = config.clone();
+        let pam = prism_common::keyring::greeter_unlocks();
+        if synced.keyring_unlock_at_login != pam {
+            synced.keyring_unlock_at_login = pam;
+            let _ = synced.save();
+        }
+        let config = &synced;
         let (bg_tx, bg_rx) = std::sync::mpsc::channel();
         let (pick_tx, pick_rx) = std::sync::mpsc::channel();
         let (hide_tx, hide_rx) = std::sync::mpsc::channel();
@@ -1260,6 +1285,7 @@ impl SettingsView {
             message: None,
             bg_tx,
             bg_rx,
+            cals: crate::settings_calendars::Calendars::new(waker.clone()),
             waker,
             pending_edit_mode: false,
             picking: None,
@@ -1295,6 +1321,13 @@ impl SettingsView {
                 self.layer_request = Some(hide);
                 changed = true;
             }
+        }
+        let (cal_redraw, cal_message) = self.cals.poll();
+        if cal_redraw {
+            changed = true;
+        }
+        if let Some(m) = cal_message {
+            self.message = Some(m);
         }
         for m in self.bg_rx.try_iter() {
             self.message = Some(m);
@@ -1575,10 +1608,11 @@ impl SettingsView {
                 continue;
             }
             let sub = row_subtitle(r);
-            let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules) { list.w } else { text_w }, None) };
+            let th = 20.0 + if sub.is_empty() { 0.0 } else { 4.0 + wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: p.fg }, if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Calendars) { list.w } else { text_w }, None) };
             let ctl_h = match r.control {
                 Control::Buttons(_) | Control::Pills { .. } => th + 12.0 + flow_height(&flow(cr, &button_labels(r, &draft), &p.family, list.w)),
                 Control::BarModules => th + 12.0 + board_height(&self.config.bar),
+                Control::Calendars => th + 12.0 + calendars_height(&self.cals),
                 _ => th.max(36.0),
             };
             heights.push(ctl_h + 28.0 + if group_start[k] { GROUP_H } else { 0.0 });
@@ -1626,6 +1660,7 @@ impl SettingsView {
                 Control::Buttons(btns) => self.focus_order.extend((0..btns.len()).map(|b| Hit::Button(i, b))),
                 Control::Pills { options, .. } => self.focus_order.extend((0..options.len()).map(|b| Hit::Button(i, b))),
                 Control::Text { browse: true, .. } => self.focus_order.extend([Hit::Control(i), Hit::Browse(i)]),
+                Control::Calendars => self.focus_order.extend((0..self.cals.labels().len()).map(|b| Hit::Button(i, b))),
                 Control::Heading | Control::Note | Control::BarModules => {}
                 _ => self.focus_order.push(Hit::Control(i)),
             }
@@ -1675,7 +1710,7 @@ impl SettingsView {
             }
             let sub = row_subtitle(r);
             if !sub.is_empty() {
-                let sw = if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules) { list.w } else { text_w };
+                let sw = if matches!(r.control, Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Calendars) { list.w } else { text_w };
                 wrapped(cr, &sub, &TextStyle { family: &p.family, px: 12.0, bold: false, color: (p.fg.0, p.fg.1, p.fg.2, 0.6) }, sw, Some((list.x, ry + 24.0)));
             }
             let cx = list.x + list.w - CONTROL_W;
@@ -1777,6 +1812,32 @@ impl SettingsView {
                 Control::BarModules => {
                     let area = Rect { x: list.x, y: y + h - 14.0 - board_height(&draft.bar), w: list.w, h: board_height(&draft.bar) };
                     draw_board(cr, area, &draft.bar, &mut self.board, &p);
+                }
+                Control::Calendars => {
+                    let labels = self.cals.labels();
+                    let mut top = y + h - 14.0 - calendars_height(&self.cals);
+                    let busy = self.cals.busy;
+                    if self.cals.shown {
+                        // One line per calendar: its name and Remove.
+                        for (k, feed) in self.cals.list.iter().enumerate() {
+                            let line = Rect { x: list.x, y: top, w: list.w, h: CAL_LINE_H };
+                            fill_rounded_rect(cr, line.x, line.y, line.w, line.h, 10.0, (p.fg.0, p.fg.1, p.fg.2, 0.06));
+                            let bw = 96.0;
+                            draw_in_box(cr, &feed.name, &TextStyle { family: &p.family, px: 13.0, bold: true, color: p.fg }, line.x + 14.0, line.y, line.w - bw - 34.0, line.h, Align::Start);
+                            let br = Rect { x: line.x + line.w - bw - 6.0, y: line.y + 5.0, w: bw, h: line.h - 10.0 };
+                            let hit = Hit::Button(i, 1 + k);
+                            let bh = self.hover_fade.level(hit, self.hover == Some(hit), style);
+                            uikit::button(cr, br, &labels[1 + k], ButtonKind::Danger, bh, !busy, &p);
+                            self.hits.push((hit, br));
+                            top += CAL_LINE_H + CAL_GAP;
+                        }
+                    }
+                    let (lw, _) = crate::desktop::text::measure(cr, &labels[0], &TextStyle { family: &p.family, px: 13.0, bold: true, color: p.fg });
+                    let br = Rect { x: list.x, y: top, w: (lw + 36.0).max(140.0), h: 34.0 };
+                    let hit = Hit::Button(i, crate::settings_calendars::MAIN);
+                    let bh = self.hover_fade.level(hit, self.hover == Some(hit), style);
+                    uikit::button(cr, br, &labels[0], ButtonKind::Primary, bh, !busy, &p);
+                    self.hits.push((hit, br));
                 }
                 Control::Heading | Control::Note => {}
             }
@@ -2045,6 +2106,10 @@ impl SettingsView {
                     let action = btns[b].1;
                     return self.run_action(action);
                 }
+                if matches!(self.rows[i].control, Control::Calendars) {
+                    self.cals.press(b);
+                    return Effect::Redraw;
+                }
                 // Pills toggle on release, unless dragged to a new place.
                 if let Some(r) = self.pills.iter().find(|(row, k, _)| *row == i && *k == b).map(|(_, _, r)| *r) {
                     self.pill_drag = Some(PillDrag { row: i, b, start: (x, y), pos: (x, y), offset: (x - r.x, y - r.y), size: (r.w, r.h), moved: false });
@@ -2074,7 +2139,7 @@ impl SettingsView {
                     }
                 }
                 Control::Combo { .. } => self.combo = Some((i, Dropdown::default())),
-                Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Heading | Control::Note => {}
+                Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Calendars | Control::Heading | Control::Note => {}
             },
         }
         Effect::Redraw
@@ -2145,10 +2210,13 @@ impl SettingsView {
                         self.message = Some(("All changes saved".into(), true));
                     }
                 }
+                // Other Ctrl+letters (Ctrl+V paste, Ctrl+U clear) belong to the field being
+                // typed in: a setting, the search or a dropdown's filter.
+                Some(_) if self.editing.is_some() || self.search_focus || self.combo.is_some() => {}
                 Some(_) => return Effect::None,
                 None => {}
             }
-            if typed.is_some() {
+            if matches!(typed, Some('z' | 'y') if self.editing.is_none()) || matches!(typed, Some('f' | 's')) {
                 return Effect::Redraw;
             }
         }
@@ -2331,6 +2399,10 @@ impl SettingsView {
                 if let Control::Buttons(btns) = self.rows[i].control {
                     return self.run_action(btns[b].1);
                 }
+                if matches!(self.rows[i].control, Control::Calendars) {
+                    self.cals.press(b);
+                    return Effect::Redraw;
+                }
                 self.toggle_pill(i, b);
             }
             Some(Hit::Control(i)) => match &self.rows[i].control {
@@ -2346,7 +2418,7 @@ impl SettingsView {
                     let dd = Dropdown { hover: options(&self.config).iter().position(|(_, v)| *v == cur), ..Dropdown::default() };
                     self.combo = Some((i, dd));
                 }
-                Control::Slider { .. } | Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Heading | Control::Note => {}
+                Control::Slider { .. } | Control::Buttons(_) | Control::Pills { .. } | Control::BarModules | Control::Calendars | Control::Heading | Control::Note => {}
             },
             _ => {}
         }
@@ -2462,6 +2534,49 @@ impl SettingsView {
     // ── Changes, undo & actions ───────────────────────────────────────
 
     /// Apply one user change: persist it, record it for undo, run follow-up work.
+    /// Unlock Keyring at Login changed: rename the keyring (on) and edit greetd's PAM service
+    /// through pkexec, on a thread. When that fails or is cancelled the switch goes back.
+    fn keyring_login_follow_up(&mut self, on: bool) {
+        use prism_common::keyring;
+        let (tx, waker) = (self.bg_tx.clone(), self.waker.clone());
+        self.message = Some((if on { "Setting up the keyring for login\u{2026}" } else { "Removing the keyring from login\u{2026}" }.into(), true));
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let mut note = String::new();
+                let mut restarted = false;
+                if on {
+                    if let Some(backup) = keyring::make_login_default()? {
+                        restarted = true;
+                        note = format!(" Your keyring is now the login keyring (backup: {}).", backup.display());
+                    }
+                }
+                keyring::set_greeter_unlocks(on)?;
+                if restarted {
+                    // The daemon restarted, so the keyring is locked: unlock it now (prompt).
+                    let _ = keyring::unlock();
+                }
+                Ok(if on {
+                    format!("The greeter now unlocks your keyring at login.{note} It needs your keyring password to be your login password.")
+                } else {
+                    "The greeter no longer unlocks your keyring.".into()
+                })
+            })();
+            let msg = match result {
+                Ok(m) => (m, true),
+                Err(e) => {
+                    // Put the switch back to what the system does.
+                    let mut c = prism_common::Config::load();
+                    c.keyring_unlock_at_login = keyring::greeter_unlocks();
+                    let _ = c.save();
+                    RELOAD_CONFIG.store(true, std::sync::atomic::Ordering::SeqCst);
+                    (format!("Unlock Keyring at Login: {e}"), false)
+                }
+            };
+            let _ = tx.send(msg);
+            waker.wake();
+        });
+    }
+
     fn change(&mut self, before: Config, after: Config) {
         if self.commit(&before, &after) {
             self.undo.push(before);
@@ -2522,6 +2637,9 @@ impl SettingsView {
             return false;
         }
         self.video_follow_up(before, after);
+        if before.keyring_unlock_at_login != after.keyring_unlock_at_login {
+            self.keyring_login_follow_up(after.keyring_unlock_at_login);
+        }
         let palette_changed = before.matugen_mode != after.matugen_mode || before.matugen_scheme != after.matugen_scheme;
         self.config = merged;
         self.message = None;

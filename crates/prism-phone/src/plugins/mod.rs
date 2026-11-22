@@ -106,7 +106,9 @@ pub fn handle(core: &mut Core, id: &str, p: &Packet) {
             // {signalStrengths: {"<subscription id>": {networkType, signalStrength}}}; show the first.
             let first = p.body.get("signalStrengths").and_then(|s| s.as_object()).and_then(|o| o.values().next().cloned());
             dev.view.network = first.map(|v| PhoneNetwork {
-                kind: v.get("networkType").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
+                // The app says "Unknown" when it cannot tell (no Phone permission, no mobile
+                // data): nothing to show then.
+                kind: v.get("networkType").and_then(|t| t.as_str()).filter(|t| !t.eq_ignore_ascii_case("unknown")).unwrap_or_default().to_string(),
                 strength: v.get("signalStrength").and_then(|t| t.as_i64()).unwrap_or(0).clamp(0, 4) as i32,
             });
             core.publish();
@@ -162,6 +164,13 @@ pub fn on_desktop_action(shared: &Shared, key: &str, action: &str) {
         notifications::desktop_action(&mut core, key, action);
     } else {
         share::desktop_action(key, action);
+    }
+}
+
+/// The user typed a reply into one of our desktop notifications.
+pub fn on_desktop_reply(shared: &Shared, key: &str, text: &str) {
+    if key.starts_with("notif:") {
+        notifications::desktop_reply(&mut shared.lock().unwrap(), key, text);
     }
 }
 

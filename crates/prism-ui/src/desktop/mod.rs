@@ -1108,6 +1108,19 @@ impl Desk {
                         self.cal.view = CalView::Days;
                         self.mark(WidgetId::Calendar, qh);
                     }
+                    Hit::CalDay(d) => {
+                        self.cal.view = CalView::Day(d);
+                        self.mark(WidgetId::Calendar, qh);
+                    }
+                    Hit::CalBack => {
+                        self.cal.view = CalView::Days;
+                        self.mark(WidgetId::Calendar, qh);
+                    }
+                    Hit::CalToday => {
+                        let now = LocalTime::now();
+                        self.cal = CalState { year: now.year, month: now.month0, view: CalView::Days };
+                        self.mark(WidgetId::Calendar, qh);
+                    }
                     Hit::MediaPrev => {
                         let _ = self.dbus.cmds.send(DbusCmd::Media("Previous"));
                     }

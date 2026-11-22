@@ -66,10 +66,15 @@ pub fn handle(core: &mut Core, id: &str, p: &Packet) {
     core.publish();
 }
 
+/// The standard action key for a reply typed into the notification itself.
+pub const INLINE_REPLY: &str = "inline-reply";
+
 fn post(key: &str, phone: &str, n: &PhoneNotification) {
     let mut actions: Vec<(String, String)> = n.actions.iter().map(|a| (format!("a:{a}"), a.clone())).collect();
     if !n.reply_id.is_empty() {
-        actions.insert(0, ("reply".into(), "Reply".into()));
+        // Prism's notifications answer this one with a reply field in the popup
+        // (NotificationReplied); the text goes back to the phone.
+        actions.insert(0, (INLINE_REPLY.into(), "Reply".into()));
     }
     notify::show(Note {
         key: key.to_string(),
@@ -134,13 +139,28 @@ pub fn dismiss(core: &mut Core, id: &str, nid: &str) -> Result<Option<String>, S
 /// A desktop action on a phone notification (`notif:<device>:<id>`).
 pub fn desktop_action(core: &mut Core, key: &str, action: &str) {
     let Some((dev, nid)) = key.strip_prefix("notif:").and_then(|r| r.split_once(':')) else { return };
-    if action == "reply" {
-        // Replies are typed in the Phone card.
+    if action == "reply" || action == INLINE_REPLY {
+        // A notification server without inline replies sends the action itself: reply in
+        // the Phone card then.
         open_card_for_reply();
         return;
     }
     if let Some(a) = action.strip_prefix("a:") {
         let _ = self::action(core, dev, nid, a);
+    }
+}
+
+/// Text typed into the reply field of one of our phone notifications: send it to the phone.
+pub fn desktop_reply(core: &mut Core, key: &str, text: &str) {
+    let Some((dev, nid)) = key.strip_prefix("notif:").and_then(|r| r.split_once(':')) else { return };
+    let reply_id = core.devices.get(dev).and_then(|d| d.view.notifications.iter().find(|n| n.id == nid)).map(|n| n.reply_id.clone());
+    match reply_id {
+        Some(r) if !r.is_empty() => {
+            if let Err(e) = reply(core, dev, &r, text) {
+                eprintln!("[prism-phoned] reply: {e}");
+            }
+        }
+        _ => eprintln!("[prism-phoned] reply: that notification is gone from the phone"),
     }
 }
 

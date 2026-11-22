@@ -47,17 +47,46 @@ pub fn snapshot() -> Result<(), String> {
         return Ok(());
     }
     let dir = history_dir();
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    crate::clipboard::private_dir(&dir).map_err(|e| e.to_string())?;
     let mut ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // Two snapshots within a second: keep both.
     while dir.join(format!("{ts}.json")).exists() {
         ts += 1;
     }
-    fs::write(dir.join(format!("{ts}.json")), current).map_err(|e| e.to_string())?;
+    crate::clipboard::write_private(&dir.join(format!("{ts}.json")), &current).map_err(|e| e.to_string())?;
     for (_, old) in list().into_iter().skip(KEEP) {
         let _ = fs::remove_file(old);
     }
     Ok(())
+}
+
+/// Make the snapshots and their folder owner-only (older versions wrote them world-readable).
+pub fn tighten() {
+    let dir = history_dir();
+    if dir.is_dir() {
+        let _ = crate::clipboard::private_dir(&dir);
+        for (_, p) in list() {
+            let _ = fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+        }
+    }
+}
+
+/// Empty a setting in every snapshot (a secret that moved elsewhere must not stay in old copies).
+pub fn forget_key(key: &str) {
+    for (_, p) in list() {
+        let Ok(bytes) = fs::read(&p) else { continue };
+        let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        let Some(obj) = v.as_object_mut() else { continue };
+        let empty = match obj.get(key) {
+            Some(serde_json::Value::Array(a)) if !a.is_empty() => serde_json::Value::Array(Vec::new()),
+            Some(serde_json::Value::String(s)) if !s.is_empty() => serde_json::Value::String(String::new()),
+            _ => continue,
+        };
+        obj.insert(key.to_string(), empty);
+        if let Ok(out) = serde_json::to_vec_pretty(&v) {
+            let _ = crate::clipboard::write_private(&p, &out);
+        }
+    }
 }
 
 /// The config saved in a snapshot.
@@ -84,6 +113,8 @@ pub fn export(dest: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| format!("tar: {e}"))?;
     if out.status.success() {
+        // A backup holds the whole config: owner only.
+        let _ = fs::set_permissions(dest, std::os::unix::fs::PermissionsExt::from_mode(0o600));
         Ok(())
     } else {
         Err(format!("Export failed: {}", String::from_utf8_lossy(&out.stderr).trim()))

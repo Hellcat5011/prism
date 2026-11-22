@@ -77,6 +77,8 @@ enum Hit {
     Next,
     Skip,
     Dot(usize),
+    /// The last page's "Copy" beside the install command for missing programs.
+    CopyDeps,
 }
 
 pub struct GuideView {
@@ -95,6 +97,10 @@ pub struct GuideView {
     picking: Option<(usize, std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>)>,
     /// Lower the card while the dialog is up (true), raise it again (false).
     layer_request: Option<bool>,
+    /// Programs and services Prism uses that are missing (checked when the last page opens).
+    missing: Vec<&'static prism_common::deps::Dep>,
+    /// When the install command was copied.
+    copied: Option<Instant>,
 }
 
 /// Marks the guide as seen.
@@ -122,6 +128,8 @@ impl GuideView {
             waker,
             picking: None,
             layer_request: None,
+            missing: Vec::new(),
+            copied: None,
         };
         v.go(0);
         v
@@ -132,6 +140,9 @@ impl GuideView {
         self.rows = guide_rows(PAGES[self.page].rows);
         self.shown_at = Instant::now();
         self.cfg = Config::load();
+        if PAGES[self.page].art == Art::Done {
+            self.missing = prism_common::deps::missing();
+        }
     }
 
     /// Change the config like Settings does: load, set, save (prismd and the desktop reload it).
@@ -569,6 +580,63 @@ impl CardView for GuideView {
         }
         self.rows = rows;
 
+        // The last page: what is still missing, and the command that installs it.
+        if page.art == Art::Done && !self.missing.is_empty() {
+            use prism_common::deps::Level;
+            let bottom = card.y + card.h - PAD - 60.0;
+            cb::draw_pango_text(cr, x, y, "Not installed yet", &f(15.0, "Semi-Bold"), fg, None);
+            y += 26.0;
+            let cmd = prism_common::deps::pacman_command(&self.missing).filter(|_| prism_common::deps::in_path("pacman"));
+            // Room for the command box under the list.
+            let list_bottom = bottom - if cmd.is_some() { 86.0 } else { 30.0 };
+            let mut shown = 0;
+            for d in &self.missing {
+                if y + 22.0 > list_bottom {
+                    break;
+                }
+                let (tag, colour) = match d.level {
+                    Level::Needed => ("needed", (1.0, 0.45, 0.45, 1.0)),
+                    Level::Recommended => ("recommended", (1.0, 0.75, 0.35, 1.0)),
+                    Level::Optional => ("optional", with_a(fg, 0.55)),
+                };
+                let (tw, _) = cb::measure_pango_text(cr, d.name, &f(13.0, "Semi-Bold"), 400, Some(1));
+                let (gw, _) = cb::measure_pango_text(cr, tag, &f(11.0, "Semi-Bold"), 200, Some(1));
+                cb::draw_pango_text(cr, x, y, d.name, &f(13.0, "Semi-Bold"), fg, None);
+                cb::draw_pango_text(cr, x + tw as f64 + 8.0, y + 1.0, tag, &f(11.0, "Semi-Bold"), colour, None);
+                let dx = x + tw as f64 + gw as f64 + 16.0;
+                cb::draw_pango_text(cr, dx, y, d.what, &f(13.0, ""), with_a(fg, 0.65), Some((x + w - dx).max(40.0) as i32));
+                y += 22.0;
+                shown += 1;
+            }
+            if shown < self.missing.len() {
+                cb::draw_pango_text(cr, x, y, &format!("and {} more", self.missing.len() - shown), &f(13.0, ""), with_a(fg, 0.55), None);
+                y += 22.0;
+            }
+            y += 8.0;
+            if let Some(cmd) = cmd {
+                let bw = 86.0;
+                let field = Rect { x, y, w: w - bw - 10.0, h: 34.0 };
+                cb::fill_rounded_rect(cr, field.x, field.y, field.w, field.h, 10.0, with_a(fg, 0.06));
+                cb::draw_pango_text(cr, field.x + 10.0, field.y + 8.0, &cmd, "Monospace 11px", with_a(fg, 0.85), Some((field.w - 20.0) as i32));
+                let b = Rect { x: x + w - bw, y, w: bw, h: 34.0 };
+                let hover = self.hovers.level(Hit::CopyDeps, b.contains(self.pointer.0, self.pointer.1), style);
+                let copied = self.copied.is_some_and(|t| t.elapsed().as_secs_f64() < 2.0);
+                uikit::button(cr, b, if copied { "Copied" } else { "Copy" }, ButtonKind::Outline, hover, true, &p);
+                new_hits.push((Hit::CopyDeps, b));
+                if copied {
+                    crate::ui::keep_animating();
+                }
+                y += 44.0;
+            }
+            let aur: Vec<&str> = self.missing.iter().filter(|d| d.arch.contains("AUR")).map(|d| d.arch.split_whitespace().next().unwrap_or(d.name)).collect();
+            let note = if aur.is_empty() {
+                "prism-ctl deps lists them in a terminal.".to_string()
+            } else {
+                format!("From the AUR: {} (yay -S {0}). prism-ctl deps lists all of them in a terminal.", aur.join(" "))
+            };
+            cb::draw_pango_text_wrapped(cr, x, y, &note, &f(12.0, ""), with_a(fg, 0.55), w as i32, Some(2));
+        }
+
         // Bottom: page dots, Skip, Back, Next.
         let by = card.y + card.h - PAD - 42.0;
         let dots_w = PAGES.len() as f64 * 14.0;
@@ -609,6 +677,12 @@ impl CardView for GuideView {
             Hit::Back => {}
             Hit::Skip => return self.finish(),
             Hit::Dot(k) => self.go(k),
+            Hit::CopyDeps => {
+                if let Some(cmd) = prism_common::deps::pacman_command(&self.missing) {
+                    prism_common::wlclip::copy_text(&cmd, false);
+                    self.copied = Some(Instant::now());
+                }
+            }
             Hit::Row(i) => {
                 if let Some(GuideControl::Switch(get, set)) = self.rows.get(i).map(|r| &r.control) {
                     let (get, set) = (*get, *set);

@@ -64,6 +64,12 @@ pub enum Hit {
     CalYearTitle,
     CalPickMonth(u32),
     CalPickYear(i32),
+    /// A day in the month grid: its events.
+    CalDay(u32),
+    /// The day page's way back to the month.
+    CalBack,
+    /// Back to today's month (shown away from it).
+    CalToday,
     MediaPrev,
     MediaPlayPause,
     MediaNext,
@@ -184,6 +190,8 @@ pub enum CalView {
     Days,
     Months,
     Years,
+    /// The events of one day (of `CalState`'s month).
+    Day(u32),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -206,16 +214,38 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
     let (ix, iy, iw, ih) = (m, m, w - 2.0 * m, h - 2.0 * m);
     let family = look.family_for(&p.font_family);
 
-    // Header: [<]  Month  Year  [>]
+    // Header: [<]  Month  Year  [Today] [>]
     let header_h = (30.0 * sf).round().max(22.0);
     let chev_px = (16.0 * sf).round().max(11.0);
     let title_px = (16.0 * sf).round().max(12.0);
+    if let CalView::Day(day) = cal.view {
+        draw_cal_day(cr, Rect { x: ix, y: iy, w: iw, h: ih }, sf, &family, look, cal.year, cal.month, day, header_h, &mut hits);
+        return hits;
+    }
+    // Space the chevrons take at each end.
+    let mut left = ix;
+    let mut right = ix + iw;
     if cal.view == CalView::Days {
         let st = TextStyle { family: ICON_FONT, px: chev_px, bold: false, color: look.fg };
         let (x, y, tw, th) = draw_in_box(cr, "\u{f053}", &st, ix, iy, iw, header_h, Align::Start);
         hits.push((Hit::CalPrev, pad(Rect { x, y, w: tw, h: th }, 6.0)));
+        left = x + tw + (6.0 * sf).round();
         let (x, y, tw, th) = draw_in_box(cr, "\u{f054}", &st, ix, iy, iw, header_h, Align::End);
         hits.push((Hit::CalNext, pad(Rect { x, y, w: tw, h: th }, 6.0)));
+        right = x - (6.0 * sf).round();
+    }
+    // Away from this month: a small Today button before the right chevron.
+    if (cal.year, cal.month) != (today.year, today.month0) {
+        let st = TextStyle { family: &family, px: (11.0 * sf).round().max(9.0), bold: true, color: look.background };
+        let (tw, th) = super::text::measure(cr, "Today", &st);
+        let b = Rect { x: right - tw - (16.0 * sf).round(), y: iy + (header_h - th - 6.0) / 2.0, w: tw + (16.0 * sf).round(), h: th + 6.0 };
+        fill_rounded_rect(cr, b.x, b.y, b.w, b.h, b.h / 2.0, look.primary);
+        draw_in_box(cr, "Today", &st, b.x, b.y, b.w, b.h, Align::Center);
+        hits.push((Hit::CalToday, pad(b, 3.0)));
+        right = b.x - (6.0 * sf).round();
+        if cal.view != CalView::Days {
+            left = ix;
+        }
     }
     let tst = TextStyle { family: &family, px: title_px, bold: true, color: look.fg };
     let month = MONTHS_FULL[cal.month as usize % 12];
@@ -224,7 +254,8 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
     let (mw, _) = super::text::measure(cr, month, &tst);
     let (yw, _) = super::text::measure(cr, &year, &tst);
     let total = mw + spacing + yw;
-    let mx = ix + (iw - total) / 2.0;
+    // Centred on the widget when there is room, else in the space between the buttons.
+    let mx = (ix + (iw - total) / 2.0).max(left).min(right - total).max(left);
     let (x, y, tw, th) = draw_in_box(cr, month, &tst, mx, iy, mw + 1.0, header_h, Align::Start);
     hits.push((Hit::CalMonthTitle, pad(Rect { x, y, w: tw, h: th }, 4.0)));
     let (x, y, tw, th) = draw_in_box(cr, &year, &tst, mx + mw + spacing, iy, yw + 1.0, header_h, Align::Start);
@@ -267,9 +298,10 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
                 }
                 let color = if is_today { look.background } else { look.fg };
                 draw_in_box(cr, &day.to_string(), &TextStyle { family: &family, px, bold: is_today, color }, x, y, cell_w, cell_h, Align::Center);
+                hits.push((Hit::CalDay(day as u32), Rect { x, y, w: cell_w, h: cell_h }));
                 // A dot under days with calendar events.
                 if events & (1 << day) != 0 {
-                    let r = (2.0 * sf).max(1.5);
+                    let r = (2.8 * sf).max(2.0);
                     let dy = (cell_h / 2.0 + px * 0.62).min(cell_h - r - 1.0);
                     unsafe {
                         cairo_new_path(cr);
@@ -280,6 +312,7 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
                 }
             }
         }
+        CalView::Day(_) => {}
         CalView::Months | CalView::Years => {
             let gh = (iy + ih) - gy;
             let sp = (8.0 * sf).round().max(4.0);
@@ -306,6 +339,76 @@ pub fn draw_calendar(cr: *mut Cairo, w: f64, h: f64, p: &WidgetPosition, look: &
         }
     }
     hits
+}
+
+const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/// The calendar's day page: a way back, the date, and that day's events.
+#[allow(clippy::too_many_arguments)]
+fn draw_cal_day(cr: *mut Cairo, r: Rect, sf: f64, family: &str, look: &Look, year: i32, month0: u32, day: u32, header_h: f64, hits: &mut Hits) {
+    let muted = (look.fg.0, look.fg.1, look.fg.2, look.fg.3 * 0.65);
+    // Back: a pill with a chevron and "Calendar".
+    let bst = TextStyle { family, px: (12.0 * sf).round().max(10.0), bold: true, color: look.fg };
+    let ist = TextStyle { family: ICON_FONT, px: (11.0 * sf).round().max(9.0), bold: false, color: look.fg };
+    let (lw, lh) = super::text::measure(cr, "Calendar", &bst);
+    let (iw_, _) = super::text::measure(cr, "\u{f053}", &ist);
+    let padx = (10.0 * sf).round();
+    let gap = (6.0 * sf).round();
+    let b = Rect { x: r.x, y: r.y + (header_h - lh - 8.0) / 2.0, w: padx * 2.0 + iw_ + gap + lw, h: lh + 8.0 };
+    let tint = (look.fg.0, look.fg.1, look.fg.2, 0.12);
+    fill_rounded_rect(cr, b.x, b.y, b.w, b.h, b.h / 2.0, tint);
+    draw_in_box(cr, "\u{f053}", &ist, b.x + padx, b.y, iw_ + 1.0, b.h, Align::Start);
+    draw_in_box(cr, "Calendar", &bst, b.x + padx + iw_ + gap, b.y, lw + 1.0, b.h, Align::Start);
+    hits.push((Hit::CalBack, pad(b, 3.0)));
+
+    // The date, beside it.
+    let wd = WEEKDAYS[weekday_of(year, month0 + 1, day) as usize % 7];
+    let this_year = crate::cal_events::local(crate::cal_events::day_start(year, month0, day)).0 == LocalTime::now().year;
+    let title = if this_year { format!("{wd} {day} {}", MONTHS_SHORT[month0 as usize % 12]) } else { format!("{wd} {day} {} {year}", MONTHS_SHORT[month0 as usize % 12]) };
+    let tst = TextStyle { family, px: (15.0 * sf).round().max(11.0), bold: true, color: look.fg };
+    let tx = b.x + b.w + gap * 1.5;
+    draw_in_box(cr, &title, &tst, tx, r.y, (r.x + r.w - tx).max(10.0), header_h, Align::End);
+
+    // The events.
+    let events = crate::cal_events::on_day(year, month0, day);
+    let mut y = r.y + header_h + (10.0 * sf).round();
+    let bottom = r.y + r.h;
+    let px = (13.0 * sf).round().max(10.0);
+    let small = (11.5 * sf).round().max(9.0);
+    if events.is_empty() {
+        draw_in_box(cr, "Nothing on this day", &TextStyle { family, px, bold: false, color: muted }, r.x, y, r.w, px * 2.0, Align::Center);
+        return;
+    }
+    let (from, to) = (crate::cal_events::day_start(year, month0, day), crate::cal_events::day_start(year, month0, day + 1));
+    let row_h = px * 1.35 + small * 1.35 + (8.0 * sf).round();
+    for (i, o) in events.iter().enumerate() {
+        // Room for this row, and for "+N more" if others follow.
+        let more_h = if i + 1 < events.len() { small * 1.6 } else { 0.0 };
+        if y + row_h + more_h > bottom {
+            let left = events.len() - i;
+            draw_in_box(cr, &format!("+{left} more"), &TextStyle { family, px: small, bold: false, color: muted }, r.x, y, r.w, small * 1.4, Align::Start);
+            break;
+        }
+        let when = if o.all_day || (o.start <= from && o.end >= to) {
+            "All day".to_string()
+        } else if o.start < from {
+            format!("Until {}", crate::cal_events::clock(o.end))
+        } else if o.end > to {
+            format!("From {}", crate::cal_events::clock(o.start))
+        } else if o.end > o.start {
+            format!("{} \u{2013} {}", crate::cal_events::clock(o.start), crate::cal_events::clock(o.end))
+        } else {
+            crate::cal_events::clock(o.start)
+        };
+        let detail = if o.location.is_empty() { when } else { format!("{when} \u{b7} {}", o.location) };
+        let bar = (3.0 * sf).max(2.0);
+        fill_rounded_rect(cr, r.x, y + 2.0, bar, row_h - (8.0 * sf).round() - 4.0, bar / 2.0, look.primary);
+        let tx = r.x + bar + (8.0 * sf).round();
+        let summary = if o.summary.trim().is_empty() { "(No title)" } else { o.summary.trim() };
+        draw_in_box(cr, summary, &TextStyle { family, px, bold: true, color: look.fg }, tx, y, r.x + r.w - tx, px * 1.35, Align::Start);
+        draw_in_box(cr, &detail, &TextStyle { family, px: small, bold: false, color: muted }, tx, y + px * 1.35, r.x + r.w - tx, small * 1.35, Align::Start);
+        y += row_h;
+    }
 }
 
 // ── Media player ──────────────────────────────────────────────────────────
@@ -889,6 +992,48 @@ mod tests {
         assert_eq!(weekday_of(2000, 1, 1), 6); // Saturday
         assert_eq!(days_in_month(2024, 2), 29);
         assert_eq!(days_in_month(2026, 2), 28);
+    }
+
+    /// `PRISM_CAL_RENDER_DIR=<dir> cargo test --release -p prism-ui calendar_pages -- --ignored`:
+    /// the calendar widget's month, day page and another month as PNG, with this user's events.
+    #[test]
+    #[ignore]
+    fn calendar_pages() {
+        use crate::cairo_backend::*;
+        let dir = std::env::var("PRISM_CAL_RENDER_DIR").expect("PRISM_CAL_RENDER_DIR");
+        let cfg = prism_common::config::Config::load();
+        let theme = prism_common::theme::Theme::load();
+        let look = Look::new(&crate::ui::Style::new(&cfg, &theme), &theme);
+        let p = cfg.desktop_layout.calendar.clone();
+        let today = LocalTime::now();
+        // The first month from now with an event, and that event's day.
+        let first = crate::cal_events::snapshot().iter().map(|o| crate::cal_events::local(o.start)).find(|l| (l.0, l.1) >= (today.year, today.month0));
+        let (ey, em, ed) = first.map(|l| (l.0, l.1, l.2)).unwrap_or((today.year, today.month0, today.mday));
+        let pages = [
+            ("month-now", CalState { year: today.year, month: today.month0, view: CalView::Days }),
+            ("month-events", CalState { year: ey, month: em, view: CalView::Days }),
+            ("day", CalState { year: ey, month: em, view: CalView::Day(ed) }),
+            ("months", CalState { year: ey, month: em, view: CalView::Months }),
+        ];
+        let (w, h) = (360.0, 320.0);
+        for (name, cal) in pages {
+            unsafe {
+                let surf = cairo_image_surface_create(0, w as i32, h as i32);
+                let cr = cairo_create(surf);
+                let hits = draw_calendar(cr, w, h, &p, &look, &cal, &today);
+                let path = std::ffi::CString::new(format!("{dir}/calendar-{name}.png")).unwrap();
+                cairo_surface_write_to_png(surf, path.as_ptr());
+                cairo_destroy(cr);
+                cairo_surface_destroy(surf);
+                // The day page has its way back instead of Today.
+                if matches!(cal.view, CalView::Day(_)) {
+                    assert!(hits.iter().any(|(h, _)| *h == Hit::CalBack), "{name}: back button");
+                } else {
+                    let away = (cal.year, cal.month) != (today.year, today.month0);
+                    assert_eq!(hits.iter().any(|(h, _)| *h == Hit::CalToday), away, "{name}: Today button");
+                }
+            }
+        }
     }
 }
 

@@ -351,9 +351,22 @@ pub struct Config {
     pub replay_enabled: bool,
     #[serde(default = "default_replay_seconds")]
     pub replay_seconds: u32,
-    /// Calendar feeds: iCalendar (.ics) URLs (https or webcal) or local files.
+    /// Old place of the calendar feeds (iCalendar URLs or files): prismd moves them into the
+    /// keyring and empties this.
     #[serde(default)]
     pub calendar_feeds: Vec<String>,
+    /// Bumped by Settings when calendars in the keyring were added or removed (prismd then
+    /// reads them again). The addresses themselves are only in the keyring
+    /// (`prism_common::keyring`); `calendar_feeds` is only read once, to move old entries there.
+    #[serde(default)]
+    pub calendars_changed: u64,
+    /// The lock screen also unlocks the default keyring with the password it accepted.
+    #[serde(default)]
+    pub keyring_unlock_with_lock: bool,
+    /// The greeter's login also unlocks the keyring (pam_gnome_keyring in /etc/pam.d/greetd,
+    /// set up by Settings; the file is the truth, this follows it).
+    #[serde(default)]
+    pub keyring_unlock_at_login: bool,
     /// Remind this many minutes before timed events (0 = no reminders).
     #[serde(default = "default_calendar_reminder")]
     pub calendar_reminder_minutes: u32,
@@ -1133,6 +1146,9 @@ impl Default for Config {
             replay_enabled: false,
             replay_seconds: default_replay_seconds(),
             calendar_feeds: Vec::new(),
+            calendars_changed: 0,
+            keyring_unlock_with_lock: false,
+            keyring_unlock_at_login: false,
             calendar_reminder_minutes: default_calendar_reminder(),
             focus_allowed_apps: Vec::new(),
             focus_on_screen_share: false,
@@ -1253,7 +1269,8 @@ impl Config {
         let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
         tmp_name.push(format!(".{}.tmp", std::process::id()));
         let tmp = path.with_file_name(tmp_name);
-        fs::write(&tmp, serialized)?;
+        // Owner only (it may hold names, paths and other personal settings).
+        crate::clipboard::write_private(&tmp, serialized.as_bytes())?;
         if let Err(e) = fs::rename(&tmp, path) {
             let _ = fs::remove_file(&tmp);
             return Err(e);

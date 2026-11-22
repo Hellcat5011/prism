@@ -33,8 +33,8 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
   with optional desktop audio and microphone (PipeWire); a small indicator shows the time and a Stop button.
 - **Phone sync**: pairs with the official [KDE Connect](https://kdeconnect.kde.org/) Android app (no
   `kdeconnectd` needed). Phone battery and status, its media with controls and album art, the PC's players on the
-  phone (multimedia control), clipboard sync both ways, phone notifications with reply and dismiss, find my phone, files both ways, and the phone as a remote
-  mouse and keyboard. Shown in a Phone card, a desktop widget and a Settings tab.
+  phone (multimedia control), clipboard sync both ways, phone notifications (reply right in the popup, dismiss),
+  find my phone, files both ways, and the phone as a remote mouse and keyboard. Shown in a Phone card, a desktop widget and a Settings tab.
 - **Desktop portal**: screenshots, colour picking and screen sharing for apps (browsers, OBS, Discord) through
   `xdg-desktop-portal`, with a picker for the screen or window to share. Replaces `xdg-desktop-portal-wlr`.
 - **System prompts**: polkit and NetworkManager password prompts, and gnome-keyring's unlock prompts (replaces
@@ -51,14 +51,18 @@ cairo/pango straight into Wayland layer surfaces, runs one resident UI process a
 - **Copy text** from the screen (OCR with tesseract) in the screenshot overlay.
 - **Download manager**: downloads over several connections (added on the fly, fewer when a server limits them),
   pause and resume even across restarts, a queue and a speed limit (`prism-ctl download`, Settings > Downloads).
-  The **Prism Downloads** Firefox extension (`extension/`) hands browser downloads to it, has a "Download with
-  Prism" link menu and a popup with the list; it talks to Prism through `prism-native-host` (native messaging,
-  no open port). It also finds the videos a page plays (HLS streams with their qualities, video files) and puts
-  a "Download video" button over them, like Brisk; streams are saved as MP4. A card asks to confirm each
-  browser download (name, folder) first. The **Downloads card** (`prism-ctl download toggle`, or click the
-  pill) lists Prism's downloads with their controls. Load the extension from `about:debugging` > This Firefox >
-  Load Temporary Add-on (`extension/manifest.json`); `deploy/package-extension.sh` builds the `.xpi` to have it
-  signed on addons.mozilla.org so it stays installed.
+  A pill at the top of the screen shows the real progress in percent; a failed download says why, with Retry
+  in its notification. The **Downloads card** (`prism-ctl download toggle`, or click the pill) lists Prism's
+  downloads with their controls. See [Firefox extension](#firefox-extension-prism-downloads).
+- **Prism Downloads for Firefox** (`extension/`): hands browser downloads to Prism (a card confirms the name and
+  folder first), adds "Download with Prism" to the link menu and lists downloads in its popup. It finds the videos a
+  page plays (HLS streams with their qualities, whole video files) and puts a "Download video" button over them,
+  like Brisk; streams are saved as MP4, with the headers the page used so stream hosts do not refuse them. The
+  switch in its popup turns the whole extension off. It talks to Prism through native messaging
+  (`prism-native-host`), not an open port.
+- **First-time setup guide**: a short tour on first start with the main options (look, wallpaper, desktop, lock,
+  notifications, night light, capture, downloads, phone), ending with any programs Prism uses that are not
+  installed yet and the command to install them (`prism-ctl setup` runs it again).
 - **Timer and stopwatch** in the Control Centre (`prism-ctl timer`), **weather** and **notes** desktop widgets,
   **low battery warnings** and **silent mode on a schedule**.
 - **Motion**: cards open and close on springs (and shrink back to the button they were opened from), rows fade in
@@ -201,25 +205,43 @@ Apps launched from Prism run in their own systemd scope (`app.slice`), so restar
 - **Libraries**: wayland-client, xkbcommon, cairo, pango/pangocairo, gdk-pixbuf, GTK 3 (`gdk`), PAM, FFmpeg
   (libavcodec, libavformat, libavutil, libswscale, libswresample) and PipeWire for the recorder, and libclang at
   build time (bindings for FFmpeg and PipeWire).
-- **Runtime tools** (each feature needs only its own):
+- **Runtime programs and services**. Each feature needs only its own. `prism-ctl deps` lists what is missing on
+  this computer (the installer runs it at the end and offers to install it, and the setup guide's last page shows
+  it). Packages are named as on Arch Linux:
 
-| Tool | Used for |
-|---|---|
-| `wpctl` / `pactl` | Volume, audio outputs |
-| `power-profiles-daemon` | Power profile button in the Control Centre (optional) |
-| `brightnessctl` or `ddcutil` | Brightness (laptop backlight or external monitor) |
-| `matugen` | Palette from the wallpaper |
-| `awww` or `swww` | Only when chosen instead of the built-in wallpaper daemon |
-| `bluez-obex` | Receiving files over Bluetooth (Settings > Connections) |
-| `plocate` | File search (`pkexec updatedb` to rebuild the index) |
-| `wtype` | Pasting emoji into the focused app |
-| `NetworkManager`, `BlueZ` | Network and Bluetooth pages |
-| `python3` | Keybind parsers; wallpaper depth (installs its own venv) |
-| `greetd`, `cage` | Greeter (optional) |
-| `tesseract` + English data | Copy text in the screenshot overlay (the installer offers to install it) |
-| `pw-dump` (PipeWire) | Per-app volume and the privacy indicator |
-| `checkupdates` (pacman-contrib) | Update notifications |
-| KDE Connect app on the phone | Phone sync (open UDP 1716 and TCP 1714-1764 in the firewall) |
+| Program / service | Package | Used for |
+|---|---|---|
+| **Needed** | | |
+| `wpctl` | `wireplumber` | Volume and microphone, the sound OSD |
+| `pw-dump` | `pipewire` | Per-app mixer, Sound page, privacy indicator |
+| `xdg-open` | `xdg-utils` | Opening files, folders and links |
+| `gsettings` | `glib2` | Following the icon theme |
+| `fc-list` | `fontconfig` | Font lists in Settings |
+| xdg-desktop-portal | `xdg-desktop-portal` | Screen sharing, screenshots for apps, folder pickers |
+| **Recommended** | | |
+| `matugen` | `matugen-bin` (AUR) | Palette from the wallpaper |
+| NetworkManager | `networkmanager` | Wi-Fi, Ethernet and VPN pages |
+| BlueZ | `bluez bluez-utils` | Bluetooth page (when the computer has Bluetooth) |
+| UPower | `upower` | Battery levels and low battery warnings |
+| power-profiles-daemon | `power-profiles-daemon` | Power profiles, game mode |
+| UDisks2 | `udisks2` | Mounting and ejecting USB drives |
+| Secret Service | `gnome-keyring` | Calendar addresses in the keyring (and app passwords) |
+| `pkexec` | `polkit` | Changes that need your password (Prism is the polkit agent) |
+| `ffmpeg` | `ffmpeg` | Trimming recordings, GIFs, joining downloaded videos |
+| `curl` | `curl` | Weather, online calendars, sunset times |
+| `pactl` | `libpulse` | Choosing sound devices and ports |
+| `brightnessctl` | `brightnessctl` | Screen brightness (laptops) |
+| **Optional** | | |
+| `ddcutil` | `ddcutil` | Brightness of external monitors |
+| `tesseract` | `tesseract tesseract-data-eng` | Copy text from the screen |
+| `wtype` | `wtype` | Typing an emoji from the emoji picker |
+| `plocate` | `plocate` | Finding files in Search (`pkexec updatedb` rebuilds the index) |
+| `checkupdates` | `pacman-contrib` | Counting package updates |
+| obexd | `bluez-obex` | Receiving files over Bluetooth |
+| `python3` | `python` | Keybind viewer, wallpaper depth (installs its own venv) |
+| `greetd`, `cage` | `greetd cage` | The login screen (greeter; the installer checks them when you set it up) |
+| `awww` or `swww` | | Only when chosen instead of the built-in wallpaper daemon |
+| KDE Connect app on the phone | | Phone sync (open UDP 1716 and TCP 1714-1764 in the firewall) |
 
 Clipboard (ext-data-control), media control (MPRIS, `prism-ctl media play-pause|next|previous|stop` for media
 keys), notifications and wallpaper resizing are built in; wl-clipboard, playerctl, libnotify and ImageMagick
@@ -239,10 +261,15 @@ systemctl --user enable --now prismd
 ```
 
 The installer checks the build dependencies, builds the workspace and installs:
-- the binaries (`prismd`, `prism-ui`, `prism-ctl`, `prism-lock`, `prism-phoned`, `prism-rec`) to `~/.local/bin/`;
+- the binaries (`prismd`, `prism-ui`, `prism-ctl`, `prism-native-host`, `prism-lock`, `prism-phoned`, `prism-rec`,
+  `prism-video`) to `~/.local/bin/`;
 - helper scripts to `~/.local/share/prism/scripts/`;
 - the `prism-ctl(1)` man page to `~/.local/share/man/man1/`;
 - `prismd.service` to `~/.config/systemd/user/`.
+
+At the end it checks the programs and services Prism uses at run time (the table above), lists what is missing
+and offers to install it with `pacman`. The first time Prism starts, the setup guide opens by itself; its last
+page lists anything still missing.
 
 Run from a terminal, it asks whether to add `~/.local/bin` to your shell's PATH when it is missing (so `prism-ctl`
 works from a terminal and from compositor keybinds), whether to install the lock screen's PAM service, and, on the
@@ -275,6 +302,15 @@ launch those apps from the compositor config (`exec-once`, `dex -a`), or they ru
 Add the template in `deploy/matugen/prism-colors.json` to `~/.config/matugen/config.toml` as
 `[templates.prism-rust]`, writing to `~/.config/prism/colors.json`.
 
+### Firefox extension (Prism Downloads)
+
+Install **Prism Downloads** from addons.mozilla.org, or build it yourself: `deploy/package-extension.sh` writes
+`target/extension/prism-downloads-<version>.xpi` (signing steps in the script), and `about:debugging` > This
+Firefox > Load Temporary Add-on (`extension/manifest.json`) loads it until Firefox restarts. Nothing else to set
+up: `prismd` registers `prism-native-host` with Firefox and LibreWolf when they are installed
+(`~/.mozilla/native-messaging-hosts/prism_downloads.json`). The extension shows "Connected to Prism" in its
+settings once Prism runs.
+
 ### Lock screen and greeter (optional, needs root)
 
 ```bash
@@ -301,6 +337,9 @@ to write to, e.g. through a shared group).
 - `~/.config/prism/config.json`: every setting; edited by the Settings window (`prism-ctl settings toggle`) and
   reloaded live when the file changes.
 - `~/.config/prism/colors.json`: matugen palette.
+- Calendar feeds (Settings > Desktop > Calendars) are kept in your keyring (gnome-keyring or another
+  Secret Service), not in `config.json`; your password shows and changes the list. Settings, their
+  snapshots and backups are readable only by you.
 - `~/.cache/prism/`: clipboard history, notifications, current wallpaper (private, `0700`).
 - Screenshots go to `~/Pictures/Screenshots` and recordings to `~/Videos/Recordings` (both set in Settings > Capture).
 
@@ -336,6 +375,9 @@ Run `prism-ctl --help` for the full list. The common ones:
 | `prism-ctl desktop edit` | Desktop widget edit mode |
 | `prism-ctl depth generate` | Generate the depth mask for the current wallpaper |
 | `prism-ctl index status` | File index state (`index rebuild` to rebuild) |
+| `prism-ctl download toggle` | Downloads card (`download add <url>`, `list`, `pause`, `resume`, `cancel <id>`) |
+| `prism-ctl setup` | The first-time setup guide |
+| `prism-ctl deps` | Programs and services Prism uses that are missing (works without `prismd`) |
 | `prism-ctl ping` | Check that `prismd` responds |
 
 ---

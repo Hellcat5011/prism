@@ -39,6 +39,7 @@ mod power;
 mod prompt;
 mod portal;
 mod settings;
+mod settings_calendars;
 mod shadow;
 mod spotlight;
 mod toasts;
@@ -204,6 +205,12 @@ struct UiState {
     /// Screen-space origin of the surface the pointer is currently over.
     /// True while the pointer is over the scrim (at the screen origin), false over the card.
     pointer_on_scrim: bool,
+    /// The keyboard focus / the pointer is on one of this overlay's surfaces. Every overlay
+    /// has its own wl_keyboard and wl_pointer, and the compositor sends a client's input to
+    /// all of them: a card must only act on input for its own surfaces (a prompt card over
+    /// Settings would otherwise type and click into Settings too).
+    kb_focused: bool,
+    pointer_inside: bool,
     /// The pointer moved during the card's transition; hover catches up when it ends.
     hover_pending: bool,
     /// True while the last drawn frame was mid-animation (another frame is wanted).
@@ -550,6 +557,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
     ) {
         match event {
             wl_pointer::Event::Enter { serial, surface, surface_x, surface_y } => {
+                state.pointer_inside = state.owns(&surface);
+                if !state.pointer_inside {
+                    return;
+                }
                 state.pointer_serial = serial;
                 // Pointer coordinates are kept in screen space. The scrim covers the screen at
                 // (0, 0); the card surface sits at surf_rect's origin, read on every event
@@ -560,7 +571,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for UiState {
                 state.pointer_y = surface_y as i32 + oy;
                 state.set_cursor_shape(qh, CursorShape::Default);
             }
+            wl_pointer::Event::Leave { ref surface, .. } if !state.owns(surface) => {}
+            // Input for another overlay's surfaces.
+            _ if !state.pointer_inside && !matches!(event, wl_pointer::Event::Leave { .. }) => {}
             wl_pointer::Event::Leave { .. } => {
+                state.pointer_inside = false;
                 if state.nc.as_mut().map(|v| v.leave()).unwrap_or(false) {
                     state.render_and_commit(qh);
                 }
@@ -765,6 +780,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for UiState {
                 state.repeat_rate = rate;
                 state.repeat_delay = delay;
             }
+            wl_keyboard::Event::Enter { ref surface, .. } => {
+                state.kb_focused = state.owns(surface);
+            }
+            wl_keyboard::Event::Leave { ref surface, .. } if !state.owns(surface) => {}
+            // Keys while another overlay (a prompt over Settings) has the focus.
+            wl_keyboard::Event::Key { .. } if !state.kb_focused => {}
             wl_keyboard::Event::Key { key, state: WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => {
                 if let Some(v) = state.view.as_mut() {
                     v.key_down(key);
@@ -784,6 +805,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for UiState {
                 }
             }
             wl_keyboard::Event::Leave { .. } => {
+                state.kb_focused = false;
                 state.repeat = None;
                 if let Some(eff) = state.view.as_mut().map(|v| v.focus_lost()) {
                     state.apply_search_effect(eff, qh);
@@ -1307,6 +1329,11 @@ impl UiState {
     }
 
     /// Settings is hidden while a polkit dialog it started is open.
+    /// One of this overlay's own surfaces (card, scrim, blur backdrop).
+    fn owns(&self, s: &wl_surface::WlSurface) -> bool {
+        self.surface.as_ref() == Some(s) || self.scrim_surface.as_ref() == Some(s) || self.backdrop.as_ref().is_some_and(|b| &b.surface == s)
+    }
+
     fn settings_hidden(&self) -> bool {
         self.settings.as_ref().is_some_and(|s| s.hidden())
     }
@@ -2033,6 +2060,8 @@ impl Overlay {
             card_surface: false,
             surf_rect: (0, 0, 0, 0),
             pointer_on_scrim: false,
+            kb_focused: false,
+            pointer_inside: false,
             hover_pending: false,
             animating: false,
             last_frame_at: None,

@@ -21,6 +21,7 @@ Targets & Commands:
   notif [list|clear|send <summary> [body]|toggle|open|close|silent [on|off]|state]
   caffeinate [on|off]
   setup                             the first-time setup guide
+  deps [--quiet]                    missing programs and services (exit 1: something needed)
   notes [toggle|open|close]         the Notes card
   timer [start <5m|90s|1h30m>|add <1m>|pause|resume|cancel|status]
   stopwatch [toggle|reset]
@@ -438,11 +439,40 @@ fn parse_command(args: &[String]) -> Result<IpcCommand, String> {
     }
 }
 
+/// `prism-ctl deps [--quiet]`: what is missing of the programs and services Prism uses.
+/// Exit 0 when nothing needed is missing, 1 otherwise. `--quiet`: nothing when all are there.
+fn print_deps(quiet: bool) -> i32 {
+    use prism_common::deps;
+    let missing = deps::missing();
+    if missing.is_empty() {
+        if !quiet {
+            println!("Everything Prism uses is installed.");
+        }
+        return 0;
+    }
+    println!("Missing programs and services:");
+    let width = missing.iter().map(|d| d.name.len()).max().unwrap_or(0);
+    for d in &missing {
+        println!("  {:width$}  {:11}  {} (Arch: {})", d.name, d.level.label(), d.what, d.arch);
+    }
+    if let Some(cmd) = deps::pacman_command(&missing).filter(|_| deps::in_path("pacman")) {
+        println!("\nInstall with:\n  {cmd}");
+    }
+    if missing.iter().any(|d| d.arch.contains("AUR")) {
+        println!("AUR packages need an AUR helper, for example: yay -S {}", missing.iter().filter(|d| d.arch.contains("AUR")).map(|d| d.arch.split_whitespace().next().unwrap_or(d.name)).collect::<Vec<_>>().join(" "));
+    }
+    i32::from(missing.iter().any(|d| d.level == deps::Level::Needed))
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         print_usage();
         return;
+    }
+    // Needs no running Prism (install.sh runs it).
+    if args[0] == "deps" {
+        exit(print_deps(args.get(1).map(String::as_str) == Some("--quiet")));
     }
 
     let cmd = match parse_command(&args) {

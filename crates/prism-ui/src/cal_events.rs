@@ -75,6 +75,22 @@ pub fn days_with_events(year: i32, month0: u32) -> u64 {
     bits
 }
 
+/// Start of a local day (Unix time), month 0..11; days past the month's end roll over.
+pub fn day_start(year: i32, month0: u32, day: u32) -> i64 {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month0 as i32;
+    tm.tm_mday = day as i32;
+    tm.tm_isdst = -1;
+    unsafe { libc::mktime(&mut tm) as i64 }
+}
+
+/// The occurrences on a local day, by start.
+pub fn on_day(year: i32, month0: u32, day: u32) -> Vec<Occurrence> {
+    let (from, to) = (day_start(year, month0, day), day_start(year, month0, day + 1));
+    snapshot().iter().filter(|o| o.start < to && (o.end > from || (o.end <= o.start && o.start >= from))).cloned().collect()
+}
+
 /// "10:30" in local time.
 pub fn clock(t: i64) -> String {
     let (.., h, m) = local(t);

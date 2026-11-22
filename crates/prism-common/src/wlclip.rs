@@ -166,6 +166,9 @@ fn start() -> Result<Service, String> {
     let (wake_r, wake_w) = pipe().ok_or("pipe failed")?;
     unsafe { libc::fcntl(wake_r.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
     let mut st = State { conn: conn.clone(), manager, device, current: None, pending: Vec::new(), selection: None };
+    // The current selection comes as the device's first events: know it before the first
+    // paste is asked for (else a process's first paste finds nothing).
+    queue.roundtrip(&mut st).map_err(|e| format!("Wayland: {e}"))?;
     std::thread::Builder::new()
         .name("prism-clipboard".into())
         .spawn(move || {

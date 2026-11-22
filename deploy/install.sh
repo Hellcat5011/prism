@@ -45,7 +45,7 @@ echo "========================================================"
 echo "    Installing Prism (Rust Wayland desktop shell)       "
 echo "========================================================"
 
-echo "[1/9] Checking build dependencies..."
+echo "[1/10] Checking build dependencies..."
 missing=()
 command -v cargo >/dev/null 2>&1 || missing+=("cargo (Rust 1.77 or newer)")
 if command -v pkg-config >/dev/null 2>&1; then
@@ -84,10 +84,10 @@ if [ ${#missing[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "[2/9] Compiling (release)..."
+echo "[2/10] Compiling (release)..."
 cargo build --release --manifest-path "$REPO_DIR/Cargo.toml"
 
-echo "[3/9] Installing binaries to $BIN_DIR..."
+echo "[3/10] Installing binaries to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 for b in "${BINARIES[@]}"; do
     # install(1) writes a new file, so binaries that are running are replaced safely.
@@ -141,7 +141,7 @@ for b in prismd prism-ui prism-ctl; do
     fi
 done
 
-echo "[4/9] Installing helper scripts to $SHARE_DIR/scripts..."
+echo "[4/10] Installing helper scripts to $SHARE_DIR/scripts..."
 # Keybind parsers and the wallpaper depth generator; prismd and prism-ui look here.
 mkdir -p "$SHARE_DIR/scripts"
 install -m644 "$REPO_DIR"/scripts/*.py "$SHARE_DIR/scripts/"
@@ -149,7 +149,7 @@ install -m755 "$REPO_DIR"/scripts/*.sh "$SHARE_DIR/scripts/"
 # Replaced by the notification server in prismd.
 rm -f "$SHARE_DIR/scripts/prism-dbus-notif.py"
 
-echo "[5/9] Installing the systemd user service..."
+echo "[5/10] Installing the systemd user service..."
 mkdir -p "$SYSTEMD_USER_DIR"
 install -m644 "$SCRIPT_DIR/prismd.service" "$SYSTEMD_USER_DIR/prismd.service"
 if command -v systemctl >/dev/null 2>&1; then
@@ -163,7 +163,7 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
-echo "[6/9] Desktop portal (screenshots, screen sharing and appearance for apps)..."
+echo "[6/10] Desktop portal (screenshots, screen sharing and appearance for apps)..."
 # prism-ui serves org.freedesktop.impl.portal.desktop.prism. xdg-desktop-portal reads portal
 # descriptions from XDG_DATA_DIRS, so a drop-in adds ~/.local/share for it (no root needed).
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -202,7 +202,7 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl --user try-restart xdg-desktop-portal.service || true
 fi
 
-echo "[7/9] Copy text (OCR) for the screenshot overlay..."
+echo "[7/10] Copy text (OCR) for the screenshot overlay..."
 # The overlay's "Copy text" mode reads text with tesseract (system package, needs root).
 if command -v tesseract >/dev/null 2>&1; then
     echo "tesseract is installed."
@@ -224,7 +224,7 @@ else
     fi
 fi
 
-echo "[8/9] Lock screen PAM service..."
+echo "[8/10] Lock screen PAM service..."
 # prism-lock unlocks through /etc/pam.d/prism, else the "login" service. Prism's file includes
 # system-local-login (Arch and derivatives); without that file it would refuse every password.
 PAM_OK=0
@@ -248,7 +248,7 @@ if ls /sys/class/power_supply/BAT*/charge_control_end_threshold >/dev/null 2>&1 
     fi
 fi
 
-echo "[9/9] Greeter..."
+echo "[9/10] Greeter..."
 GREETER_BIN=/usr/local/bin/prism-lock
 GREETD_CONF=/etc/greetd/config.toml
 if [ "$GREETER" = ask ]; then
@@ -301,6 +301,23 @@ if [ "$GREETER" = 1 ]; then
         fi
         echo "  Test it before rebooting: from a TTY run 'sudo systemctl restart greetd'."
     fi
+fi
+
+echo "[10/10] Checking the programs and services Prism uses..."
+# The list is prism_common::deps (also: prism-ctl deps, and the setup guide's last page).
+DEPS_NEEDED=0
+deps_out=$("$BIN_DIR/prism-ctl" deps --quiet) || DEPS_NEEDED=1
+if [ -z "$deps_out" ]; then
+    echo "  Everything is installed."
+else
+    echo "$deps_out" | sed 's/^/  /'
+    deps_cmd=$(echo "$deps_out" | sed -n 's/^  *\(sudo pacman -S .*\)$/\1/p')
+    if [ -n "$deps_cmd" ] && ask "Install the missing packages now ($deps_cmd)?" n; then
+        $deps_cmd || echo "  The packages were not installed; see above." >&2
+    elif [ "$DEPS_NEEDED" = 1 ]; then
+        echo "  Some of these are needed: parts of Prism will not work until they are installed." >&2
+    fi
+    echo "  The setup guide lists them again; 'prism-ctl deps' checks at any time."
 fi
 
 echo ""

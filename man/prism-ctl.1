@@ -92,6 +92,16 @@ The first-time setup guide.
 .B guide
 is a synonym.
 .TP
+.B deps \fR[\fB\-\-quiet\fR]
+List the programs and services Prism uses that are missing on this computer, with what each is
+for, how important it is (needed, recommended, optional) and its Arch Linux package, then the
+.B pacman
+command that installs them. Works without a running
+.BR prismd ;
+the installer runs it at the end. With
+.BR \-\-quiet ,
+prints nothing when everything is installed. Exits 1 when something needed is missing.
+.TP
 .B notes \fR[\fBtoggle\fR|\fBopen\fR|\fBclose\fR]
 The Notes card.
 .TP
