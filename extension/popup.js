@@ -114,10 +114,12 @@ function message(text) {
 let last = "";
 
 async function load() {
+  if (!on) return;
   let list;
   try {
     list = await browser.runtime.sendMessage({ type: "list" });
   } catch (e) {
+    if (!on) return;
     message(`${e.message}. Downloads stay in Firefox until Prism is running.`);
     $("list").replaceChildren();
     $("empty").hidden = true;
@@ -171,11 +173,30 @@ $("options").addEventListener("click", () => {
   window.close();
 });
 
-browser.storage.local.get({ capture: true }).then((s) => {
-  $("capture").checked = s.capture;
-});
-$("capture").addEventListener("change", (ev) => {
-  browser.storage.local.set({ capture: ev.target.checked });
+// The master switch: off, the extension does nothing, and the popup only says so.
+let on = true;
+
+function showOn(value) {
+  on = value;
+  $("enabled").checked = on;
+  for (const id of ["add", "list", "clear"]) $(id).hidden = !on;
+  if (!on) {
+    $("videos").hidden = true;
+    $("empty").hidden = true;
+    last = "";
+    lastVideos = "";
+    message("Prism Downloads is off: downloads stay in Firefox and no videos are looked for.");
+  } else {
+    message("");
+    load();
+    loadVideos();
+  }
+}
+
+browser.storage.local.get({ enabled: true }).then((s) => showOn(s.enabled));
+$("enabled").addEventListener("change", (ev) => {
+  browser.storage.local.set({ enabled: ev.target.checked });
+  showOn(ev.target.checked);
 });
 
 // ── Videos found in the active tab ─────────────────────────────────────────
@@ -188,6 +209,7 @@ function mb(b) {
 }
 
 async function loadVideos() {
+  if (!on) return;
   if (activeTab == null) {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     activeTab = tab ? tab.id : -1;
@@ -198,6 +220,7 @@ async function loadVideos() {
   } catch {
     list = [];
   }
+  if (!on) return;
   const key = JSON.stringify(list.map((e) => [e.id, e.labels, e.size]));
   if (key === lastVideos) return;
   lastVideos = key;

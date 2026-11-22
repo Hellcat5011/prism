@@ -11,6 +11,9 @@
 const HOST = "prism_downloads";
 
 const DEFAULTS = {
+  // The switch in the popup: off, the extension does nothing at all (no downloads taken, no
+  // videos looked for, no link menu, no connection to Prism).
+  enabled: true,
   // Take browser downloads.
   capture: true,
   // Leave smaller downloads (MB) to the browser when their size is known; 0 = take all.
@@ -26,6 +29,51 @@ const DEFAULTS = {
 async function settings() {
   return Object.assign({}, DEFAULTS, await browser.storage.local.get(Object.keys(DEFAULTS)));
 }
+
+// The master switch, cached; `null` until read (the background page may just have woken).
+let enabled = null;
+
+async function isOn() {
+  if (enabled === null) enabled = (await settings()).enabled;
+  return enabled;
+}
+
+const OFF = "Prism Downloads is off";
+
+async function applyEnabled(on) {
+  enabled = on;
+  await browser.contextMenus.removeAll();
+  if (on) {
+    browser.contextMenus.create({
+      id: "prism-download",
+      title: "Download with Prism",
+      contexts: ["link", "video", "audio", "image"],
+    });
+    browser.action.setTitle({ title: "Prism Downloads" });
+    refreshSoon();
+    return;
+  }
+  // Forget everything found and let go of Prism.
+  const tabs = [...media.keys()];
+  media.clear();
+  children.clear();
+  sent.clear();
+  for (const t of tabs) changed(t);
+  clearTimeout(timer);
+  timer = null;
+  if (port) {
+    port.disconnect();
+    for (const w of pending.values()) w.reject(new Error(OFF));
+    pending.clear();
+    port = null;
+  }
+  browser.action.setBadgeText({ text: "" });
+  browser.action.setTitle({ title: `Prism Downloads (off)` });
+}
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.enabled) applyEnabled(changes.enabled.newValue !== false);
+});
 
 // ── Native messaging ────────────────────────────────────────────────────────
 
@@ -128,7 +176,7 @@ async function send(req) {
 browser.downloads.onCreated.addListener(async (item) => {
   const s = await settings();
   const url = item.finalUrl || item.url;
-  if (!s.capture || item.state !== "in_progress" || !isHttp(url)) return;
+  if (!s.enabled || !s.capture || item.state !== "in_progress" || !isHttp(url)) return;
   if (item.incognito && !s.privateWindows) return;
   if (isExcluded(url, s.excluded) || (item.referrer && isExcluded(item.referrer, s.excluded))) return;
   if (s.minSizeMb > 0 && item.totalBytes > 0 && item.totalBytes < s.minSizeMb * 1e6) return;
@@ -159,16 +207,8 @@ browser.downloads.onCreated.addListener(async (item) => {
 
 // ── Link menu ───────────────────────────────────────────────────────────────
 
-browser.runtime.onInstalled.addListener(() => {
-  browser.contextMenus.create({
-    id: "prism-download",
-    title: "Download with Prism",
-    contexts: ["link", "video", "audio", "image"],
-  });
-});
-
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== "prism-download") return;
+  if (info.menuItemId !== "prism-download" || !(await isOn())) return;
   const url = info.linkUrl || info.srcUrl;
   if (!isHttp(url)) return;
   try {
@@ -249,8 +289,8 @@ function changed(tabId) {
 const sent = new Map();
 
 browser.webRequest.onSendHeaders.addListener(
-  (d) => {
-    if (d.tabId < 0) return;
+  async (d) => {
+    if (d.tabId < 0 || !(await isOn())) return;
     const referer = header(d.requestHeaders, "referer");
     const origin = header(d.requestHeaders, "origin");
     if (!referer && !origin) return;
@@ -329,10 +369,10 @@ async function addHls(d, headers) {
 }
 
 browser.webRequest.onHeadersReceived.addListener(
-  (d) => {
+  async (d) => {
     const headers = sent.get(d.requestId);
     sent.delete(d.requestId);
-    if (d.tabId < 0 || !isHttp(d.url) || d.statusCode >= 400) return;
+    if (d.tabId < 0 || !(await isOn()) || !isHttp(d.url) || d.statusCode >= 400) return;
     if (BLOCKED.some((b) => hostOf(d.url) === b || hostOf(d.url).endsWith("." + b))) return;
     const type = header(d.responseHeaders, "content-type").toLowerCase();
     const path = (() => { try { return new URL(d.url).pathname.toLowerCase(); } catch { return ""; } })();
@@ -393,6 +433,7 @@ let timer = null;
 
 async function refresh() {
   timer = null;
+  if (!(await isOn())) return;
   let list;
   try {
     list = await prism("list");
@@ -415,6 +456,12 @@ browser.action.setBadgeBackgroundColor({ color: "#5ab8ff" });
 // ── The popup asks through here ─────────────────────────────────────────────
 
 browser.runtime.onMessage.addListener((msg, sender) => {
+  if (enabled === false) {
+    // Off: nothing found, nothing sent; the popup only needs to know.
+    if (msg && msg.type === "media") return Promise.resolve([]);
+    if (msg && msg.type === "read-playlist") return undefined;
+    return Promise.reject(new Error(OFF));
+  }
   switch (msg && msg.type) {
     case "ping":
       return call({ ping: true });
@@ -436,4 +483,5 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   return undefined;
 });
 
-refreshSoon(1000);
+// Menus and state as the switch says, every time the background page starts.
+settings().then((s) => applyEnabled(s.enabled));

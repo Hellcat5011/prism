@@ -14,6 +14,8 @@
   let target = null;
   let hideTimer = null;
   let menuOpen = false;
+  // Videos whose button was closed (until the page reloads).
+  const dismissed = new WeakSet();
 
   async function refresh() {
     try {
@@ -21,6 +23,17 @@
     } catch {
       entries = [];
     }
+    // Nothing to download (or Prism Downloads turned off): no button.
+    if (!entries.length) hide();
+  }
+
+  function hide() {
+    clearTimeout(hideTimer);
+    menuOpen = false;
+    if (!host) return;
+    root.querySelector(".menu").hidden = true;
+    host.style.display = "none";
+    target = null;
   }
 
   browser.runtime.onMessage.addListener((m) => {
@@ -75,6 +88,15 @@
           transition: background .15s, transform .15s;
         }
         button.main:hover { background: rgba(24,28,38,.95); transform: translateY(-1px); }
+        .bar { display: flex; align-items: center; gap: 4px; }
+        button.close {
+          display: grid; place-items: center; width: 26px; height: 26px; padding: 0; cursor: pointer;
+          border: 1px solid rgba(255,255,255,.18); border-radius: 999px; color: #fff;
+          background: rgba(16,18,24,.82); box-shadow: 0 4px 16px rgba(0,0,0,.35); backdrop-filter: blur(8px);
+          opacity: .75; transition: opacity .15s, background .15s;
+        }
+        button.close:hover { opacity: 1; background: rgba(60,24,28,.95); }
+        button.close svg { width: 12px; height: 12px; stroke: #fff; stroke-width: 2.6; }
         svg { width: 16px; height: 16px; stroke: #5ab8ff; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
         .menu {
           margin-top: 6px; min-width: 210px; padding: 5px; border-radius: 12px;
@@ -105,10 +127,28 @@
     label.className = "label";
     label.textContent = "Download video";
     main.append(svg, label);
+    const close = document.createElement("button");
+    close.className = "close";
+    close.title = "Hide for this video";
+    const xs = document.createElementNS(ns, "svg");
+    xs.setAttribute("viewBox", "0 0 24 24");
+    const xp = document.createElementNS(ns, "path");
+    xp.setAttribute("d", "M18 6 6 18M6 6l12 12");
+    xs.appendChild(xp);
+    close.appendChild(xs);
+    close.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (target) dismissed.add(target);
+      hide();
+    });
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.append(main, close);
     const menu = document.createElement("div");
     menu.className = "menu";
     menu.hidden = true;
-    wrap.append(main, menu);
+    wrap.append(bar, menu);
     root.append(style, wrap);
     root.querySelector("button.main").addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -167,7 +207,7 @@
     target = video;
     const r = video.getBoundingClientRect();
     host.style.display = "block";
-    const bw = root.querySelector("button.main").getBoundingClientRect().width || 160;
+    const bw = root.querySelector(".bar").getBoundingClientRect().width || 190;
     host.style.top = `${Math.max(4, r.top + 12)}px`;
     host.style.left = `${Math.max(4, r.right - 12 - bw)}px`;
     clearTimeout(hideTimer);
@@ -193,7 +233,7 @@
       if (!entries.length) return;
       const video = [...document.querySelectorAll("video")].find((v) => {
         const r = v.getBoundingClientRect();
-        return r.width >= 200 && r.height >= 120 && ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+        return !dismissed.has(v) && r.width >= 200 && r.height >= 120 && ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
       });
       if (video) show(video);
       else if (target && !menuOpen) hideSoon();
