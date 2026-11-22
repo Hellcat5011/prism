@@ -4,6 +4,8 @@
 //! * Slices: the wallpaper cut into strips, one app each; the selected strip opens wide.
 //! * Spectrum: a mosaic of apps sorted by the colour of their icons.
 //! * Deck: a fanned hand of cards tinted from each icon; the selected card comes forward.
+//! * Pixel: an 8-bit game menu; blocky text and icons, the selected icon hops on a stage and
+//!   its description types out in a dialog box.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -20,7 +22,7 @@ use crate::ui::{self, Fades, Rgba, SpringValue, Style};
 use crate::view::CardView;
 
 /// Label and config id of every launcher design, for Settings.
-pub const THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Slices", "slices"), ("Spectrum", "spectrum"), ("Deck", "deck")];
+pub const THEMES: &[(&str, &str)] = &[("Classic", "classic"), ("Slices", "slices"), ("Spectrum", "spectrum"), ("Deck", "deck"), ("Pixel", "pixel")];
 
 const SLICES_SIZE: (f64, f64) = (1120.0, 600.0);
 const SPECTRUM_SIZE: (f64, f64) = (1040.0, 640.0);
@@ -32,6 +34,7 @@ pub fn card_size(id: &str) -> (f64, f64) {
         "slices" => SLICES_SIZE,
         "spectrum" => SPECTRUM_SIZE,
         "deck" => DECK_SIZE,
+        "pixel" => PIXEL_SIZE,
         _ => (launcher::CARD_W, launcher::CARD_H),
     }
 }
@@ -52,6 +55,7 @@ pub fn view(id: &str, apps: Vec<DesktopApp>) -> Box<dyn CardView> {
         "slices" => Box::new(SlicesLauncher::new(apps)),
         "spectrum" => Box::new(SpectrumLauncher::new(apps)),
         "deck" => Box::new(DeckLauncher::new(apps)),
+        "pixel" => Box::new(PixelLauncher::new(apps)),
         _ => Box::new(launcher::LauncherView::new(apps)),
     }
 }
@@ -60,6 +64,10 @@ pub fn view(id: &str, apps: Vec<DesktopApp>) -> Box<dyn CardView> {
 pub fn prepare(id: &str, apps: &[DesktopApp]) {
     if matches!(id, "spectrum" | "deck") {
         compute_tints(apps);
+    }
+    if id == "pixel" {
+        // Asks fontconfig once, here rather than on the first frame.
+        LazyLock::force(&PIXEL_FONT);
     }
 }
 
@@ -1441,5 +1449,526 @@ mod tests {
         }
         assert!(deck_pose(1.0).x < deck_pose(2.0).x);
         assert_eq!(deck_pose(DECK_REACH as f64 + 1.0).alpha, 0.0);
+    }
+}
+
+// ── Pixel ────────────────────────────────────────────────────────────────
+
+const PIXEL_SIZE: (f64, f64) = (960.0, 620.0);
+/// One art pixel of borders, arrows and shadows.
+const PX: f64 = 4.0;
+const PIXEL_ROWS: usize = 8;
+const PIXEL_ROW_H: f64 = 52.0;
+/// The font text is drawn in before it is made blocky: Pixelify Sans at the size where its
+/// pixels are screen pixels (deploy/install.sh offers it), else a bold Monospace.
+static PIXEL_FONT: LazyLock<&'static str> = LazyLock::new(|| {
+    let found = std::process::Command::new("fc-list")
+        .args(["Pixelify Sans", "family"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("pixelify"));
+    if found { "Pixelify Sans 10px" } else { "Monospace Bold 8px" }
+});
+const CAIRO_FILTER_NEAREST: i32 = 3;
+/// Characters a second the description types out at.
+const PIXEL_TYPE_RATE: f64 = 90.0;
+const PIXEL_BLINK: Duration = Duration::from_millis(500);
+/// The selected icon's hop: launched upwards, a bouncy spring brings it back.
+const SPRING_HOP: (f64, f64) = (0.34, 0.42);
+
+/// Opaque colours with every pixel either covered or not: the art of text and icons drawn
+/// small, before it is scaled up with nearest-neighbour sampling.
+fn harden(surface: *mut cb::CairoSurface, tint: Option<Rgba>) {
+    unsafe {
+        cb::cairo_surface_flush(surface);
+        let (w, h) = (cb::cairo_image_surface_get_width(surface), cb::cairo_image_surface_get_height(surface));
+        let stride = cb::cairo_image_surface_get_stride(surface) as usize;
+        let data = cb::cairo_image_surface_get_data(surface);
+        if data.is_null() {
+            return;
+        }
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let p = data.add(y * stride + x * 4);
+                let a = *p.add(3) as u32;
+                if a < 110 {
+                    for k in 0..4 {
+                        *p.add(k) = 0;
+                    }
+                    continue;
+                }
+                // Cairo pixels are premultiplied BGRA.
+                let (b, g, r) = match tint {
+                    Some(c) => ((c.2 * 255.0) as u32, (c.1 * 255.0) as u32, (c.0 * 255.0) as u32),
+                    None => (*p as u32 * 255 / a, *p.add(1) as u32 * 255 / a, *p.add(2) as u32 * 255 / a),
+                };
+                *p = b.min(255) as u8;
+                *p.add(1) = g.min(255) as u8;
+                *p.add(2) = r.min(255) as u8;
+                *p.add(3) = 255;
+            }
+        }
+        cb::cairo_surface_mark_dirty(surface);
+    }
+}
+
+/// Paints `sprite` (`w` by `h` art pixels) at (x, y), each art pixel `k` px square.
+fn paint_blocky(cr: *mut Cairo, sprite: &Sprite, x: f64, y: f64, k: f64, alpha: f64) {
+    unsafe {
+        cb::cairo_save(cr);
+        cb::cairo_translate(cr, x.round(), y.round());
+        cb::cairo_scale(cr, k, k);
+        cb::cairo_set_source_surface(cr, sprite.0, 0.0, 0.0);
+        cb::cairo_pattern_set_filter(cb::cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+        cb::cairo_paint_with_alpha(cr, alpha);
+        cb::cairo_restore(cr);
+    }
+}
+
+fn colour_key(c: Rgba) -> u32 {
+    ((c.0 * 255.0) as u32) << 16 | ((c.1 * 255.0) as u32) << 8 | (c.2 * 255.0) as u32
+}
+
+/// Blocky text and icons, drawn once each.
+#[derive(Default)]
+struct PixelArt {
+    text: HashMap<(String, u32), (Sprite, f64, f64)>,
+    widths: HashMap<String, f64>,
+    icons: HashMap<(String, u32), Sprite>,
+    /// Width and height of one character in art pixels.
+    cell: Option<(f64, f64)>,
+}
+
+impl PixelArt {
+    fn cell(&mut self, cr: *mut Cairo) -> (f64, f64) {
+        *self.cell.get_or_insert_with(|| {
+            let (w, h) = cb::with_crisp_text(|| cb::measure_pango_text(cr, "MMMMMMMMMM", &PIXEL_FONT, 4000, Some(1)));
+            (w as f64 / 10.0, h as f64)
+        })
+    }
+
+    /// `text` at (x, y) in `colour`, each art pixel `k` px; returns its width.
+    fn text(&mut self, cr: *mut Cairo, text: &str, x: f64, y: f64, k: f64, colour: Rgba, alpha: f64) -> f64 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        if self.text.len() > 400 {
+            self.text.clear();
+        }
+        let key = (text.to_string(), colour_key(colour));
+        if !self.text.contains_key(&key) {
+            let (w, h) = cb::with_crisp_text(|| cb::measure_pango_text(cr, text, &PIXEL_FONT, 8000, Some(1)));
+            let (w, h) = (w.max(1) as f64, h.max(1) as f64);
+            let sprite = Sprite::new(w, h, 1.0, |c| cb::with_crisp_text(|| cb::draw_pango_text(c, 0.0, 0.0, text, &PIXEL_FONT, (colour.0, colour.1, colour.2, 1.0), None)));
+            harden(sprite.0, Some(colour));
+            self.text.insert(key.clone(), (sprite, w, h));
+        }
+        let (sprite, w, _) = &self.text[&key];
+        paint_blocky(cr, sprite, x, y, k, alpha);
+        w * k
+    }
+
+    /// Width of `text` in art pixels.
+    fn width(&mut self, cr: *mut Cairo, text: &str) -> f64 {
+        if self.widths.len() > 2000 {
+            self.widths.clear();
+        }
+        *self.widths.entry(text.to_string()).or_insert_with(|| cb::with_crisp_text(|| cb::measure_pango_text(cr, text, &PIXEL_FONT, 8000, Some(1))).0 as f64)
+    }
+
+    /// `text` cut to `max` art pixels wide (with "…" when cut).
+    fn fit(&mut self, cr: *mut Cairo, text: &str, max: f64) -> String {
+        fit_by(text, max, &mut |t| self.width(cr, t))
+    }
+
+    /// The app's icon drawn `art` px small and shown `k` times as large.
+    fn icon(&mut self, cr: *mut Cairo, app: &DesktopApp, x: f64, y: f64, art: u32, k: f64, alpha: f64) {
+        if self.icons.len() > 300 {
+            self.icons.clear();
+        }
+        let key = (app.id.clone(), art);
+        let sprite = self.icons.entry(key).or_insert_with(|| {
+            let a = art as f64;
+            let sprite = Sprite::new(a, a, 1.0, |c| {
+                let name = icon_name(app);
+                if crate::icons::lookup(name, art).is_some() {
+                    launcher::draw_icon(c, name, "application-x-executable", 0.0, 0.0, a);
+                } else {
+                    monogram(c, app, 0.0, 0.0, a, 1.0);
+                }
+            });
+            harden(sprite.0, None);
+            sprite
+        });
+        paint_blocky(cr, sprite, x, y, k, alpha);
+    }
+}
+
+/// A box with notched corners and a border `PX` thick.
+fn pixel_box(cr: *mut Cairo, r: Rect, fill: Rgba, border: Rgba) {
+    let (x, y, w, h) = (r.x.round(), r.y.round(), r.w.round(), r.h.round());
+    let rect = |x: f64, y: f64, w: f64, h: f64, c: Rgba| cb::fill_rounded_rect(cr, x, y, w, h, 0.0, c);
+    rect(x + PX, y + PX, w - 2.0 * PX, h - 2.0 * PX, fill);
+    rect(x + PX, y, w - 2.0 * PX, PX, border);
+    rect(x + PX, y + h - PX, w - 2.0 * PX, PX, border);
+    rect(x, y + PX, PX, h - 2.0 * PX, border);
+    rect(x + w - PX, y + PX, PX, h - 2.0 * PX, border);
+}
+
+/// The menu's ▶, `PX` blocks, pointing right with its tip at (x + 4 PX, y + 3.5 PX).
+fn pixel_arrow(cr: *mut Cairo, x: f64, y: f64, c: Rgba) {
+    for (col, half) in [(0.0, 3.0), (1.0, 2.0), (2.0, 1.0), (3.0, 0.0)] {
+        cb::fill_rounded_rect(cr, x + col * PX, y + (3.0 - half) * PX, PX, (2.0 * half + 1.0) * PX, 0.0, c);
+    }
+}
+
+/// `text` cut to at most `max` wide by `width`, ending in "…" when cut.
+fn fit_by(text: &str, max: f64, width: &mut dyn FnMut(&str) -> f64) -> String {
+    if width(text) <= max {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let cut = |n: usize| chars[..n].iter().collect::<String>().trim_end().to_string() + "…";
+    // The longest start that fits.
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&cut(mid)) <= max { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
+/// The longest end of `text` at most `max` wide by `width` (a long query shows its end).
+fn tail_by(text: &str, max: f64, width: &mut dyn FnMut(&str) -> f64) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let tail = |n: usize| chars[chars.len() - n..].iter().collect::<String>();
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&tail(mid)) <= max { lo = mid } else { hi = mid - 1 }
+    }
+    tail(lo)
+}
+
+/// `text` broken into at most `lines` lines no wider than `max` by `width`; what does not fit
+/// ends the last line with "…".
+fn wrap_by(text: &str, max: f64, lines: usize, width: &mut dyn FnMut(&str) -> f64) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let joined = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if !line.is_empty() && width(&joined) > max {
+            out.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = joined;
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.len() > lines {
+        let rest = out.split_off(lines).join(" ");
+        if let Some(last) = out.last_mut() {
+            *last = fit_by(&format!("{last} {rest}"), max, width);
+        }
+    }
+    out.into_iter().map(|l| fit_by(&l, max, width)).collect()
+}
+
+struct PixelLauncher {
+    picker: Picker,
+    art: PixelArt,
+    first: usize,
+    /// The selected app (its id) and when it was selected: the hop and the typing start then.
+    shown: Option<String>,
+    since: Instant,
+    hop: SpringValue,
+    /// Blink phase drawn last (arrow and cursor).
+    blink: bool,
+}
+
+impl PixelLauncher {
+    fn new(apps: Vec<DesktopApp>) -> Self {
+        Self { picker: Picker::new(apps), art: PixelArt::default(), first: 0, shown: None, since: Instant::now(), hop: SpringValue::new(0.0), blink: true }
+    }
+
+    fn blink_on(&self) -> bool {
+        (self.picker.opened.elapsed().as_millis() / PIXEL_BLINK.as_millis()).is_multiple_of(2)
+    }
+}
+
+impl CardView for PixelLauncher {
+    fn draw(&mut self, cr: *mut Cairo, card: Rect, style: &Style, _theme: &Theme) {
+        // The card colours every Prism card uses: inversePrimary background, onPrimaryContainer ink.
+        let fg = style.fg;
+        let bg = style.card_bg;
+        let solid = (bg.0, bg.1, bg.2, 1.0);
+        let (dim, accent, frame) = (faded(fg, 0.62), fg, faded(fg, 0.3));
+        let (sel_bg, sel_fg) = (fg, solid);
+        let panel = faded(fg, 0.06);
+        let blink = self.blink_on();
+        self.blink = blink;
+
+        let n = self.picker.results.len();
+        let sel = self.picker.selected;
+        let now_id = self.picker.results.get(sel).map(|a| a.id.clone());
+        if now_id != self.shown {
+            if self.shown.is_some() && now_id.is_some() {
+                self.hop.launch(0.0, -620.0, SPRING_HOP, style.time_scale());
+            }
+            self.shown = now_id;
+            self.since = Instant::now();
+        }
+        self.first = window_first(self.first, sel, n, PIXEL_ROWS);
+        let (cw, ch) = self.art.cell(cr);
+
+        // Card: notched box, scanlines.
+        pixel_box(cr, card, bg, frame);
+        let mut y = card.y + PX;
+        while y < card.y + card.h - PX {
+            cb::fill_rounded_rect(cr, card.x + PX, y, card.w - 2.0 * PX, 2.0, 0.0, (0.0, 0.0, 0.0, 0.04));
+            y += PX;
+        }
+
+        // Header.
+        let (hx, hy) = (card.x + 28.0, card.y + 22.0);
+        let w = self.art.text(cr, "PRISM", hx, hy, 3.0, accent, 1.0);
+        self.art.text(cr, "SELECT AN APP", hx + w + 20.0, hy + ch, 2.0, dim, 1.0);
+        if n > 0 {
+            let count = format!("{:02}/{:02}", sel + 1, n);
+            let cwid = self.art.width(cr, &count) * 2.0;
+            self.art.text(cr, &count, card.x + card.w - 28.0 - cwid, hy + ch, 2.0, dim, 1.0);
+        }
+
+        // Menu.
+        let menu = Rect { x: card.x + 24.0, y: card.y + 72.0, w: 440.0, h: 456.0 };
+        pixel_box(cr, menu, panel, frame);
+        self.picker.hits.clear();
+        let name_x = menu.x + 92.0;
+        let name_room = (menu.x + menu.w - 28.0 - name_x) / 2.0;
+        for i in self.first..(self.first + PIXEL_ROWS).min(n) {
+            let row = Rect { x: menu.x + 12.0, y: menu.y + 16.0 + (i - self.first) as f64 * PIXEL_ROW_H, w: menu.w - 24.0, h: PIXEL_ROW_H - 4.0 };
+            self.picker.hits.push((i, row));
+            let on = i == sel;
+            if on {
+                pixel_box(cr, row, sel_bg, accent);
+                if blink {
+                    pixel_arrow(cr, row.x + 12.0, row.y + (row.h - 7.0 * PX) / 2.0, sel_fg);
+                }
+            }
+            let app = &self.picker.results[i];
+            self.art.icon(cr, app, row.x + 36.0, row.y + (row.h - 32.0) / 2.0, 16, 2.0, 1.0);
+            let label = self.art.fit(cr, &app.name, name_room);
+            self.art.text(cr, &label, name_x, row.y + (row.h - ch * 2.0) / 2.0, 2.0, if on { sel_fg } else { fg }, 1.0);
+        }
+        if n > PIXEL_ROWS {
+            // Scroll bar in blocks.
+            let track = Rect { x: menu.x + menu.w - 16.0, y: menu.y + 16.0, w: PX, h: PIXEL_ROWS as f64 * PIXEL_ROW_H - 4.0 };
+            cb::fill_rounded_rect(cr, track.x, track.y, track.w, track.h, 0.0, faded(frame, 0.6));
+            let th = (track.h * PIXEL_ROWS as f64 / n as f64).max(3.0 * PX);
+            let ty = track.y + (track.h - th) * self.first as f64 / (n - PIXEL_ROWS) as f64;
+            cb::fill_rounded_rect(cr, track.x, (ty / PX).round() * PX, track.w, (th / PX).round() * PX, 0.0, accent);
+        }
+        if n == 0 {
+            let msg = "NO MATCH";
+            let mw = self.art.width(cr, msg) * 2.0;
+            self.art.text(cr, msg, menu.x + (menu.w - mw) / 2.0, menu.y + menu.h / 2.0 - ch, 2.0, dim, 1.0);
+        }
+
+        // Stage: the selected app's icon hops on its shadow.
+        let stage = Rect { x: card.x + 488.0, y: card.y + 72.0, w: 448.0, h: 300.0 };
+        pixel_box(cr, stage, panel, frame);
+        // A checkered floor.
+        let floor = stage.y + 214.0;
+        let mut fx = stage.x + PX;
+        let mut col = 0;
+        while fx < stage.x + stage.w - PX {
+            let mut fy = floor;
+            let mut row = 0;
+            while fy < stage.y + stage.h - PX {
+                if (col + row) % 2 == 0 {
+                    cb::fill_rounded_rect(cr, fx, fy, 16.0_f64.min(stage.x + stage.w - PX - fx), 16.0_f64.min(stage.y + stage.h - PX - fy), 0.0, faded(frame, 0.25));
+                }
+                fy += 16.0;
+                row += 1;
+            }
+            fx += 16.0;
+            col += 1;
+        }
+        // Stars in the sky above it; half of them twinkle with the blink.
+        for k in 0..18u64 {
+            let h = k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 20;
+            let sx = stage.x + 12.0 + ((h % 1000) as f64 / 1000.0 * (stage.w - 28.0) / PX).floor() * PX;
+            let sy = stage.y + 12.0 + (((h / 1000) % 1000) as f64 / 1000.0 * (floor - stage.y - 40.0) / PX).floor() * PX;
+            let lit = if k % 2 == 0 { 0.55 } else if blink { 0.8 } else { 0.2 };
+            cb::fill_rounded_rect(cr, sx, sy, PX, PX, 0.0, faded(fg, lit));
+        }
+        if let Some(app) = self.picker.results.get(sel) {
+            self.picker.hits.push((sel, stage));
+            let lift = (-self.hop.animated(0.5)).max(0.0);
+            let lift = (lift / PX).round() * PX;
+            let size = 128.0;
+            let ix = stage.x + (stage.w - size) / 2.0;
+            let iy = floor - size + 8.0 - lift;
+            // Shadow: narrower the higher the icon.
+            let sw = ((96.0 - lift * 0.5).max(40.0) / PX).round() * PX;
+            let sx = stage.x + (stage.w - sw) / 2.0;
+            cb::fill_rounded_rect(cr, sx, floor + 4.0, sw, PX, 0.0, (0.0, 0.0, 0.0, 0.35));
+            cb::fill_rounded_rect(cr, sx + PX, floor + 8.0, sw - 2.0 * PX, PX, 0.0, (0.0, 0.0, 0.0, 0.25));
+            self.art.icon(cr, app, ix, iy, 32, 4.0, 1.0);
+            // Name on the floor.
+            let room = stage.w - 32.0;
+            let k = if self.art.width(cr, &app.name) * 3.0 <= room { 3.0 } else { 2.0 };
+            let label = self.art.fit(cr, &app.name, room / k);
+            let lw = self.art.width(cr, &label) * k;
+            self.art.text(cr, &label, stage.x + (stage.w - lw) / 2.0, floor + 30.0, k, accent, 1.0);
+        }
+
+        // Dialog: the description, typed out.
+        let dialog = Rect { x: stage.x, y: card.y + 384.0, w: stage.w, h: 144.0 };
+        pixel_box(cr, dialog, panel, frame);
+        if let Some(app) = self.picker.results.get(sel) {
+            let text = about(app);
+            let text = if text.is_empty() { "No description.".to_string() } else { text };
+            let art = &mut self.art;
+            let lines = wrap_by(&text, (dialog.w - 40.0) / 2.0, 4, &mut |t| art.width(cr, t));
+            let total: usize = lines.iter().map(|l| l.chars().count()).sum();
+            let typed = if style.animations { (self.since.elapsed().as_secs_f64() * PIXEL_TYPE_RATE * style.animation_speed.max(0.1)) as usize } else { total };
+            if typed < total {
+                ui::keep_animating();
+            }
+            let mut left = typed;
+            for (j, line) in lines.iter().enumerate() {
+                let shown: String = line.chars().take(left).collect();
+                left = left.saturating_sub(line.chars().count());
+                self.art.text(cr, &shown, dialog.x + 20.0, dialog.y + 18.0 + j as f64 * (ch * 2.0 + 8.0), 2.0, fg, 1.0);
+            }
+            if typed >= total && blink {
+                // ▼ "more" marker.
+                let (mx, my) = (dialog.x + dialog.w - 32.0, dialog.y + dialog.h - 24.0);
+                for (r, half) in [(0.0, 2.0), (1.0, 1.0), (2.0, 0.0)] {
+                    cb::fill_rounded_rect(cr, mx + (2.0 - half) * PX, my + r * PX, (2.0 * half + 1.0) * PX, PX, 0.0, accent);
+                }
+            }
+        }
+
+        // Name entry.
+        let entry = Rect { x: card.x + 24.0, y: card.y + 544.0, w: card.w - 48.0, h: 52.0 };
+        pixel_box(cr, entry, panel, if self.picker.query.text.is_empty() { frame } else { accent });
+        let ty = entry.y + (entry.h - ch * 2.0) / 2.0;
+        let mut tx = entry.x + 20.0;
+        tx += self.art.text(cr, ">", tx, ty, 2.0, accent, 1.0) + cw * 2.0;
+        let hint = "TAB ACTIONS  ENTER START";
+        let hint_w = self.art.width(cr, hint) * 2.0;
+        let room = ((entry.x + entry.w - 28.0 - hint_w - tx) / 2.0 - cw).max(20.0);
+        let q = &self.picker.query.text;
+        if q.is_empty() {
+            self.art.text(cr, "TYPE TO SEARCH", tx + cw * 2.0, ty, 2.0, dim, 1.0);
+        } else {
+            // The end of a long query.
+            let art = &mut self.art;
+            let shown = tail_by(q, room, &mut |t| art.width(cr, t));
+            tx += self.art.text(cr, &shown, tx, ty, 2.0, fg, 1.0);
+        }
+        if blink {
+            let cx = if q.is_empty() { tx } else { tx + 2.0 };
+            cb::fill_rounded_rect(cr, cx, ty, cw * 2.0, ch * 2.0, 0.0, accent);
+        }
+        self.art.text(cr, hint, entry.x + entry.w - 24.0 - hint_w, ty, 2.0, dim, 1.0);
+    }
+
+    fn motion(&mut self, x: f64, y: f64) -> bool {
+        self.picker.hover(x, y)
+    }
+
+    fn click(&mut self, x: f64, y: f64, _shift: bool) -> Effect {
+        self.picker.mouse_active = true;
+        self.picker.hit(x, y).map_or(Effect::None, |i| self.picker.launch(i))
+    }
+
+    fn scroll(&mut self, delta: f64) -> bool {
+        self.picker.wheel(delta)
+    }
+
+    fn key(&mut self, special: u32, typed: Option<char>, _shift: bool, ctrl: bool) -> Effect {
+        if let Some(effect) = self.picker.line_key(special, ctrl, PIXEL_ROWS as i32) {
+            return effect;
+        }
+        match self.picker.edit(special, typed, ctrl) {
+            Some(true) => {
+                self.picker.filter();
+                self.first = 0;
+                Effect::Redraw
+            }
+            Some(false) => Effect::Redraw,
+            None => Effect::None,
+        }
+    }
+
+    /// The arrow and the cursor blink.
+    fn poll(&mut self) -> bool {
+        self.blink_on() != self.blink
+    }
+
+    fn wake_in(&self) -> Option<Duration> {
+        let period = PIXEL_BLINK.as_millis();
+        let ms = self.picker.opened.elapsed().as_millis();
+        Some(Duration::from_millis((period - ms % period) as u64 + 1))
+    }
+
+    fn clickable(&self) -> bool {
+        self.picker.clickable()
+    }
+}
+
+#[cfg(test)]
+mod pixel_tests {
+    use super::*;
+
+    #[test]
+    fn wraps_and_fits() {
+        let mut chars = |t: &str| t.chars().count() as f64;
+        assert_eq!(wrap_by("Fast and private browser", 10.0, 4, &mut chars), ["Fast and", "private", "browser"]);
+        let cut = wrap_by("one two three four five six", 9.0, 2, &mut chars);
+        assert_eq!(cut.len(), 2);
+        assert!(cut[1].ends_with('…') && cut[1].chars().count() <= 9);
+        assert_eq!(fit_by("Firefox", 7.0, &mut chars), "Firefox");
+        assert_eq!(fit_by("Firefox Web", 8.0, &mut chars), "Firefox…");
+        assert_eq!(tail_by("hello world", 5.0, &mut chars), "world");
+    }
+
+    /// `PRISM_LAUNCHER_RENDER_DIR=<dir> cargo test --release -p prism-ui render_pixel -- --nocapture`
+    #[test]
+    fn render_pixel() {
+        let Ok(dir) = std::env::var("PRISM_LAUNCHER_RENDER_DIR") else { return };
+        let theme = Theme::load();
+        let style = Style::new(&prism_common::Config::load(), &theme);
+        let apps = prism_common::apps::load_all_desktop_apps();
+        let (w, h) = card_size("pixel");
+        for (state, query) in [("all", ""), ("search", "fire")] {
+            let mut v = view("pixel", apps.clone());
+            for c in query.chars() {
+                v.key(0, Some(c), false, false);
+            }
+            v.key(launcher::DOWN, None, false, false);
+            let card = Rect { x: 40.0, y: 40.0, w, h };
+            unsafe {
+                let surf = cb::cairo_image_surface_create(0, (w + 80.0) as i32, (h + 80.0) as i32);
+                let cr = cb::cairo_create(surf);
+                v.draw(cr, card, &style, &theme);
+                std::thread::sleep(Duration::from_millis(1500));
+                cb::cairo_set_source_rgba(cr, 0.1, 0.1, 0.12, 1.0);
+                cb::cairo_paint(cr);
+                v.draw(cr, card, &style, &theme);
+                cb::cairo_set_source_rgba(cr, 0.1, 0.1, 0.12, 1.0);
+                cb::cairo_paint(cr);
+                let t = Instant::now();
+                v.draw(cr, card, &style, &theme);
+                println!("pixel/{state}: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+                let path = std::ffi::CString::new(format!("{dir}/pixel-{state}.png")).unwrap();
+                cb::cairo_surface_write_to_png(surf, path.as_ptr());
+                cb::cairo_destroy(cr);
+                cb::cairo_surface_destroy(surf);
+            }
+        }
     }
 }

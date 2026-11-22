@@ -26,6 +26,11 @@ pub const CAIRO_FORMAT_ARGB32: i32 = 0;
 #[link(name = "gobject-2.0")]
 #[link(name = "gdk_pixbuf-2.0")]
 extern "C" {
+    pub fn cairo_font_options_create() -> *mut c_void;
+    pub fn cairo_font_options_destroy(options: *mut c_void);
+    pub fn cairo_font_options_set_hint_style(options: *mut c_void, style: i32);
+    pub fn cairo_font_options_set_hint_metrics(options: *mut c_void, metrics: i32);
+    pub fn pango_cairo_context_set_font_options(context: *mut c_void, options: *const c_void);
     pub fn cairo_set_fill_rule(cr: *mut Cairo, rule: i32);
     pub fn cairo_surface_write_to_png(surface: *mut CairoSurface, filename: *const std::ffi::c_char) -> i32;
     pub fn cairo_image_surface_create_for_data(
@@ -469,16 +474,39 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// This thread's Pango context.
+fn pango_context() -> *mut c_void {
+    PANGO_CONTEXT.with(|c| {
+        if c.get().is_null() {
+            c.set(unsafe { pango_font_map_create_context(pango_cairo_font_map_get_default()) });
+        }
+        c.get()
+    })
+}
+
+/// Runs `f` with text fully hinted and placed on whole pixels: pixel fonts drawn at their
+/// design size come out with every pixel either covered or not.
+pub fn with_crisp_text<R>(f: impl FnOnce() -> R) -> R {
+    const HINT_STYLE_FULL: i32 = 4;
+    const HINT_METRICS_ON: i32 = 2;
+    let ctx = pango_context();
+    unsafe {
+        let options = cairo_font_options_create();
+        cairo_font_options_set_hint_style(options, HINT_STYLE_FULL);
+        cairo_font_options_set_hint_metrics(options, HINT_METRICS_ON);
+        pango_cairo_context_set_font_options(ctx, options);
+        cairo_font_options_destroy(options);
+    }
+    let r = f();
+    unsafe { pango_cairo_context_set_font_options(ctx, std::ptr::null()) };
+    r
+}
+
 /// A new layout for drawing on `cr` with the font `spec` (already resolved, see
 /// apply_global_font). The caller unrefs it.
 pub fn new_layout(cr: *mut Cairo, spec: &str) -> *mut PangoLayout {
     unsafe {
-        let ctx = PANGO_CONTEXT.with(|c| {
-            if c.get().is_null() {
-                c.set(pango_font_map_create_context(pango_cairo_font_map_get_default()));
-            }
-            c.get()
-        });
+        let ctx = pango_context();
         pango_cairo_update_context(cr, ctx);
         let layout = pango_layout_new(ctx);
         FONT_DESCS.with(|d| {
