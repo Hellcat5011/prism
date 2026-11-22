@@ -1037,16 +1037,14 @@ impl NcView {
         // Bottom row.
         let row_h = 34.0;
         let row_y = r.y + r.h - row_h;
-        let label = match count {
-            0 => "No notifications".to_string(),
-            1 => "1 notification".to_string(),
-            n => format!("{n} notifications"),
-        };
-        let label = if self.notif_filter.text.trim().is_empty() {
-            label
-        } else {
+        // The count itself is on the tab's badge; the row only says what the badge cannot.
+        let label = if self.snap.flags.auto_silent {
+            "Focus is on".to_string()
+        } else if !self.notif_filter.text.trim().is_empty() {
             let shown: usize = self.groups().iter().map(|g| g.items.len()).sum();
             format!("{shown} of {count}")
+        } else {
+            String::new()
         };
         let (_, sw) = widgets::button_size(cr, "Silent", "bell", false);
         let (_, clw) = widgets::button_size(cr, "Clear", "close", false);
@@ -1054,11 +1052,10 @@ impl NcView {
         let clear = Rect { x: r.x + r.w - clw, y: row_y, w: clw, h: row_h };
         let sil = Rect { x: clear.x - 8.0 - sw, y: row_y, w: sw, h: row_h };
         let foc = Rect { x: sil.x - 8.0 - fw, y: row_y, w: fw, h: row_h };
-        let label = if self.snap.flags.auto_silent { "Focus is on".to_string() } else { label };
-        // Too long next to the buttons: just the number.
         let avail = foc.x - r.x - 8.0;
-        let label = if text_size(cr, &label, &font(14.0, "")).0 > avail && !self.snap.flags.auto_silent && self.notif_filter.text.trim().is_empty() { count.to_string() } else { label };
-        text_v(cr, r.x, row_y, row_h, &label, &font(14.0, ""), p.fg, Some(avail));
+        if !label.is_empty() {
+            text_v(cr, r.x, row_y, row_h, &label, &font(14.0, ""), p.fg, Some(avail));
+        }
         widgets::button(cr, foc, "Focus", "moon", false, self.focus_open || self.snap.flags.auto_silent, true, hv!(self, Hit::Focus), p);
         self.hits.push((Hit::Focus, foc));
         widgets::button(cr, sil, "Silent", "bell", false, silent, true, hv!(self, Hit::Silent), p);
