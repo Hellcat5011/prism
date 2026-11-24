@@ -133,6 +133,23 @@ pub fn generation() -> u64 {
     STATE.lock().unwrap().0
 }
 
+/// Shell lines that print what will be upgraded (repositories, then the AUR) before the
+/// upgrade command asks for a password.
+fn list_script() -> String {
+    let tab = "if command -v column >/dev/null; then column -t; else cat; fi";
+    let mut s = format!(
+        "printf '\\033[1mUpdates from the repositories\\033[0m\\n'; repo=$(checkupdates 2>/dev/null); \
+         if [ -n \"$repo\" ]; then printf '%s\\n' \"$repo\" | {tab}; else echo 'None'; fi; echo; "
+    );
+    if let Some(h) = aur_helper() {
+        s += &format!(
+            "printf '\\033[1mUpdates from the AUR\\033[0m\\n'; aur=$({h} -Qua 2>/dev/null); \
+             if [ -n \"$aur\" ]; then printf '%s\\n' \"$aur\" | {tab}; else echo 'None'; fi; echo; "
+        );
+    }
+    s
+}
+
 /// Upgrade in a terminal, then check again when it closes.
 pub fn run_update(command: &str) {
     let cmd = if !command.trim().is_empty() {
@@ -142,7 +159,7 @@ pub fn run_update(command: &str) {
     } else {
         "sudo pacman -Syu".to_string()
     };
-    let script = format!("{cmd}; echo; read -r -p 'Done. Press Enter to close.' _");
+    let script = format!("{}{cmd}; echo; read -r -p 'Done. Press Enter to close.' _", list_script());
     let Some(mut term) = prism_common::apps::terminal_command(&["sh".into(), "-c".into(), script]) else {
         eprintln!("[prism-ui] updates: no terminal found (set $TERMINAL)");
         return;

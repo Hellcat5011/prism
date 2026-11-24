@@ -175,7 +175,7 @@ impl CompEditView {
         match self.comp {
             Some(Compositor::Mango) => "spawn,firefox   killclient   togglefloating   view,2",
             Some(Compositor::Niri) => "spawn \"firefox\"   close-window   toggle-window-floating",
-            Some(Compositor::Hyprland) => "exec, firefox   killactive   togglefloating (Lua: a command to run)",
+            Some(Compositor::Hyprland) => "firefox   (a command to run)",
             None => "",
         }
     }
@@ -196,8 +196,8 @@ impl CompEditView {
                 height: self.field(Field::Height).trim().to_string(),
                 workspace: self.field(Field::Workspace).trim().to_string(),
                 opacity: self.field(Field::Opacity).trim().to_string(),
-                other: old.as_ref().map(|o| o.other.clone()).unwrap_or_default(),
-                ..Default::default()
+                // What the form does not show (other settings, name, indentation) stays.
+                ..old.clone().unwrap_or_default()
             });
             if let Some(n) = &new {
                 if n.app_id.is_empty() && n.title.is_empty() {
@@ -337,7 +337,7 @@ impl CardView for CompEditView {
                 if !rl.opacity.is_empty() {
                     parts.push(format!("opacity {}", rl.opacity));
                 }
-                parts.extend(rl.other.iter().cloned());
+                parts.extend(rl.other.iter().map(|o| o.trim().to_string()));
                 let t = if rl.app_id.is_empty() { format!("title: {}", rl.title) } else { rl.app_id.clone() };
                 (t, parts.join(" \u{b7} "), rl.editable, &rl.file)
             } else {

@@ -183,9 +183,16 @@ pub fn set_brightness(pct: u32) -> Result<u32, String> {
         Backlight::Brightnessctl => Command::new("brightnessctl")
             .args(["-c", "backlight", "s", &format!("{}%", clamped), "-q"])
             .status(),
-        Backlight::Ddc(bus) => Command::new("ddcutil")
-            .args(["-b", bus, "--noverify", "setvcp", "10", &clamped.to_string()])
-            .status(),
+        Backlight::Ddc(bus) => {
+            // Straight over I2C (~20 ms), else ddcutil (~0.4 s and busy on the GPU's bus).
+            if let Some(max) = fade::ddc_max(bus) {
+                if fade::ddc_write(bus, (clamped * max + 50) / 100).is_ok() {
+                    store_brightness(clamped);
+                    return Ok(clamped);
+                }
+            }
+            Command::new("ddcutil").args(["-b", bus, "--noverify", "setvcp", "10", &clamped.to_string()]).status()
+        }
         Backlight::None => return Err("no brightness control found".to_string()),
     }
     .map_err(|e| format!("Failed to set brightness: {}", e))?;
@@ -194,6 +201,130 @@ pub fn set_brightness(pct: u32) -> Result<u32, String> {
     }
     store_brightness(clamped);
     Ok(clamped)
+}
+
+/// Raw brightness control for fades (the idle dim): finer steps than percent and, for DDC/CI,
+/// writes straight to the I2C bus instead of a ddcutil process per step (~0.4 s each).
+pub mod fade {
+    use super::{backlight, cached_brightness, Backlight, Command};
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    /// (current, maximum) in the device's own units. DDC: current from Prism's last set value
+    /// (reading over DDC stalls the compositor), maximum read once.
+    pub fn read() -> Option<(u32, u32)> {
+        match backlight() {
+            Backlight::Brightnessctl => {
+                let out = Command::new("brightnessctl").args(["-m", "-c", "backlight", "info"]).output().ok()?;
+                // device,class,curr,curr_pct,max
+                let text = String::from_utf8_lossy(&out.stdout);
+                let f: Vec<&str> = text.lines().next()?.split(',').collect();
+                Some((f.get(2)?.parse().ok()?, f.get(4)?.trim().parse().ok()?))
+            }
+            Backlight::Ddc(bus) => {
+                let max = ddc_max(bus)?;
+                let pct = cached_brightness().or_else(|| super::get_brightness().ok())?;
+                Some(((pct * max + 50) / 100, max))
+            }
+            Backlight::None => None,
+        }
+    }
+
+    /// Set the raw value. Blocks for the write (DDC: also until 50 ms after the previous one).
+    pub fn set(value: u32) -> Result<(), String> {
+        match backlight() {
+            Backlight::Brightnessctl => {
+                let ok = Command::new("brightnessctl").args(["-c", "backlight", "s", &value.to_string(), "-q"]).status().map_err(|e| e.to_string())?.success();
+                if ok { Ok(()) } else { Err("brightnessctl failed".into()) }
+            }
+            Backlight::Ddc(bus) => {
+                if ddc_write(bus, value).is_ok() {
+                    return Ok(());
+                }
+                let ok = Command::new("ddcutil").args(["-b", bus, "--noverify", "setvcp", "10", &value.to_string()]).status().map_err(|e| e.to_string())?.success();
+                if ok { Ok(()) } else { Err("ddcutil failed".into()) }
+            }
+            Backlight::None => Err("no brightness control found".into()),
+        }
+    }
+
+    /// Whether `set` is quick enough for many small steps.
+    pub fn fast() -> bool {
+        match backlight() {
+            Backlight::Brightnessctl => true,
+            Backlight::Ddc(bus) => DEV.lock().is_ok_and(|d| d.is_some()) || open(bus).is_ok(),
+            Backlight::None => false,
+        }
+    }
+
+    /// The monitor's brightness maximum: read once with ddcutil, then kept in
+    /// `~/.cache/prism/ddc-max` (`<bus> <max>`) so other processes need no DDC read.
+    pub(super) fn ddc_max(bus: &str) -> Option<u32> {
+        static MAX: OnceLock<Option<u32>> = OnceLock::new();
+        *MAX.get_or_init(|| {
+            let cache = super::brightness_cache_path().with_file_name("ddc-max");
+            if let Some(m) = std::fs::read_to_string(&cache).ok().and_then(|t| {
+                let (b, m) = t.trim().split_once(' ')?;
+                (b == bus).then(|| m.parse::<u32>().ok()).flatten()
+            }) {
+                return Some(m);
+            }
+            let out = Command::new("ddcutil").args(["-b", bus, "getvcp", "10", "--brief"]).output().ok()?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            let f: Vec<&str> = text.split_whitespace().collect();
+            let i = f.iter().position(|t| *t == "C")?;
+            let max = f.get(i + 2)?.parse().ok().filter(|m| *m > 0)?;
+            let _ = std::fs::write(&cache, format!("{bus} {max}"));
+            Some(max)
+        })
+    }
+
+    /// The open bus, and when it was last written (DDC/CI wants 50 ms between commands).
+    static DEV: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+    fn open(bus: &str) -> Result<(), String> {
+        use std::os::fd::AsRawFd;
+        const I2C_SLAVE: libc::c_ulong = 0x0703;
+        let f = std::fs::OpenOptions::new().read(true).write(true).open(format!("/dev/i2c-{bus}")).map_err(|e| e.to_string())?;
+        // SAFETY: plain ioctl on an fd we own; the address is DDC/CI's 0x37.
+        if unsafe { libc::ioctl(f.as_raw_fd(), I2C_SLAVE as _, 0x37 as libc::c_ulong) } < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        *DEV.lock().map_err(|_| "poisoned")? = Some(f);
+        Ok(())
+    }
+
+    /// DDC/CI "Set VCP Feature" 0x10 (brightness), at most one per 50 ms.
+    pub(super) fn ddc_write(bus: &str, value: u32) -> Result<(), String> {
+        if DEV.lock().map_err(|_| "poisoned")?.is_none() {
+            open(bus)?;
+        }
+        let packet = set_vcp_packet(0x10, value.min(0xffff) as u16);
+        let mut last = LAST.lock().map_err(|_| "poisoned")?;
+        if let Some(t) = *last {
+            let rest = std::time::Duration::from_millis(50).saturating_sub(t.elapsed());
+            if !rest.is_zero() {
+                std::thread::sleep(rest);
+            }
+        }
+        let mut dev = DEV.lock().map_err(|_| "poisoned")?;
+        let f = dev.as_mut().ok_or("closed")?;
+        let r = f.write_all(&packet).map_err(|e| {
+            *dev = None;
+            e.to_string()
+        });
+        *last = Some(std::time::Instant::now());
+        r
+    }
+
+    /// Source 0x51, length 0x84 (4 bytes follow), opcode 0x03, VCP code, value, checksum: XOR
+    /// of the destination address byte 0x6e and every byte before it.
+    pub(crate) fn set_vcp_packet(code: u8, value: u16) -> [u8; 7] {
+        let mut p = [0x51, 0x84, 0x03, code, (value >> 8) as u8, value as u8, 0];
+        p[6] = p[..6].iter().fold(0x6e, |a, b| a ^ b);
+        p
+    }
 }
 
 /// Adjust brightness by delta percentage (+5, -5)
@@ -209,6 +340,12 @@ pub fn change_brightness(delta: i32) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ddc_set_vcp_packet() {
+        // Matches what ddcutil sends for `setvcp 10 50`.
+        assert_eq!(fade::set_vcp_packet(0x10, 50), [0x51, 0x84, 0x03, 0x10, 0x00, 0x32, 0x51 ^ 0x84 ^ 0x03 ^ 0x10 ^ 0x32 ^ 0x6e]);
+    }
 
     #[test]
     fn parses_ddcutil_output() {
@@ -283,4 +420,28 @@ pub fn set_charge_limit(limit: u8, ask: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod fade_live {
+    /// `cargo test --release -p prism-common fade_live -- --ignored --nocapture` (changes brightness).
+    #[test]
+    #[ignore]
+    fn fade_live() {
+        let (cur, max) = super::fade::read().expect("no brightness control");
+        println!("cur {cur} max {max} fast {}", super::fade::fast());
+        let t = std::time::Instant::now();
+        let mut n = 0;
+        for v in (cur / 2..=cur).rev().chain(cur / 2..=cur) {
+            super::fade::set(v).unwrap();
+            n += 1;
+        }
+        println!("{n} writes in {:?} ({:?} each)", t.elapsed(), t.elapsed() / n);
+        let pct = super::cached_brightness().unwrap_or(100);
+        let t = std::time::Instant::now();
+        for v in (pct.saturating_sub(20).max(1)..=pct).rev().chain(pct.saturating_sub(20).max(1)..=pct) {
+            super::set_brightness(v).unwrap();
+        }
+        println!("set_brightness: 42 steps in {:?}", t.elapsed());
+    }
 }

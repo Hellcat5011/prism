@@ -14,6 +14,7 @@ mod bluelight;
 mod calendar;
 mod config_watch;
 mod depth;
+mod dimmer;
 mod dl;
 mod displays;
 mod downloads;
@@ -581,8 +582,6 @@ fn start_clipboard_pruner(state: Arc<Mutex<DaemonState>>) {
 
 /// Start prism-lock unless one is already running.
 /// A lock is in progress (a supervisor thread owns the prism-lock process).
-/// Screen brightness factor while dimmed before auto-lock.
-const IDLE_DIM: f64 = 0.3;
 
 /// Last `prism-ctl index rebuild`: (status, message); status is idle, running, success or failed.
 static INDEX_STATE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
@@ -1848,6 +1847,7 @@ fn main() {
     start_silent_schedule(Arc::clone(&state));
     start_snooze_waker(Arc::clone(&state));
 
+    let dimmer = dimmer::Dimmer::start(gamma.clone());
     let idle = idle::start_idle_monitor(
         idle_start,
         is_idle,
@@ -1856,12 +1856,9 @@ fn main() {
                 eprintln!("[prismd/idle] lock failed: {}", e);
             }
         }),
-        // QML dimmed the screens 30 s before the lock; done in the gamma ramp (instant, every
-        // output) instead of DDC brightness writes, which stall the compositor.
+        // 30 s before the lock the brightness fades to half (dimmer.rs).
         Box::new(move |dim| {
-            if let Some(g) = &gamma {
-                g.dim(if dim { IDLE_DIM } else { 1.0 });
-            }
+            dimmer.dim(dim);
             IDLE_DIMMED.store(dim, Ordering::SeqCst);
             update_away();
         }),
