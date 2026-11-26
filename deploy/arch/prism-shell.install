@@ -1,0 +1,16 @@
+post_install() {
+    echo ">>> Prism is installed. As your user (not root), run once:"
+    echo ">>>     prism-setup"
+    echo ">>> It starts prismd, sets up screen sharing and, if you want, the Prism login screen."
+    echo ">>> Then add the snippet for your compositor (see /usr/share/doc/prism-shell/README.md)."
+}
+
+post_upgrade() {
+    echo ">>> Restart Prism to use the new version:  systemctl --user restart prismd"
+}
+
+pre_remove() {
+    echo ">>> pacman removes only the package. Each user's setup (service, portal choice, greeter"
+    echo ">>> config, settings) is removed by 'prism-setup --uninstall', which also removes this"
+    echo ">>> package and lets you pick which of the programs Prism used to remove."
+}

@@ -1,0 +1,101 @@
+# Maintainer: Hellcat5011 (https://github.com/Hellcat5011)
+#
+# Prism as a pacman package: binaries in /usr/bin, the rest under /usr/share/prism, the user
+# service, portal, icon, launcher entry, man page and lock screen PAM service system-wide.
+# Each user then runs `prism-setup` once (deploy/install.sh in package mode).
+#
+#   makepkg -si          in a directory with this file and prism-shell.install
+#
+# The release workflow (.github/workflows/release.yml) builds it for every v* tag.
+pkgname=prism-shell
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Wayland desktop shell: bar, dock, launcher, notifications, widgets, lock screen and greeter'
+arch=('x86_64')
+url='https://github.com/Hellcat5011/prism'
+license=('GPL-3.0-or-later' 'OFL-1.1')
+depends=(
+    'cairo' 'dbus' 'ffmpeg' 'fontconfig' 'gcc-libs' 'gdk-pixbuf2' 'glib2' 'glibc' 'gtk3'
+    'libxkbcommon' 'pam' 'pango' 'pipewire' 'wayland' 'wireplumber' 'xdg-desktop-portal'
+    'xdg-utils'
+)
+makedepends=('cargo' 'clang' 'pkgconf')
+optdepends=(
+    'matugen: colours taken from the wallpaper (AUR: matugen-bin)'
+    'networkmanager: Wi-Fi, Ethernet and VPN in the notification centre'
+    'bluez: Bluetooth in the notification centre'
+    'bluez-utils: Bluetooth in the notification centre'
+    'bluez-obex: receiving files over Bluetooth'
+    'upower: battery levels and low battery warnings'
+    'power-profiles-daemon: power profiles and game mode'
+    'udisks2: mounting and ejecting USB drives'
+    'gnome-keyring: keeping calendar addresses (and app passwords) safe'
+    'polkit: changes that need your password (Prism is the polkit agent)'
+    'curl: weather, online calendars and sunset times'
+    'libpulse: choosing sound devices and ports'
+    'brightnessctl: screen brightness on laptops'
+    'ddcutil: brightness of external monitors'
+    'tesseract: copy text from the screen'
+    'tesseract-data-eng: copy text from the screen'
+    'wtype: typing an emoji from the emoji picker'
+    'plocate: finding files in Search'
+    'pacman-contrib: counting package updates'
+    'python: keybinds viewer and depth wallpapers'
+    'librsvg: sharper app icons at small sizes'
+    'greetd: the Prism login screen'
+    'cage: the Prism login screen'
+)
+backup=('etc/pam.d/prism')
+install=prism-shell.install
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "prism-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "prism-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    # Slow on prism-ui: [profile.release] uses link-time optimisation and one codegen unit.
+    cargo build --frozen --release
+}
+
+package() {
+    cd "prism-$pkgver"
+    local b
+    for b in prismd prism-ui prism-ctl prism-native-host prism-lock prism-phoned prism-rec prism-video; do
+        install -Dm755 "target/release/$b" "$pkgdir/usr/bin/$b"
+    done
+    # Per-user setup and removal for the package's Prism.
+    printf '#!/bin/sh\nexec /usr/share/prism/deploy/install.sh "$@"\n' | install -Dm755 /dev/stdin "$pkgdir/usr/bin/prism-setup"
+
+    # Read through prism_common's find_script: <exe>/../share/prism.
+    install -dm755 "$pkgdir/usr/share/prism/scripts"
+    install -m644 scripts/*.py "$pkgdir/usr/share/prism/scripts/"
+    install -m755 scripts/*.sh "$pkgdir/usr/share/prism/scripts/"
+    install -Dm644 assets/wallpapers/prism.png "$pkgdir/usr/share/prism/wallpapers/prism.png"
+    # Compositor snippets, matugen template, greetd config and install.sh (prism-setup).
+    cp -r --no-preserve=ownership deploy "$pkgdir/usr/share/prism/deploy"
+    rm -rf "$pkgdir/usr/share/prism/deploy/arch" "$pkgdir/usr/share/prism/deploy/fonts" \
+        "$pkgdir"/usr/share/prism/deploy/package-*.sh
+
+    sed 's|^ExecStart=.*|ExecStart=/usr/bin/prismd|' deploy/prismd.service \
+        | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/prismd.service"
+    install -Dm644 deploy/portal/prism.portal "$pkgdir/usr/share/xdg-desktop-portal/portals/prism.portal"
+    install -Dm644 deploy/portal/org.freedesktop.impl.portal.desktop.prism.service \
+        "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.prism.service"
+    install -Dm644 assets/logo/prism-app.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/prism.svg"
+    install -Dm644 deploy/prism-settings.desktop "$pkgdir/usr/share/applications/prism-settings.desktop"
+    install -Dm644 man/prism-ctl.1 "$pkgdir/usr/share/man/man1/prism-ctl.1"
+    install -Dm644 deploy/pam.d/prism "$pkgdir/etc/pam.d/prism"
+    install -Dm644 deploy/fonts/PixelifySans.ttf "$pkgdir/usr/share/fonts/prism/PixelifySans.ttf"
+
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 deploy/fonts/PixelifySans-OFL.txt "$pkgdir/usr/share/licenses/$pkgname/PixelifySans-OFL.txt"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

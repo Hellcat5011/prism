@@ -22,6 +22,7 @@ Targets & Commands:
   caffeinate [on|off]
   setup                             the first-time setup guide
   deps [--quiet]                    missing programs and services (exit 1: something needed)
+  deps --packages                   every one, tab-separated: name, level, Arch packages, use
   notes [toggle|open|close]         the Notes card
   timer [start <5m|90s|1h30m>|add <1m>|pause|resume|cancel|status]
   stopwatch [toggle|reset]
@@ -470,6 +471,21 @@ fn print_deps(quiet: bool) -> i32 {
     i32::from(missing.iter().any(|d| d.level == deps::Level::Needed))
 }
 
+/// `prism-ctl deps --packages`: every program and service Prism uses, one per line, tab-separated:
+/// name, level, Arch packages (space-separated, "(AUR)" left out) and what it is for. The
+/// uninstaller offers to remove the installed ones.
+fn print_dep_packages() {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    for d in prism_common::deps::DEPS {
+        let pkgs = d.arch.replace("(AUR)", "");
+        // A closed pipe (| head) just ends the list.
+        if writeln!(out, "{}\t{}\t{}\t{}", d.name, d.level.label(), pkgs.split_whitespace().collect::<Vec<_>>().join(" "), d.what).is_err() {
+            return;
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
@@ -478,6 +494,10 @@ fn main() {
     }
     // Needs no running Prism (install.sh runs it).
     if args[0] == "deps" {
+        if args.get(1).map(String::as_str) == Some("--packages") {
+            print_dep_packages();
+            return;
+        }
         exit(print_deps(args.get(1).map(String::as_str) == Some("--quiet")));
     }
 

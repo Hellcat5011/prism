@@ -1,0 +1,75 @@
+# Prebuilt Prism for Arch Linux: on every v* tag, build in an up-to-date Arch container and attach
+# to the GitHub release the pacman package (deploy/arch/PKGBUILD: prism-shell-<version>-1-x86_64
+# .pkg.tar.zst) and the archive for ~/.local installs (deploy/package-release.sh: prism-<version>
+# -x86_64.tar.gz), each with a .sha256. Both come from one build: the archive takes the package's
+# binaries. "Run workflow" on the Actions page builds the same files as an artifact only.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git rust clang pkgconf wayland libxkbcommon cairo pango \
+            gdk-pixbuf2 gtk3 dbus ffmpeg pipewire pam
+      - uses: actions/checkout@v4
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/cargo-home/registry
+            /tmp/cargo-home/git
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Check the versions
+        run: |
+          v="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)"
+          p="$(sed -n 's/^pkgver=//p' deploy/arch/PKGBUILD)"
+          [ "$v" = "$p" ] || { echo "Cargo.toml says $v but deploy/arch/PKGBUILD says $p"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "v$v" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} but Cargo.toml says $v"; exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      - name: Build the pacman package
+        run: |
+          # makepkg refuses to run as root.
+          useradd -m builder
+          git config --global --add safe.directory "$PWD"
+          mkdir -p /tmp/pkg /tmp/cargo-home
+          cp deploy/arch/PKGBUILD deploy/arch/prism-shell.install /tmp/pkg/
+          # The source makepkg would download from the tag, made from this checkout instead.
+          git archive --format=tar.gz --prefix="prism-$VERSION/" -o "/tmp/pkg/prism-shell-$VERSION.tar.gz" HEAD
+          chown -R builder /tmp/pkg /tmp/cargo-home
+          (cd /tmp/pkg && sudo -u builder env CARGO_HOME=/tmp/cargo-home makepkg --noconfirm --nodeps)
+          mkdir -p target/dist
+          cp /tmp/pkg/*.pkg.tar.zst target/dist/
+          (cd target/dist && for f in *.pkg.tar.zst; do sha256sum "$f" > "$f.sha256"; done)
+      - name: Pack the archive for ~/.local installs
+        run: |
+          mkdir -p target/release
+          for b in prismd prism-ui prism-ctl prism-native-host prism-lock prism-phoned prism-rec prism-video; do
+            cp "/tmp/pkg/src/prism-$VERSION/target/release/$b" target/release/
+          done
+          ./deploy/package-release.sh --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-x86_64
+          path: target/dist/*
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/dist/*.pkg.tar.zst
+            target/dist/*.tar.gz
+            target/dist/*.sha256
+          generate_release_notes: true

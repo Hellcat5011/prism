@@ -1881,6 +1881,12 @@ fn main() {
     // Autostart persistent desktop widgets layer surface if Wayland environment is active
     if std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("WAYLAND_SOCKET").is_ok() {
         // One resident prism-ui hosts the desktop widgets and every overlay.
+        // First start: Prism's own wallpaper (and colours from it) before the background shows.
+        let default_cfg = lock_state(&state).config.clone();
+        if let Some(wp) = prism_common::wallpaper::apply_default_if_unset(&default_cfg) {
+            eprintln!("[prismd] No wallpaper yet: showing {}", wp.display());
+            lock_state(&state).theme = Theme::load();
+        }
         eprintln!("[prismd] Starting resident prism-ui daemon...");
         ensure_ui_daemon();
         start_clipboard_daemon(Arc::clone(&state));

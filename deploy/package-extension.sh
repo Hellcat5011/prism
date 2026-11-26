@@ -18,9 +18,9 @@ SRC="$REPO_DIR/extension"
 VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$SRC/manifest.json")"
 OUT="$REPO_DIR/target/extension/prism-downloads-$VERSION.xpi"
 mkdir -p "$(dirname "$OUT")"
-python3 - "$SRC" "$OUT" <<'PY'
+python3 - "$SRC" "$OUT" "$REPO_DIR/LICENSE" <<'PY'
 import os, sys, zipfile
-src, out = sys.argv[1], sys.argv[2]
+src, out, licence = sys.argv[1], sys.argv[2], sys.argv[3]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for root, dirs, files in os.walk(src):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
@@ -29,5 +29,7 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
                 continue
             path = os.path.join(root, f)
             z.write(path, os.path.relpath(path, src))
+    # GPL-3.0-or-later, like the rest of Prism.
+    z.write(licence, "LICENSE")
 PY
 echo "Wrote $OUT"

@@ -70,6 +70,27 @@ pub fn displayed_wallpaper() -> Option<PathBuf> {
     get_current_wallpaper()
 }
 
+/// Prism's own wallpaper (the logo on #1A1B26), installed as `share/prism/wallpapers/prism.png`.
+pub fn default_wallpaper() -> Option<PathBuf> {
+    crate::keybinds::find_script("wallpapers/prism.png").or_else(|| crate::keybinds::find_script("assets/wallpapers/prism.png"))
+}
+
+/// First start with the built-in engine and no wallpaper chosen yet: show Prism's own.
+/// Returns the wallpaper it set.
+pub fn apply_default_if_unset(cfg: &crate::Config) -> Option<PathBuf> {
+    if cfg.wallpaper_daemon != "prism" || displayed_wallpaper().is_some() {
+        return None;
+    }
+    let path = default_wallpaper()?;
+    match set_wallpaper(&path, Some("prism"), None, None) {
+        Ok(()) => Some(path),
+        Err(e) => {
+            eprintln!("[prism] default wallpaper: {e}");
+            None
+        }
+    }
+}
+
 /// The file to display for `image_path` under `filter`: the image itself for `Filter::Normal`,
 /// else a full-size filtered copy in the cache (rendered once).
 pub fn render_filtered(image_path: &Path, filter: Filter) -> Result<PathBuf, String> {
@@ -370,6 +391,12 @@ pub fn scan_wallpapers(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_wallpaper_is_found() {
+        let p = default_wallpaper().expect("assets/wallpapers/prism.png");
+        assert!(p.ends_with("wallpapers/prism.png"));
+    }
 
     #[test]
     fn test_current_wallpaper_fallback() {

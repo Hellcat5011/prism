@@ -253,17 +253,81 @@ Network / Bluetooth tray icons (VPN, device and send-file menus). The Control Ce
 filter, bulk import of .ovpn / WireGuard files through `nmcli`), Bluetooth devices have a Send button, and its
 tiles are chosen in Settings > Notifications. Stop the program a service replaces before turning it on.
 
-### Build and install
+There are three ways to install. On Arch Linux and Arch-based systems (CachyOS, EndeavourOS, Manjaro once it
+has caught up with Arch's FFmpeg and PipeWire), the pacman package is the simplest: nothing to compile, and
+pacman brings in the libraries and keeps track of the files.
+
+### Arch Linux: pacman package
+
+Each [release](https://github.com/Hellcat5011/prism/releases) has `prism-shell-<version>-1-x86_64.pkg.tar.zst`,
+built on an up-to-date Arch Linux by `.github/workflows/release.yml` from `deploy/arch/PKGBUILD`.
 
 ```bash
+VER=0.1.0   # the release you want
+curl -LO https://github.com/Hellcat5011/prism/releases/download/v$VER/prism-shell-$VER-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/Hellcat5011/prism/releases/download/v$VER/prism-shell-$VER-1-x86_64.pkg.tar.zst.sha256
+sha256sum -c prism-shell-$VER-1-x86_64.pkg.tar.zst.sha256
+sudo pacman -U prism-shell-$VER-1-x86_64.pkg.tar.zst
+prism-setup          # once, as your user (not root)
+```
+
+The package puts the programs in `/usr/bin`, the rest in `/usr/share/prism`, and installs the user service,
+the screen-sharing portal, the app icon, the Prism Settings launcher entry, the man page, the Pixel launcher
+font and the lock screen's PAM service (`/etc/pam.d/prism`) system-wide. Recommended and optional programs
+from the table above are its optional dependencies (`pacman -Qi prism-shell` lists them).
+
+`prism-setup` is the installer in package mode: it enables `prismd`, chooses the Prism portal for your desktop,
+offers the battery charge limit rule and the login screen (greeter), and checks the run-time programs. It also
+finds an earlier manual install in your home folder (which would run instead) and offers to remove it; your
+settings stay. Compositor snippets are in `/usr/share/prism/deploy/`.
+
+To update, install the new release's package the same way, then `systemctl --user restart prismd`.
+
+To build the package yourself: copy `deploy/arch/PKGBUILD` and `deploy/arch/prism-shell.install` into an empty
+directory and run `makepkg -si` there (it downloads the tagged sources; compiling takes a while, see below).
+
+### Arch Linux: prebuilt archive (no root)
+
+The same binaries for an install in your home folder (`~/.local`), like a source build: each release also has
+`prism-<version>-x86_64.tar.gz` and its `.sha256`.
+
+```bash
+VER=0.1.0   # the release you want
+curl -LO https://github.com/Hellcat5011/prism/releases/download/v$VER/prism-$VER-x86_64.tar.gz
+curl -LO https://github.com/Hellcat5011/prism/releases/download/v$VER/prism-$VER-x86_64.tar.gz.sha256
+sha256sum -c prism-$VER-x86_64.tar.gz.sha256
+tar xzf prism-$VER-x86_64.tar.gz
+cd prism-$VER-x86_64
 ./deploy/install.sh
 systemctl --user enable --now prismd
 ```
 
+To update, do the same with the new release.
+
+The installer sees the prebuilt binaries and installs them without compiling; everything else is as below. When
+a library they were built against is missing or of another version, it says which; update the system
+(`sudo pacman -Syu`) or build from source. `deploy/package-release.sh` makes the same archive locally.
+
+### Any distribution: build from source
+
+```bash
+git clone https://github.com/Hellcat5011/prism.git
+cd prism
+./deploy/install.sh
+systemctl --user enable --now prismd
+```
+
+> **The build takes a while, and `prism-ui` longest.** Release builds use link-time optimisation and a single
+> code unit per crate (`[profile.release]` in `Cargo.toml`) for smaller, faster binaries. Cargo can sit on
+> `prism-ui` for several minutes with one CPU core busy: that is expected, it has not frozen. Later builds
+> recompile only what changed. The prebuilt release above skips this.
+
 The installer checks the build dependencies, builds the workspace and installs:
 - the binaries (`prismd`, `prism-ui`, `prism-ctl`, `prism-native-host`, `prism-lock`, `prism-phoned`, `prism-rec`,
   `prism-video`) to `~/.local/bin/`;
-- helper scripts to `~/.local/share/prism/scripts/`;
+- helper scripts to `~/.local/share/prism/scripts/`, and Prism's own wallpaper (the logo on #1A1B26) to
+  `~/.local/share/prism/wallpapers/prism.png`, shown on first start with the built-in wallpaper engine until you
+  pick one;
 - the `prism-ctl(1)` man page to `~/.local/share/man/man1/`;
 - `prismd.service` to `~/.config/systemd/user/`.
 
@@ -274,15 +338,80 @@ page lists anything still missing.
 Run from a terminal, it asks whether to add `~/.local/bin` to your shell's PATH when it is missing (so `prism-ctl`
 works from a terminal and from compositor keybinds), whether to install the lock screen's PAM service, and, on the
 first install, whether to set up the login screen (greeter, below). Nothing outside your home directory changes unless you say yes there.
-`--greeter`, `--no-greeter` and `--yes` answer without asking.
+`--greeter`, `--no-greeter` and `--yes` answer without asking; `--uninstall` and `--purge` remove Prism
+(below).
 
-Run it again to update: it restarts `prismd` when it is running (apps you opened keep running) and offers to update
+Run it again to update (after `git pull`): it restarts `prismd` when it is running (apps you opened keep running) and offers to update
 the greeter when it is installed. `prismd` starts `prism-ui` itself. Do not also start `prismd` from the compositor
 config.
 
+### Uninstall
+
+Uninstalling stops `prismd` and removes what the installer put in place. It asks before each step that needs
+`sudo`, and before deleting your settings and data.
+
+**Installed from source or the prebuilt archive:** from the same folder you installed from,
+
+```bash
+./deploy/install.sh --uninstall     # keeps your settings and data unless you say otherwise
+./deploy/install.sh --purge         # also deletes them, without asking
+```
+
+**Installed with the pacman package:**
+
+```bash
+prism-setup --uninstall             # or: prism-setup --purge
+```
+
+It removes your user's setup, then asks before removing the package itself (`sudo pacman -Rn prism-shell`).
+Other users of the computer run `prism-setup --uninstall` before that. Avoid `pacman -Rns prism-shell`: `-s`
+would also remove libraries such as FFmpeg and GTK when no other package depends on them, even if you use
+them yourself.
+
+What is removed:
+- the programs in `~/.local/bin`, the helper scripts and default wallpaper in `~/.local/share/prism`, the
+  `prismd` service, the portal files, the app icon, the launcher entry, the man page and the Pixel launcher
+  font (a manual install; pacman removes the package's own);
+- the portal choices file the installer wrote (`~/.config/xdg-desktop-portal/<desktop>-portals.conf`, only
+  when unchanged) and the Firefox / LibreWolf native messaging files for Prism Downloads;
+- with `sudo`, each after asking: `/etc/pam.d/prism`, the battery charge limit udev rule, the keyring lines
+  Prism added to `/etc/pam.d/greetd`, and the greeter: your earlier greetd config is put back from its backup,
+  then `/usr/local/bin/prism-lock`, `/usr/local/bin/prism-video` and `/var/lib/greetd/prism` are removed. With no
+  backup to put back, the greeter stays (you could not log in without it); set another greeter in
+  `/etc/greetd/config.toml` or switch display manager, then run the uninstaller again;
+- the line the installer added to your shell's PATH, only if you say yes (other programs in `~/.local/bin`
+  may need it).
+
+**Packages are your choice.** Prism uses programs that are useful on their own (matugen, ddcutil, tesseract,
+NetworkManager...), so the uninstaller never removes one by itself. On Arch-based systems it lists those that
+are installed, numbered, and you type the numbers of the ones to remove separated by spaces, `all` for every
+one, or just Enter to keep them all:
+
+```
+  1) matugen                      colours taken from the wallpaper (recommended)
+  ...
+ 12) ddcutil                      brightness of external monitors (optional)
+ 13) tesseract tesseract-data-eng Copy text from the screen (optional)
+  Numbers to remove, separated by spaces, "all", or Enter to keep them all: 1 13
+```
+
+Only those are removed, with `sudo pacman -Rns` (pacman shows the full list and asks once more), and the rest
+stay. A chosen package that another installed package still needs is kept and the uninstaller says which
+package needs it. Sound (PipeWire, WirePlumber), the desktop portal, xdg-utils, GLib and fontconfig are not
+offered: the desktop needs them. Without a terminal, and with `--yes` or `--purge`, no package is removed.
+
+Your settings and data are kept unless you say yes, or pass `--purge`: `~/.config/prism`,
+`~/.local/share/prism`, `~/.local/state/prism`, `~/.cache/prism` and the wallpaper copies `~/.wa.jpg` and
+`~/.wa-thumb.jpg`.
+
+Left for you: the Prism lines in your compositor config and the matugen template. Calendar addresses stay in
+your keyring, and a keyring renamed to "login" keeps that name. Remove the Prism Downloads extension in
+Firefox's Add-ons page.
+
 ### Compositor
 
-Include the snippet for your compositor. It sets up the keybinds and, for MangoWM, the layer rules (blur only behind cards):
+Include the snippet for your compositor. It sets up the keybinds and, for MangoWM, the layer rules (blur only behind cards).
+`/path/to/prism` is the folder you installed from, or `/usr/share/prism` with the pacman package:
 
 | Compositor | Add to config |
 |---|---|
@@ -384,4 +513,9 @@ Run `prism-ctl --help` for the full list. The common ones:
 
 ## 📄 License
 
-GPL-3.0 License.
+Prism is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version (`GPL-3.0-or-later`). See [LICENSE](LICENSE).
+
+The bundled Pixelify Sans font (`deploy/fonts`) is under the SIL Open Font License
+(`deploy/fonts/PixelifySans-OFL.txt`).
